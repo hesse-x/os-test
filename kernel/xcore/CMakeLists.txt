@@ -8,7 +8,7 @@ add_kernel_object(xcore_obj
     SOURCES init.c trap.c sched.c ipc.c
             log.c rcu.c acpi.c ${CMAKE_SOURCE_DIR}/utils/kvformat.c
             wait_queue.c mutex.c rbtree.c random.c perf/phase.c perf/core.c perf/sample.c
-            perf/unwind.c perf/pmu.c perf/event.c
+            perf/unwind.c perf/pmu.c perf/event.c perf/counter.c
 )
 # Layer dependency graph: xcore_obj -> xcore_mem + arch_x64.
 # PUBLIC propagates usage requirements (include/flags) to upstream bsd/driver/kernel

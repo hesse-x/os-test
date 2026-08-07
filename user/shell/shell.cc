@@ -10,6 +10,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <xos/perf.h>
+#include <xos/syscall_nums.h>
 
 #include <dirent.h>
 #include <sys/ioctl.h>
@@ -224,6 +226,8 @@ extern "C" int main(int argc, char **argv, char **envp) {
     return 2;
   }
   // VFS is in-kernel, no need to wait for fs_driver
+  (void)syscall(SYS_PERF, XOS_PERF_COUNTER_MARK, XOS_PERF_GUI_SHELL_READY, 0, 0,
+                0, 0);
   printf("shell: ready\n");
 
   // Become session leader and set controlling terminal (the forkpty child

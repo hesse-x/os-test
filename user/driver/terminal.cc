@@ -27,6 +27,8 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#include <xos/perf.h>
+#include <xos/syscall_nums.h>
 
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
@@ -1410,6 +1412,9 @@ static void render_now(void) {
               "render: initial eglSwapBuffers failed: EGL error 0x%04x\n",
               (unsigned int)eglGetError());
       app.closed = true;
+    } else {
+      (void)syscall(SYS_PERF, XOS_PERF_COUNTER_MARK,
+                    XOS_PERF_GUI_TERMINAL_FIRST_BUFFER, 0, 0, 0, 0);
     }
     return;
   }
@@ -1599,6 +1604,10 @@ static const struct xdg_wm_base_listener wm_base_listener = {
 static void xsurface_configure(void *data, struct xdg_surface *xsurface,
                                uint32_t serial) {
   xdg_surface_ack_configure(xsurface, serial);
+  static bool perf_marked;
+  if (!perf_marked && syscall(SYS_PERF, XOS_PERF_COUNTER_MARK,
+                              XOS_PERF_GUI_TERMINAL_XDG_READY, 0, 0, 0, 0) == 0)
+    perf_marked = true;
   app.configured = true;
   if (app.egl_window)
     wl_egl_window_resize(app.egl_window, app.width, app.height, 0, 0);

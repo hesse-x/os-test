@@ -22,7 +22,9 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #include <xos/ipc.h>
+#include <xos/perf.h>
 #include <xos/syscall_ext.h>
+#include <xos/syscall_nums.h>
 #include <xos/unistd_ext.h>
 
 static int spawn_process(const char *path, char *const argv[],
@@ -247,6 +249,8 @@ int main(int argc, char **argv, char **envp) {
     printf("init: mouse event1 not ready after 2.5s, "
            "continuing without pointer\n");
   }
+  (void)syscall(SYS_PERF, XOS_PERF_COUNTER_MARK, XOS_PERF_GUI_START, 0, 0, 0,
+                0);
   printf("init: spawning tinywl\n");
   int tinywl_pid = start_tinywl();
   if (tinywl_pid < 0) {

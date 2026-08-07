@@ -13,6 +13,18 @@
 
 static struct blk_stats stats;
 
+static unsigned blk_size_bucket(uint32_t count) {
+  if (count == 1)
+    return 0;
+  if (count < 8)
+    return 1;
+  if (count == 8)
+    return 2;
+  if (count < AHCI_MAX_SECTORS)
+    return 3;
+  return 4;
+}
+
 static int blk_validate(uint32_t lba, uint32_t count, const void *buf) {
   if (!buf)
     return -EFAULT;
@@ -26,11 +38,15 @@ static int blk_validate(uint32_t lba, uint32_t count, const void *buf) {
 
 int blk_read(uint32_t lba, uint32_t count, void *buf) {
   int valid = blk_validate(lba, count, buf);
-  if (valid)
+  if (valid) {
+    __atomic_fetch_add(&stats.validation_rejected, 1, __ATOMIC_RELAXED);
     return valid;
+  }
   __atomic_fetch_add(&stats.submitted, 1, __ATOMIC_RELAXED);
   __atomic_fetch_add(&stats.read_cmds, 1, __ATOMIC_RELAXED);
   __atomic_fetch_add(&stats.read_sectors, count, __ATOMIC_RELAXED);
+  __atomic_fetch_add(&stats.read_size_buckets[blk_size_bucket(count)], 1,
+                     __ATOMIC_RELAXED);
   int rc = ahci_submit_sync(lba, count, buf, 0);
   __atomic_fetch_add(rc ? &stats.failed : &stats.completed, 1,
                      __ATOMIC_RELAXED);
@@ -39,11 +55,15 @@ int blk_read(uint32_t lba, uint32_t count, void *buf) {
 
 int blk_write(uint32_t lba, uint32_t count, const void *buf) {
   int valid = blk_validate(lba, count, buf);
-  if (valid)
+  if (valid) {
+    __atomic_fetch_add(&stats.validation_rejected, 1, __ATOMIC_RELAXED);
     return valid;
+  }
   __atomic_fetch_add(&stats.submitted, 1, __ATOMIC_RELAXED);
   __atomic_fetch_add(&stats.write_cmds, 1, __ATOMIC_RELAXED);
   __atomic_fetch_add(&stats.write_sectors, count, __ATOMIC_RELAXED);
+  __atomic_fetch_add(&stats.write_size_buckets[blk_size_bucket(count)], 1,
+                     __ATOMIC_RELAXED);
   int rc = ahci_submit_sync(lba, count, (void *)buf, 1);
   __atomic_fetch_add(rc ? &stats.failed : &stats.completed, 1,
                      __ATOMIC_RELAXED);
@@ -58,10 +78,18 @@ void blk_get_stats(struct blk_stats *out) {
   out->submitted = __atomic_load_n(&stats.submitted, __ATOMIC_RELAXED);
   out->completed = __atomic_load_n(&stats.completed, __ATOMIC_RELAXED);
   out->failed = __atomic_load_n(&stats.failed, __ATOMIC_RELAXED);
+  out->validation_rejected =
+      __atomic_load_n(&stats.validation_rejected, __ATOMIC_RELAXED);
   out->read_cmds = __atomic_load_n(&stats.read_cmds, __ATOMIC_RELAXED);
   out->write_cmds = __atomic_load_n(&stats.write_cmds, __ATOMIC_RELAXED);
   out->read_sectors = __atomic_load_n(&stats.read_sectors, __ATOMIC_RELAXED);
   out->write_sectors = __atomic_load_n(&stats.write_sectors, __ATOMIC_RELAXED);
+  for (unsigned i = 0; i < 5; i++) {
+    out->read_size_buckets[i] =
+        __atomic_load_n(&stats.read_size_buckets[i], __ATOMIC_RELAXED);
+    out->write_size_buckets[i] =
+        __atomic_load_n(&stats.write_size_buckets[i], __ATOMIC_RELAXED);
+  }
 }
 
 #include "kernel/bsd/devtmpfs.h"

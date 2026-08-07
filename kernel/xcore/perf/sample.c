@@ -46,6 +46,8 @@ static struct perf_sample_record sample_snapshots[2][PERF_CHAIN_RECORDS_MAX];
 static uint64_t sample_snapshot_hits[2];
 static uint64_t sample_lost_count;
 static uint64_t sample_truncated_count;
+static uint32_t sample_active_writers[MAX_CPUS];
+static bool sample_accepting = true;
 
 static uint64_t chain_hash(const uint64_t *frames, uint8_t depth,
                            uint8_t source) {
@@ -61,6 +63,13 @@ void perf_record_callchain(unsigned cpu, const uint64_t *frames, uint8_t depth,
                            uint8_t source, uint8_t unwind_stop) {
   if (cpu >= MAX_CPUS || depth == 0)
     return;
+  if (!__atomic_load_n(&sample_accepting, __ATOMIC_ACQUIRE))
+    return;
+  __atomic_fetch_add(&sample_active_writers[cpu], 1U, __ATOMIC_ACQUIRE);
+  if (!__atomic_load_n(&sample_accepting, __ATOMIC_ACQUIRE)) {
+    __atomic_fetch_sub(&sample_active_writers[cpu], 1U, __ATOMIC_RELEASE);
+    return;
+  }
   if (depth > PERF_CALLCHAIN_MAX_DEPTH)
     depth = PERF_CALLCHAIN_MAX_DEPTH;
   uint64_t hash = chain_hash(frames, depth, source);
@@ -75,6 +84,7 @@ void perf_record_callchain(unsigned cpu, const uint64_t *frames, uint8_t depth,
         equal = equal && slot->frames[i] == frames[i];
       if (equal) {
         __atomic_fetch_add(&slot->count, 1U, __ATOMIC_RELAXED);
+        __atomic_fetch_sub(&sample_active_writers[cpu], 1U, __ATOMIC_RELEASE);
         return;
       }
     }
@@ -89,9 +99,11 @@ void perf_record_callchain(unsigned cpu, const uint64_t *frames, uint8_t depth,
     __atomic_store_n(&slot->hash, hash, __ATOMIC_RELEASE);
     if (unwind_stop != XOS_PERF_UNWIND_COMPLETE)
       __atomic_fetch_add(&sample_truncated_count, 1U, __ATOMIC_RELAXED);
+    __atomic_fetch_sub(&sample_active_writers[cpu], 1U, __ATOMIC_RELEASE);
     return;
   }
   __atomic_fetch_add(&sample_lost_count, 1U, __ATOMIC_RELAXED);
+  __atomic_fetch_sub(&sample_active_writers[cpu], 1U, __ATOMIC_RELEASE);
 }
 
 static void write_record(struct perf_sample_record *record, uint64_t payload,
@@ -151,6 +163,13 @@ uint64_t perf_sample_hits(unsigned bank) {
 
 uint64_t perf_sample_truncated(void) {
   return __atomic_load_n(&sample_truncated_count, __ATOMIC_RELAXED);
+}
+
+void perf_sample_stop(void) {
+  __atomic_store_n(&sample_accepting, false, __ATOMIC_RELEASE);
+  for (unsigned cpu = 0; cpu < MAX_CPUS; cpu++)
+    while (__atomic_load_n(&sample_active_writers[cpu], __ATOMIC_ACQUIRE))
+      __asm__ volatile("pause");
 }
 
 #endif

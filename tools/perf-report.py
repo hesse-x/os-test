@@ -28,6 +28,66 @@ SOURCE_NAMES = {1: "lapic_timer", 2: "pmu_nmi"}
 IPC_STAGES = {1: "send", 2: "receive", 3: "reply", 4: "wake",
               5: "enqueue", 6: "dequeue"}
 IO_STAGES = {1: "submit", 2: "complete", 3: "wake"}
+IO_STAGES[4] = "resume"
+
+COUNTER_NAMES = {
+    1: "block.submitted", 2: "block.completed", 3: "block.failed",
+    4: "block.validation_rejected", 5: "block.read_commands",
+    6: "block.write_commands", 7: "block.read_sectors",
+    8: "block.write_sectors", 9: "block.read_bucket_1",
+    10: "block.read_bucket_2_7", 11: "block.read_bucket_8",
+    12: "block.read_bucket_9_127", 13: "block.read_bucket_128",
+    14: "block.write_bucket_1", 15: "block.write_bucket_2_7",
+    16: "block.write_bucket_8", 17: "block.write_bucket_9_127",
+    18: "block.write_bucket_128", 32: "fat.cache_hits",
+    33: "fat.cache_misses", 34: "fat.cache_fill_waits",
+    35: "fat.cache_io_commands", 36: "fat.cache_io_sectors",
+    37: "fat.demand_calls", 38: "fat.demand_steps",
+    39: "fat.demand_head_restarts", 40: "fat.demand_backtracks",
+    41: "fat.demand_invalid", 42: "fat.demand_mapped_sectors",
+    43: "fat.readahead_calls", 44: "fat.readahead_steps",
+    45: "fat.readahead_head_restarts", 46: "fat.readahead_backtracks",
+    47: "fat.readahead_invalid", 48: "fat.readahead_mapped_sectors",
+    64: "readahead.batches", 65: "readahead.pages",
+    66: "readahead.hits", 67: "readahead.waste",
+    68: "readahead.fragment_truncations", 69: "readahead.fallbacks",
+    80: "ahci.sync_submitted", 81: "ahci.async_submitted",
+    82: "ahci.completed", 83: "ahci.errors", 84: "ahci.sync_wakes",
+    85: "ahci.async_wakes", 86: "ahci.early_completes",
+    87: "ahci.cross_cpu_wakes", 88: "ahci.queue_full",
+    89: "ahci.invalid_timing", 90: "ahci.queue_wait_count",
+    91: "ahci.queue_wait_cycles", 92: "ahci.queue_wait_max",
+    93: "ahci.service_count", 94: "ahci.service_cycles",
+    95: "ahci.service_max", 96: "ahci.queue_depth_cycles",
+    97: "ahci.queue_depth", 98: "ahci.queue_depth_max",
+}
+MARK_NAMES = {1: "gui_start", 2: "compositor_ready",
+              3: "terminal_xdg_ready", 4: "terminal_first_buffer",
+              5: "shell_ready", 6: "final"}
+WAIT_NAMES = ("none", "recv", "req_reply", "child", "msg_reply", "poll",
+              "futex", "vfork", "pause", "sleep", "block_io", "mutex")
+
+
+def counter_name(ident):
+    if ident in COUNTER_NAMES:
+        return COUNTER_NAMES[ident]
+    if 160 <= ident < 172:
+        return f"wake.valid_{WAIT_NAMES[ident - 160]}"
+    if 172 <= ident < 184:
+        return f"wake.noop_{WAIT_NAMES[ident - 172]}"
+    if ident == 184:
+        return "wake.cross_cpu_ipi"
+    if ident == 185:
+        return "wake.spurious_cancels"
+    if 200 <= ident < 216:
+        return f"ahci.queue_wait_hist_{ident - 200}"
+    if 216 <= ident < 232:
+        return f"ahci.service_hist_{ident - 216}"
+    if 128 <= ident < 144:
+        cpu, field = divmod(ident - 128, 4)
+        return f"event.cpu{cpu}." + ("capacity", "attempted", "committed",
+                                     "high_water")[field]
+    return f"unknown.{ident}"
 
 PHASE_NAMES = {
     1: "boot_to_kernel_main", 2: "early_paging", 3: "early_gdt",
@@ -86,7 +146,7 @@ def parse_raw(path):
     if len(data) < HEADER_SIZE + FOOTER_SIZE or data[:8] != b"XOSPERF\0":
         raise PerfFormatError("invalid or truncated raw header")
     major, minor = u16(data, 8), u16(data, 10)
-    if major != 1 or minor not in (0, 1, 2):
+    if major != 1 or minor not in (0, 1, 2, 3):
         raise PerfFormatError(f"unsupported raw ABI version {major}.{minor}")
     if data[12] != 1 or data[13] != 64 or u16(data, 14) != HEADER_SIZE:
         raise PerfFormatError("unsupported endian, pointer width, or header size")
@@ -115,7 +175,7 @@ def parse_raw(path):
     boot_tsc, tsc_freq, end_tsc = u64(data, 40), u64(data, 48), u64(data, 64)
     if not tsc_freq or end_tsc < boot_tsc:
         raise PerfFormatError("invalid session timestamps")
-    records, events, chains = [], [], []
+    records, events, chains, counter_build = [], [], [], {}
     previous_tsc = 0
     sequence = 0
     while sequence < record_count:
@@ -160,6 +220,31 @@ def parse_raw(path):
             chains.append({"cpu": cpu, "source": aux, "count": value,
                            "hash": first, "frames": frames,
                            "unwind_stop": stop})
+        elif kind == 9:
+            if minor < 3 or aux == 0 or aux > 6 or ident not in MARK_NAMES or aux in counter_build:
+                raise PerfFormatError(f"invalid counter begin at raw offset {raw_offset}")
+            if first < boot_tsc or first > end_tsc:
+                raise PerfFormatError(f"invalid counter timestamp at raw offset {raw_offset}")
+            counter_build[aux] = {"id": aux, "mark_id": ident,
+                                  "name": MARK_NAMES[ident], "begin_tsc": first,
+                                  "expected": value, "values": {},
+                                  "availability": None, "end_tsc": None}
+        elif kind == 10:
+            snapshot = counter_build.get(aux)
+            if minor < 3 or not snapshot or ident != 0 or value != 0 or snapshot["availability"] is not None:
+                raise PerfFormatError(f"invalid counter availability at raw offset {raw_offset}")
+            snapshot["availability"] = first
+        elif kind == 11:
+            snapshot = counter_build.get(aux)
+            if minor < 3 or not snapshot or value != 0 or snapshot["end_tsc"] is not None or ident in snapshot["values"]:
+                raise PerfFormatError(f"invalid counter value at raw offset {raw_offset}")
+            snapshot["values"][ident] = first
+        elif kind == 12:
+            snapshot = counter_build.get(aux)
+            if (minor < 3 or not snapshot or ident != snapshot["mark_id"] or value != 0 or
+                    snapshot["end_tsc"] is not None or first < snapshot["begin_tsc"] or first > end_tsc):
+                raise PerfFormatError(f"invalid counter end at raw offset {raw_offset}")
+            snapshot["end_tsc"] = first
         else:
             raise PerfFormatError(f"unknown record type {kind} at raw offset {raw_offset}")
         sequence += 1
@@ -171,6 +256,22 @@ def parse_raw(path):
                 if minor >= 2 else None)
     if minor >= 2 and build_id == "0" * 40:
         raise PerfFormatError("raw file has an empty kernel build ID")
+    counters = []
+    for snapshot_id in sorted(counter_build):
+        item = counter_build[snapshot_id]
+        if item["availability"] is None or item["end_tsc"] is None:
+            raise PerfFormatError(f"counter snapshot {snapshot_id} is incomplete")
+        if len(item["values"]) != item["expected"]:
+            raise PerfFormatError(f"counter snapshot {snapshot_id} value count mismatch")
+        if item["mark_id"] != snapshot_id:
+            raise PerfFormatError(f"counter snapshot {snapshot_id} is out of order")
+        item["values"] = {
+            counter_name(ident): counter
+            for ident, counter in item["values"].items()
+        }
+        counters.append(item)
+    if minor >= 3 and bool(u32(data, 16) & 1) and (not counters or counters[-1]["mark_id"] != 6):
+        raise PerfFormatError("final counter snapshot is missing")
     return {
         "abi_version": 1, "raw_minor": minor,
         "complete": bool(u32(data, 16) & 1), "boot_tsc": boot_tsc,
@@ -179,6 +280,7 @@ def parse_raw(path):
         "records": records, "events": events, "chains": chains,
         "lost_samples": u64(footer, 32) if minor >= 1 else 0,
         "sample_hits": sample_hits, "kernel_build_id": build_id,
+        "counter_snapshots": counters,
     }
 
 
@@ -475,6 +577,84 @@ def write_sample_views(chains, output_dir, source):
         json.dumps(profile, separators=(",", ":")) + "\n", encoding="utf-8")
 
 
+def analyze_counters(snapshot):
+    snapshots = snapshot.get("counter_snapshots", [])
+    if not snapshots:
+        return {"final": {}}, [], [], {"cpus": [], "threshold_percent": 80}
+
+    milestones = []
+    for item in snapshots:
+        milestones.append({"id": item["mark_id"], "name": item["name"],
+                           "begin_tsc": item["begin_tsc"],
+                           "end_tsc": item["end_tsc"],
+                           "timestamp_ms": (item["begin_tsc"] - snapshot["boot_tsc"]) *
+                                           1000.0 / snapshot["tsc_freq"],
+                           "availability": item["availability"]})
+
+    deltas = []
+    gui = [item for item in snapshots if item["mark_id"] <= 5]
+    for left, right in zip(gui, gui[1:]):
+        row = {"from": left["name"], "to": right["name"],
+               "duration_ms": (right["begin_tsc"] - left["begin_tsc"]) *
+                              1000.0 / snapshot["tsc_freq"]}
+        groups = defaultdict(dict)
+        for name, end_value in right["values"].items():
+            if name.startswith("unknown.") or name == "ahci.queue_depth":
+                continue
+            if name not in left["values"]:
+                continue
+            start_value = left["values"][name]
+            if end_value < start_value:
+                raise PerfFormatError(f"counter rollback for {name} between "
+                                      f"{left['name']} and {right['name']}")
+            group, field = name.split(".", 1)
+            groups[group][field] = end_value - start_value
+        block = groups.get("block", {})
+        for direction in ("read", "write"):
+            commands = block.get(f"{direction}_commands", 0)
+            sectors = block.get(f"{direction}_sectors", 0)
+            block[f"{direction}_sectors_per_command"] = (
+                sectors / commands if commands else None)
+        row.update(groups)
+        deltas.append(row)
+
+    final_item = next((item for item in reversed(snapshots)
+                       if item["mark_id"] == 6), snapshots[-1])
+    final = defaultdict(dict)
+    for name, value in final_item["values"].items():
+        if name.startswith("unknown."):
+            continue
+        group, field = name.split(".", 1)
+        final[group][field] = value
+    block = final.get("block", {})
+    accepted = block.get("submitted", 0)
+    terminal = block.get("completed", 0) + block.get("failed", 0)
+    if terminal > accepted:
+        raise PerfFormatError("final block counters exceed accepted requests")
+    block["outstanding"] = accepted - terminal
+    for direction in ("read", "write"):
+        commands = block.get(f"{direction}_commands", 0)
+        sectors = block.get(f"{direction}_sectors", 0)
+        block[f"{direction}_sectors_per_command"] = (
+            sectors / commands if commands else None)
+
+    cpus = []
+    event = final.get("event", {})
+    for cpu in range(4):
+        capacity = event.get(f"cpu{cpu}.capacity")
+        if capacity is None:
+            continue
+        high = event.get(f"cpu{cpu}.high_water", 0)
+        cpus.append({"cpu": cpu, "capacity": capacity,
+                     "attempted": event.get(f"cpu{cpu}.attempted", 0),
+                     "committed": event.get(f"cpu{cpu}.committed", 0),
+                     "high_water": high,
+                     "utilization_percent": high * 100.0 / capacity if capacity else 0,
+                     "degraded": bool(capacity and high * 100 >= capacity * 80)})
+    return {"final": dict(final)}, milestones, deltas, {
+        "cpus": cpus, "threshold_percent": 80}
+
+
 def write_outputs(snapshot, phases, tests, errors, trace, hotspots, chains,
                   scheduling, irqs, causal, output_dir, metadata, kernel_elf,
                   build_id):
@@ -499,14 +679,20 @@ def write_outputs(snapshot, phases, tests, errors, trace, hotspots, chains,
                 "handler_cycles": metadata.get("handler_cycles", 0) if metadata else 0,
                 "truncated_callchains": metadata.get("truncated_callchains", 0) if metadata else 0,
                 "pmu_active_mask": metadata.get("pmu_active_mask", 0) if metadata else 0}
-    summary = {"format": "xos-perf-summary-v2", "complete": snapshot["complete"],
+    counters, milestones, phase_deltas, event_buffers = analyze_counters(snapshot)
+    trace_valid = ((metadata.get("trace_lost", 0) if metadata else 0) == 0 and
+                   snapshot["lost_samples"] == 0 and
+                   not any(cpu["degraded"] for cpu in event_buffers["cpus"]))
+    summary = {"format": "xos-perf-summary-v3", "complete": snapshot["complete"],
                "end_reason": snapshot["end_reason"], "duration_ms": duration_ms,
                "record_count": snapshot["record_count"], "trace_errors": errors,
                "trace_lost": metadata.get("trace_lost", 0) if metadata else 0,
                "phases": phases, "tests": tests, "sampling": sampling,
                "kernel_symbols": {"elf": str(kernel_elf), "build_id": build_id},
                "top_kernel_hotspots": hotspots, "scheduling": scheduling,
-               "irqs": irqs, "causal_chains": causal}
+               "irqs": irqs, "causal_chains": causal,
+               "event_buffers": event_buffers, "counters": counters,
+               "gui_milestones": milestones, "gui_phase_deltas": phase_deltas}
     if metadata:
         for field in ("abi_version", "boot_tsc", "tsc_freq", "record_count"):
             if field in metadata and metadata[field] != snapshot.get(field):
@@ -524,13 +710,30 @@ def write_outputs(snapshot, phases, tests, errors, trace, hotspots, chains,
                  for x in hotspots[:30])
     if not hotspots:
         lines.append("  (none)")
-    lines.extend(["", "CPU scheduling:"])
+    lines.extend(["", "CPU scheduling:" if trace_valid else
+                  "CPU scheduling: INVALID (trace loss)"])
     lines.extend(f"  cpu{x['cpu']}: busy={x['busy_ms']:.3f}ms idle={x['idle_ms']:.3f}ms "
                  f"util={x['utilization_percent']:.1f}% switches={x['switches']}"
                  for x in scheduling["cpus"])
     wake = scheduling["wake_latency"]
-    lines.append(f"  wake latency: n={wake['count']} p50={wake['p50_ms']:.3f}ms "
-                 f"p95={wake['p95_ms']:.3f}ms max={wake['max_ms']:.3f}ms")
+    if trace_valid:
+        lines.append(f"  wake latency: n={wake['count']} p50={wake['p50_ms']:.3f}ms "
+                     f"p95={wake['p95_ms']:.3f}ms max={wake['max_ms']:.3f}ms")
+    else:
+        lines.append("  wake latency: INVALID")
+    if phase_deltas:
+        lines.extend(["", "GUI milestone deltas:"])
+        for delta in phase_deltas:
+            block, fat, ra, ahci = (delta.get("block", {}), delta.get("fat", {}),
+                                    delta.get("readahead", {}), delta.get("ahci", {}))
+            lines.append(
+                f"  {delta['from']} -> {delta['to']}: {delta['duration_ms']:.3f}ms "
+                f"read={block.get('read_sectors', 0)}sec/{block.get('read_commands', 0)}cmd "
+                f"fat_steps={fat.get('demand_steps', 0) + fat.get('readahead_steps', 0)} "
+                f"restarts={fat.get('demand_head_restarts', 0) + fat.get('readahead_head_restarts', 0)} "
+                f"ra_hit/waste={ra.get('hits', 0)}/{ra.get('waste', 0)} "
+                f"queue/service={ahci.get('queue_wait_cycles', 0)}/"
+                f"{ahci.get('service_cycles', 0)}cy wake_xcpu={ahci.get('cross_cpu_wakes', 0)}")
     lines.extend(["", "Business IRQ time:"])
     lines.extend(f"  cpu{x['cpu']} vector=0x{x['vector']:02x} owner={x['owner']} "
                  f"count={x['count']} total={x['total_ms']:.3f}ms "

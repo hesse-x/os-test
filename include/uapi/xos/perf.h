@@ -11,7 +11,7 @@
 
 #define XOS_PERF_ABI_VERSION 1U
 #define XOS_PERF_RAW_MAJOR 1U
-#define XOS_PERF_RAW_MINOR 2U
+#define XOS_PERF_RAW_MINOR 3U
 #define XOS_PERF_MAX_READ (128U * 1024U)
 #define XOS_PERF_FILE_HEADER_SIZE 88U
 #define XOS_PERF_EARLY_RECORD_SIZE 24U
@@ -26,6 +26,7 @@ enum xos_perf_cmd {
   XOS_PERF_GET_METADATA = 5,
   XOS_PERF_REQUEST_EXIT = 6,
   XOS_PERF_CHECKPOINT = 7,
+  XOS_PERF_COUNTER_MARK = 8,
 };
 
 enum xos_perf_state {
@@ -53,6 +54,19 @@ enum xos_perf_event_type {
   XOS_PERF_TRACE_EVENT = 6,
   XOS_PERF_CALLCHAIN = 7,
   XOS_PERF_CALLCHAIN_FRAME = 8,
+  XOS_PERF_COUNTER_BEGIN = 9,
+  XOS_PERF_COUNTER_AVAILABILITY = 10,
+  XOS_PERF_COUNTER_VALUE = 11,
+  XOS_PERF_COUNTER_END = 12,
+};
+
+enum xos_perf_counter_mark {
+  XOS_PERF_GUI_START = 1,
+  XOS_PERF_GUI_COMPOSITOR_READY = 2,
+  XOS_PERF_GUI_TERMINAL_XDG_READY = 3,
+  XOS_PERF_GUI_TERMINAL_FIRST_BUFFER = 4,
+  XOS_PERF_GUI_SHELL_READY = 5,
+  XOS_PERF_COUNTER_FINAL = 6,
 };
 
 enum xos_perf_sample_source {
@@ -97,6 +111,7 @@ enum xos_perf_io_stage {
   XOS_PERF_IO_SUBMIT = 1,
   XOS_PERF_IO_COMPLETE = 2,
   XOS_PERF_IO_WAKE = 3,
+  XOS_PERF_IO_RESUME = 4,
 };
 
 enum xos_perf_mark_stage {

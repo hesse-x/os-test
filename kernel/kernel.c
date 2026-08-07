@@ -19,7 +19,6 @@
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/mem/alloc.h"
 #include "kernel/xcore/perf/phase.h"
-#include "kernel/xcore/perf/phase_ids.h"
 #include "kernel/xcore/sched.h"
 #include "kernel/xcore/sparse.h"
 #include "kernel/xcore/spinlock.h"
@@ -72,6 +71,7 @@ extern kern_vaddr_t phys_to_virt(phys_addr_t phys);
 
 void kernel_main(boot_info *bi) {
 #ifdef PERF
+#include "kernel/xcore/perf/phase_ids.h"
   PERF_PHASE_END(PERF_PHASE_BOOT_TO_KERNEL_MAIN);
 #endif
   // Layered initialization
@@ -102,6 +102,7 @@ void kernel_main(boot_info *bi) {
   PERF_PHASE_BEGIN(PERF_PHASE_BSD);
   bsd_init();
   PERF_PHASE_END(PERF_PHASE_BSD);
+  kernel_perf_counter_init();
 
   printk(LOG_INFO, "kernel_main: all subsystems initialized\n");
 

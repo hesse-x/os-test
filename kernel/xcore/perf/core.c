@@ -13,6 +13,7 @@
 #include "arch/x64/apic.h"
 #include "arch/x64/smp.h"
 #include "arch/x64/utils.h"
+#include "kernel/xcore/perf/counter.h"
 #include "kernel/xcore/perf/event.h"
 #include "kernel/xcore/perf/phase.h"
 #include "kernel/xcore/perf/pmu.h"
@@ -37,9 +38,11 @@ struct perf_snapshot {
   uint32_t early_size;
   uint32_t event_size;
   uint32_t sample_size;
+  uint32_t counter_size;
   uint32_t end_reason;
   uint32_t sample_bank;
   uint32_t event_bank;
+  uint32_t counter_bank;
   uint64_t lost_samples;
   uint64_t sample_hits;
   bool complete;
@@ -51,7 +54,7 @@ static uint8_t perf_watchdog_requested;
 
 static uint64_t snapshot_records_size(const struct perf_snapshot *snapshot) {
   return (uint64_t)snapshot->early_size + snapshot->event_size +
-         snapshot->sample_size;
+         snapshot->counter_size + snapshot->sample_size;
 }
 
 static void put16(uint8_t *p, uint16_t value) {
@@ -115,6 +118,8 @@ static void build_footer(uint8_t footer[PERF_FOOTER_SIZE],
   uint32_t crc = crc32_update(0, perf_early_data(), snapshot->early_size);
   crc = crc32_update(crc, perf_event_data(snapshot->event_bank),
                      snapshot->event_size);
+  crc = crc32_update(crc, perf_counter_data(snapshot->counter_bank),
+                     snapshot->counter_size);
   crc = crc32_update(crc, perf_sample_data(snapshot->sample_bank),
                      snapshot->sample_size);
   put32(footer + 48, crc);
@@ -129,12 +134,21 @@ static void capture_snapshot(uint32_t reason, bool complete) {
   unsigned event_bank = perf_snapshot.event_bank ^ 1U;
   uint32_t first_event_sequence =
       perf_snapshot.early_size / XOS_PERF_EARLY_RECORD_SIZE;
+  bool event_valid = true;
   perf_snapshot.event_size =
-      perf_event_capture(event_bank, first_event_sequence);
+      perf_event_capture(event_bank, first_event_sequence, &event_valid);
   perf_snapshot.event_bank = event_bank;
+  unsigned counter_bank = perf_snapshot.counter_bank ^ 1U;
+  uint32_t first_counter_sequence =
+      (perf_snapshot.early_size + perf_snapshot.event_size) /
+      XOS_PERF_EARLY_RECORD_SIZE;
+  perf_snapshot.counter_size =
+      perf_counter_capture(counter_bank, first_counter_sequence);
+  perf_snapshot.counter_bank = counter_bank;
   unsigned bank = perf_snapshot.sample_bank ^ 1U;
   uint32_t first_sequence =
-      (perf_snapshot.early_size + perf_snapshot.event_size) /
+      (perf_snapshot.early_size + perf_snapshot.event_size +
+       perf_snapshot.counter_size) /
       XOS_PERF_EARLY_RECORD_SIZE;
   perf_snapshot.sample_size = perf_sample_capture(bank, first_sequence);
   perf_snapshot.sample_bank = bank;
@@ -142,7 +156,10 @@ static void capture_snapshot(uint32_t reason, bool complete) {
   perf_snapshot.sample_hits = perf_sample_hits(bank);
   perf_snapshot.end_timestamp = rdtsc64();
   perf_snapshot.end_reason = reason;
-  perf_snapshot.complete = complete;
+  perf_snapshot.complete =
+      complete && event_valid && perf_event_lost() == 0 &&
+      perf_snapshot.lost_samples == 0 && perf_counter_is_complete() &&
+      snapshot_records_size(&perf_snapshot) <= 128ULL * 1024ULL * 1024ULL;
   perf_snapshot.available = true;
 }
 
@@ -157,7 +174,10 @@ int perf_freeze(uint32_t reason, bool complete) {
                                    false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
     return expected == XOS_PERF_FROZEN ? 0 : -1;
   spin_lock(&perf_snapshot_lock);
+  perf_event_stop();
+  perf_sample_stop();
   perf_pmu_stop_cpu();
+  perf_counter_capture_final();
   capture_snapshot(reason, complete);
   spin_unlock(&perf_snapshot_lock);
   __atomic_store_n(&perf_state, XOS_PERF_FROZEN, __ATOMIC_RELEASE);
@@ -274,8 +294,14 @@ size_t perf_raw_read(uint64_t offset, void *buffer, size_t length) {
     } else if (position < PERF_HEADER_SIZE + records_size) {
       uint64_t sample_offset = position - PERF_HEADER_SIZE -
                                snapshot.early_size - snapshot.event_size;
-      source = perf_sample_data(snapshot.sample_bank) + sample_offset;
-      available = (size_t)(snapshot.sample_size - sample_offset);
+      if (sample_offset < snapshot.counter_size) {
+        source = perf_counter_data(snapshot.counter_bank) + sample_offset;
+        available = (size_t)(snapshot.counter_size - sample_offset);
+      } else {
+        sample_offset -= snapshot.counter_size;
+        source = perf_sample_data(snapshot.sample_bank) + sample_offset;
+        available = (size_t)(snapshot.sample_size - sample_offset);
+      }
     } else {
       uint64_t footer_offset = position - PERF_HEADER_SIZE - records_size;
       source = footer + footer_offset;

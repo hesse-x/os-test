@@ -13,6 +13,25 @@
 #include "kernel/bsd/mount.h"
 
 struct inode;
+
+enum fat32_walk_source {
+  FAT32_WALK_DEMAND = 0,
+  FAT32_WALK_READAHEAD = 1,
+};
+
+struct fat32_stats {
+  uint64_t cache_hits;
+  uint64_t cache_misses;
+  uint64_t cache_fill_waits;
+  uint64_t cache_io_commands;
+  uint64_t cache_io_sectors;
+  uint64_t walk_calls[2];
+  uint64_t walk_steps[2];
+  uint64_t walk_head_restarts[2];
+  uint64_t walk_backtracks[2];
+  uint64_t walk_invalid[2];
+  uint64_t mapped_sectors[2];
+};
 /* FAT32 directory entry (32 bytes) */
 struct fat_dir_entry {
   uint8_t name[11];
@@ -41,7 +60,10 @@ uint32_t fat32_walk_chain(uint32_t start_cluster, uint64_t page_index);
 /* Walk the chain to the cluster at cluster_index, resuming from ip->walk_cursor
  * when possible (forward-only). Advances the cursor; returns the cluster or an
  * EOF marker (<2 / >=0x0FFFFFF8). */
-uint32_t fat32_walk_chain_cached(struct inode *ip, uint64_t cluster_index);
+uint32_t fat32_walk_chain_cached(struct inode *ip, uint64_t cluster_index,
+                                 enum fat32_walk_source source);
+void fat32_get_stats(struct fat32_stats *out);
+void fat32_account_mapped_sector(enum fat32_walk_source source);
 
 /* File operations */
 int fat32_read(struct inode *ip, uint64_t offset, void *buf, size_t count);

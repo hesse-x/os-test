@@ -82,6 +82,7 @@
 #include <xos/utsname.h>
 
 #ifdef PERF
+#include "kernel/xcore/perf/counter.h"
 #include "kernel/xcore/perf/phase.h"
 #include <xos/perf.h>
 #endif // PERF
@@ -448,6 +449,11 @@ int64_t sys_perf(int64_t cmd, int64_t arg1, int64_t arg2, int64_t arg3,
     if (arg1 || arg2 || arg3 || arg4 || arg5)
       return -EINVAL;
     return perf_checkpoint() == 0 ? 0 : -EBUSY;
+  case XOS_PERF_COUNTER_MARK:
+    if (arg1 < XOS_PERF_GUI_START || arg1 > XOS_PERF_GUI_SHELL_READY || arg2 ||
+        arg3 || arg4 || arg5)
+      return -EINVAL;
+    return perf_counter_mark((uint16_t)arg1);
   default:
     return -EINVAL;
   }

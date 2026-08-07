@@ -7,13 +7,13 @@
 #ifndef XOS_KERNEL_PERF_CORE_H
 #define XOS_KERNEL_PERF_CORE_H
 
-#include <stdbool.h>
-#include <stddef.h>
 #include <stdint.h>
 
 struct xtask;
 
 #ifdef PERF
+#include <stdbool.h>
+#include <stddef.h>
 void perf_register_target(struct xtask *task);
 void perf_target_exit(struct xtask *task, int32_t status);
 int perf_freeze(uint32_t reason, bool complete);

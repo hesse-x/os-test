@@ -15,7 +15,7 @@
 #include "arch/x64/smp.h"
 #include "arch/x64/utils.h"
 
-#define PERF_EVENTS_PER_CPU 65536U
+#define PERF_EVENTS_PER_CPU 262144U
 #define PERF_EVENT_MAX (MAX_CPUS * PERF_EVENTS_PER_CPU)
 #define PERF_IRQ_VECTOR_COUNT 256U
 #define PERF_IRQ_SUMMARY_MAX (MAX_CPUS * PERF_IRQ_VECTOR_COUNT * 3U)
@@ -32,13 +32,23 @@ struct perf_event_record {
 
 _Static_assert(sizeof(struct perf_event_record) == XOS_PERF_EARLY_RECORD_SIZE,
                "trace event ABI size");
+_Static_assert(PERF_EVENT_MAX <= UINT32_MAX / XOS_PERF_EARLY_RECORD_SIZE,
+               "event capture byte size fits uint32_t");
+_Static_assert((uint64_t)(PERF_EVENT_MAX + PERF_IRQ_SUMMARY_MAX) *
+                       XOS_PERF_EARLY_RECORD_SIZE <
+                   128ULL * 1024ULL * 1024ULL,
+               "event capture fits raw file limit");
 
 static struct perf_event_record event_slots[MAX_CPUS][PERF_EVENTS_PER_CPU];
 static struct perf_event_record
     event_snapshots[2][PERF_EVENT_MAX + PERF_IRQ_SUMMARY_MAX];
 static uint32_t event_heads[MAX_CPUS];
+static uint32_t event_committed[MAX_CPUS];
+static uint32_t event_high_water[MAX_CPUS];
+static uint32_t event_active_writers[MAX_CPUS];
 static uint64_t event_lost_count;
 static uint32_t causal_cookie;
+static bool event_accepting = true;
 
 struct perf_irq_stat {
   uint64_t start;
@@ -60,12 +70,24 @@ uint32_t perf_trace_next_cookie(void) {
 
 static void emit_timed(uint8_t type, uint8_t subtype, uint32_t value) {
   unsigned cpu = (unsigned)get_cpu_local()->cpu_id;
-  if (cpu >= MAX_CPUS)
+  if (cpu >= MAX_CPUS || !__atomic_load_n(&event_accepting, __ATOMIC_ACQUIRE))
     return;
+  __atomic_fetch_add(&event_active_writers[cpu], 1U, __ATOMIC_ACQUIRE);
+  if (!__atomic_load_n(&event_accepting, __ATOMIC_ACQUIRE)) {
+    __atomic_fetch_sub(&event_active_writers[cpu], 1U, __ATOMIC_RELEASE);
+    return;
+  }
   uint32_t slot = __atomic_fetch_add(&event_heads[cpu], 1U, __ATOMIC_RELAXED);
   if (slot >= PERF_EVENTS_PER_CPU) {
     __atomic_fetch_add(&event_lost_count, 1U, __ATOMIC_RELAXED);
+    __atomic_fetch_sub(&event_active_writers[cpu], 1U, __ATOMIC_RELEASE);
     return;
+  }
+  uint32_t high = slot + 1U;
+  uint32_t old = __atomic_load_n(&event_high_water[cpu], __ATOMIC_RELAXED);
+  while (high > old &&
+         !__atomic_compare_exchange_n(&event_high_water[cpu], &old, high, true,
+                                      __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {
   }
   struct perf_event_record *record = &event_slots[cpu][slot];
   record->timestamp = rdtsc64();
@@ -75,6 +97,8 @@ static void emit_timed(uint8_t type, uint8_t subtype, uint32_t value) {
   record->cpu = (uint8_t)cpu;
   record->value = value;
   __atomic_store_n(&record->committed_size, sizeof(*record), __ATOMIC_RELEASE);
+  __atomic_fetch_add(&event_committed[cpu], 1U, __ATOMIC_RELAXED);
+  __atomic_fetch_sub(&event_active_writers[cpu], 1U, __ATOMIC_RELEASE);
 }
 
 void perf_trace_causal(uint8_t type, uint8_t stage, uint32_t cookie) {
@@ -147,8 +171,11 @@ static void write_irq_summary(struct perf_event_record *record,
   record->committed_size = sizeof(*record);
 }
 
-uint32_t perf_event_capture(unsigned bank, uint32_t first_sequence) {
+uint32_t perf_event_capture(unsigned bank, uint32_t first_sequence,
+                            bool *valid) {
   bank &= 1U;
+  if (valid)
+    *valid = true;
   uint32_t out = 0;
   for (unsigned cpu = 0; cpu < MAX_CPUS; cpu++) {
     uint32_t limit = __atomic_load_n(&event_heads[cpu], __ATOMIC_ACQUIRE);
@@ -157,8 +184,11 @@ uint32_t perf_event_capture(unsigned bank, uint32_t first_sequence) {
     for (uint32_t i = 0; i < limit; i++) {
       struct perf_event_record *source = &event_slots[cpu][i];
       if (__atomic_load_n(&source->committed_size, __ATOMIC_ACQUIRE) !=
-          sizeof(*source))
+          sizeof(*source)) {
+        if (valid)
+          *valid = false;
         continue;
+      }
       event_snapshots[bank][out] = *source;
       event_snapshots[bank][out].sequence = first_sequence + out;
       out++;
@@ -196,6 +226,27 @@ const uint8_t *perf_event_data(unsigned bank) {
 
 uint64_t perf_event_lost(void) {
   return __atomic_load_n(&event_lost_count, __ATOMIC_RELAXED);
+}
+
+void perf_event_stop(void) {
+  __atomic_store_n(&event_accepting, false, __ATOMIC_RELEASE);
+  for (unsigned cpu = 0; cpu < MAX_CPUS; cpu++)
+    while (__atomic_load_n(&event_active_writers[cpu], __ATOMIC_ACQUIRE))
+      __asm__ volatile("pause");
+}
+
+unsigned perf_event_cpu_count(void) { return MAX_CPUS; }
+
+void perf_event_get_cpu_stats(unsigned cpu, struct perf_event_cpu_stats *out) {
+  if (!out)
+    return;
+  *out = (struct perf_event_cpu_stats){0};
+  if (cpu >= MAX_CPUS)
+    return;
+  out->capacity = PERF_EVENTS_PER_CPU;
+  out->attempted = __atomic_load_n(&event_heads[cpu], __ATOMIC_RELAXED);
+  out->committed = __atomic_load_n(&event_committed[cpu], __ATOMIC_RELAXED);
+  out->high_water = __atomic_load_n(&event_high_water[cpu], __ATOMIC_RELAXED);
 }
 
 #endif

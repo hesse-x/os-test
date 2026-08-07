@@ -99,6 +99,9 @@ typedef struct block_req {
   bool kernel_wait;
   void *kernel_buf;
   struct ahci_wait_ctx *wait;
+  uint64_t enqueue_tsc;
+  uint64_t issue_tsc;
+  int16_t submit_cpu;
   uint8_t staging[AHCI_MAX_SECTORS * 512];
 } block_req;
 
@@ -114,6 +117,59 @@ static int bq_tail = 0;                    // next slot to enqueue
 static int bq_count = 0;                   // number of queued requests
 static block_req *ahci_current_req = NULL; // in-flight request
 static uint32_t ahci_cookie_counter = 0;
+static struct ahci_stats ahci_stats;
+
+static unsigned timing_bucket(uint64_t cycles) {
+  unsigned bucket = 0;
+  while (cycles > 1 && bucket + 1 < AHCI_TIMING_BUCKETS) {
+    cycles >>= 1;
+    bucket++;
+  }
+  return bucket;
+}
+
+static void update_max(uint64_t *value, uint64_t sample) {
+  uint64_t old = __atomic_load_n(value, __ATOMIC_RELAXED);
+  while (sample > old &&
+         !__atomic_compare_exchange_n(value, &old, sample, true,
+                                      __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {
+  }
+}
+
+static uint32_t next_cookie_locked(void) {
+  ahci_cookie_counter = (ahci_cookie_counter + 1U) & 0x7fffffffU;
+  if (!ahci_cookie_counter)
+    ahci_cookie_counter = 1;
+  return ahci_cookie_counter;
+}
+
+static void queue_depth_change_locked(uint32_t new_depth, uint64_t now) {
+  uint64_t last = ahci_stats.queue_depth_last_tsc;
+  if (last && now >= last)
+    ahci_stats.queue_depth_cycles +=
+        (now - last) * (uint64_t)ahci_stats.queue_depth;
+  else if (last && now < last)
+    ahci_stats.invalid_timing++;
+  ahci_stats.queue_depth_last_tsc = now;
+  ahci_stats.queue_depth = new_depth;
+  if (new_depth > ahci_stats.queue_depth_max)
+    ahci_stats.queue_depth_max = new_depth;
+}
+
+void ahci_get_stats(struct ahci_stats *out) {
+  if (!out)
+    return;
+  const uint64_t *source = (const uint64_t *)&ahci_stats;
+  uint64_t *dest = (uint64_t *)out;
+  for (size_t i = 0; i < sizeof(*out) / sizeof(uint64_t); i++)
+    dest[i] = __atomic_load_n(&source[i], __ATOMIC_RELAXED);
+  uint64_t now = rdtsc64();
+  if (out->queue_depth_last_tsc && now >= out->queue_depth_last_tsc)
+    out->queue_depth_cycles +=
+        (now - out->queue_depth_last_tsc) * out->queue_depth;
+  else if (out->queue_depth_last_tsc && now < out->queue_depth_last_tsc)
+    out->invalid_timing++;
+}
 
 // ===================== Helpers =====================
 static inline void __iomem *port_reg(int port, uint32_t offset) {
@@ -420,6 +476,16 @@ static void ahci_irq_handler(trapframe *tf) {
 
   // Check for error (TFES = bit30)
   bool error = (pxis & (1U << 30));
+  uint64_t complete_tsc = rdtsc64();
+  if (complete_tsc >= ahci_current_req->issue_tsc) {
+    uint64_t service = complete_tsc - ahci_current_req->issue_tsc;
+    ahci_stats.service_count++;
+    ahci_stats.service_cycles += service;
+    update_max(&ahci_stats.service_max, service);
+    ahci_stats.service_hist[timing_bucket(service)]++;
+  } else {
+    ahci_stats.invalid_timing++;
+  }
 
   // For reads: copy bounce buffer data to user buffer via page-table walk
   if (ahci_current_req->dir == 0 && !error && ahci_current_req->kernel_wait) {
@@ -451,17 +517,30 @@ static void ahci_irq_handler(trapframe *tf) {
   struct ahci_wait_ctx *wait = ahci_current_req->wait;
   uint32_t perf_cookie = 0x80000000U | ahci_current_req->cookie;
   perf_trace_causal(XOS_PERF_TRACE_IO, XOS_PERF_IO_COMPLETE, perf_cookie);
+  ahci_stats.completed++;
+  if (error)
+    ahci_stats.errors++;
   ahci_current_req = NULL;
+  queue_depth_change_locked((uint32_t)(bq_count - 1), complete_tsc);
   bq_count--;
   bq_head = (bq_head + 1) % BLOCK_QUEUE_SIZE;
 
   if (kernel_wait) {
     wait->result = error ? -EIO : 0;
     __atomic_store_n(&wait->done, true, __ATOMIC_RELEASE);
-    if (wait->waiter)
+    if (wait->waiter) {
       wake_with_event(wait->waiter, WAIT_BLOCK_IO);
+      ahci_stats.sync_wakes++;
+      if (wait->waiter->assigned_cpu != (int)get_cpu_local()->cpu_id)
+        ahci_stats.cross_cpu_wakes++;
+      perf_trace_causal(XOS_PERF_TRACE_IO, XOS_PERF_IO_WAKE, perf_cookie);
+    } else {
+      ahci_stats.early_completes++;
+      perf_trace_causal(XOS_PERF_TRACE_IO, XOS_PERF_IO_RESUME, perf_cookie);
+    }
   } else {
     notify_and_wake(caller, &msg);
+    ahci_stats.async_wakes++;
     perf_trace_causal(XOS_PERF_TRACE_IO, XOS_PERF_IO_WAKE, perf_cookie);
   }
 
@@ -495,6 +574,16 @@ static inline void ahci_issue_command() {
 // context).
 
 void ahci_issue_cmd(block_req *req) {
+  req->issue_tsc = rdtsc64();
+  if (req->issue_tsc >= req->enqueue_tsc) {
+    uint64_t wait = req->issue_tsc - req->enqueue_tsc;
+    ahci_stats.queue_wait_count++;
+    ahci_stats.queue_wait_cycles += wait;
+    update_max(&ahci_stats.queue_wait_max, wait);
+    ahci_stats.queue_wait_hist[timing_bucket(wait)]++;
+  } else {
+    ahci_stats.invalid_timing++;
+  }
   uint32_t lba = req->lba;
   uint32_t chunk = req->count;
   uint8_t cmd_byte = (req->dir == 0) ? CMD_READ_DMA_EXT : CMD_WRITE_DMA_EXT;
@@ -785,6 +874,7 @@ int ahci_submit_async(uint32_t lba, void *buf, uint32_t count, uint8_t dir) {
   spin_lock_irqsave(&ahci_queue_lock, &flags);
 
   if (bq_count >= BLOCK_QUEUE_SIZE) {
+    ahci_stats.queue_full++;
     spin_unlock_irqrestore(&ahci_queue_lock, flags);
     return -EBUSY;
   }
@@ -801,16 +891,21 @@ int ahci_submit_async(uint32_t lba, void *buf, uint32_t count, uint8_t dir) {
   req->count = count;
   req->dir = dir;
   req->user_buf = buf;
-  req->cookie = ++ahci_cookie_counter;
+  req->cookie = next_cookie_locked();
   perf_trace_causal(XOS_PERF_TRACE_IO, XOS_PERF_IO_SUBMIT,
                     0x80000000U | req->cookie);
   req->result = 0;
   req->kernel_wait = false;
   req->kernel_buf = NULL;
   req->wait = NULL;
+  req->enqueue_tsc = rdtsc64();
+  req->issue_tsc = 0;
+  req->submit_cpu = (int16_t)get_cpu_local()->cpu_id;
 
   bq_tail = (bq_tail + 1) % BLOCK_QUEUE_SIZE;
+  queue_depth_change_locked((uint32_t)bq_count + 1, req->enqueue_tsc);
   bq_count++;
+  ahci_stats.async_submitted++;
 
   // Issue immediately if AHCI idle, else queue
   if (!ahci_current_req) {
@@ -835,6 +930,7 @@ int ahci_submit_sync(uint32_t lba, uint32_t count, void *buf, uint8_t dir) {
   uint64_t flags;
   spin_lock_irqsave(&ahci_queue_lock, &flags);
   if (bq_count >= BLOCK_QUEUE_SIZE) {
+    ahci_stats.queue_full++;
     spin_unlock_irqrestore(&ahci_queue_lock, flags);
     return -EBUSY;
   }
@@ -843,17 +939,22 @@ int ahci_submit_sync(uint32_t lba, uint32_t count, void *buf, uint8_t dir) {
   req->lba = lba;
   req->count = count;
   req->dir = dir;
-  req->cookie = ++ahci_cookie_counter;
-  if (!req->cookie)
-    req->cookie = ++ahci_cookie_counter;
+  req->cookie = next_cookie_locked();
   req->result = 0;
   req->kernel_wait = true;
   req->kernel_buf = buf;
   req->wait = &wait;
+  req->enqueue_tsc = rdtsc64();
+  req->issue_tsc = 0;
+  req->submit_cpu = current_task ? (int16_t)current_task->assigned_cpu : -1;
+  perf_trace_causal(XOS_PERF_TRACE_IO, XOS_PERF_IO_SUBMIT,
+                    0x80000000U | req->cookie);
   if (dir)
     __memcpy(req->staging, buf, (size_t)count * 512);
   bq_tail = (bq_tail + 1) % BLOCK_QUEUE_SIZE;
+  queue_depth_change_locked((uint32_t)bq_count + 1, req->enqueue_tsc);
   bq_count++;
+  ahci_stats.sync_submitted++;
 
   int cpu = current_task ? current_task->assigned_cpu : 0;
   if (current_task) {

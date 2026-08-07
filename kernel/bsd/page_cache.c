@@ -39,6 +39,14 @@ static struct cache_page *free_list = NULL;
 static int free_count = 0;
 
 #define RA_MAX_PAGES 16
+#define SECTORS_PER_PAGE (PAGE_SIZE / 512)
+#define PAGE_CACHE_IO_RUN_MAX SECTORS_PER_PAGE
+
+struct page_cache_io_run {
+  uint32_t lba;
+  uint16_t sectors;
+  uint16_t dst_sector;
+};
 static int ra_staging_in_use;
 static struct page_cache_stats cache_stats;
 
@@ -265,14 +273,14 @@ static void page_cache_unhash_locked(struct cache_page *cp) {
 }
 
 static bool page_sector_lba(struct inode *ip, uint64_t file_sector,
-                            uint32_t *lba) {
+                            enum fat32_walk_source source, uint32_t *lba) {
   uint32_t spc = fat32_sectors_per_cluster();
   if (!spc)
     return false;
   uint64_t cluster_index = file_sector / spc;
   if (cluster_index > UINT32_MAX)
     return false;
-  uint32_t cluster = fat32_walk_chain_cached(ip, cluster_index);
+  uint32_t cluster = fat32_walk_chain_cached(ip, cluster_index, source);
   if (cluster < 2 || cluster >= 0x0FFFFFF8)
     return false;
   uint64_t disk_lba = (uint64_t)fat32_data_start_lba() +
@@ -280,29 +288,38 @@ static bool page_sector_lba(struct inode *ip, uint64_t file_sector,
   if (disk_lba > UINT32_MAX)
     return false;
   *lba = (uint32_t)disk_lba;
+  fat32_account_mapped_sector(source);
   return true;
 }
 
-static int read_mapped_sectors(struct inode *ip, uint64_t first_file_sector,
-                               uint32_t sectors, uint8_t *dst) {
-  uint32_t done = 0;
-  while (done < sectors) {
-    uint32_t lba;
-    if (!page_sector_lba(ip, first_file_sector + done, &lba))
-      return -EIO;
-    uint32_t run = 1;
-    while (done + run < sectors && run < AHCI_MAX_SECTORS) {
-      uint32_t next;
-      if (!page_sector_lba(ip, first_file_sector + done + run, &next) ||
-          next != lba + run)
-        break;
-      run++;
+static bool append_io_run(struct page_cache_io_run *runs, uint32_t *nr_runs,
+                          uint32_t lba, uint32_t dst_sector) {
+  if (*nr_runs) {
+    struct page_cache_io_run *last = &runs[*nr_runs - 1];
+    uint64_t next_lba = (uint64_t)last->lba + last->sectors;
+    if (next_lba == lba && last->dst_sector + last->sectors == dst_sector &&
+        last->sectors < AHCI_MAX_SECTORS) {
+      last->sectors++;
+      return true;
     }
-    if (blk_read(lba, run, dst + (size_t)done * 512) != 0)
-      return -EIO;
-    done += run;
   }
-  return 0;
+  if (*nr_runs >= PAGE_CACHE_IO_RUN_MAX)
+    return false;
+  runs[*nr_runs] = (struct page_cache_io_run){
+      .lba = lba, .sectors = 1, .dst_sector = (uint16_t)dst_sector};
+  (*nr_runs)++;
+  return true;
+}
+
+static bool remember_lba(uint32_t *mapped_lbas, uint32_t *nr_mapped,
+                         uint32_t lba) {
+  for (uint32_t i = 0; i < *nr_mapped; i++)
+    if (mapped_lbas[i] == lba)
+      return false;
+  if (*nr_mapped >= RA_MAX_PAGES * SECTORS_PER_PAGE)
+    return false;
+  mapped_lbas[(*nr_mapped)++] = lba;
+  return true;
 }
 
 int page_cache_get_ra(struct inode *ip, uint64_t page_index,
@@ -412,36 +429,70 @@ int page_cache_get_ra(struct inode *ip, uint64_t page_index,
   uint8_t *io_buf = staging ? (uint8_t *)staging : pages[0]->data;
   __memset(io_buf, 0, (size_t)nr * PAGE_SIZE);
 
-  /* Speculation is admitted only while sectors remain physically adjacent.
-   * A fragmented demand page is still read completely, but suppresses its
-   * speculative tail. */
-  uint32_t admitted_pages = nr;
-  bool fragmented_demand = false;
-  uint32_t prev_lba = 0;
+  struct page_cache_io_run runs[PAGE_CACHE_IO_RUN_MAX] = {0};
+  uint32_t mapped_lbas[RA_MAX_PAGES * SECTORS_PER_PAGE];
+  uint32_t nr_mapped = 0;
+  uint32_t nr_runs = 0;
+  uint32_t admitted_pages = 1;
+  uint32_t demand_sectors =
+      sectors < SECTORS_PER_PAGE ? sectors : SECTORS_PER_PAGE;
   bool mapping_failed = false;
-  for (uint32_t s = 0; s < sectors; s++) {
+
+  /* Map every demand sector exactly once. A fragmented demand page may need
+   * one command per sector, which defines the maximum run count. */
+  for (uint32_t s = 0; s < demand_sectors; s++) {
     uint32_t lba;
-    if (!page_sector_lba(ip, byte_start / 512 + s, &lba)) {
+    if (!page_sector_lba(ip, byte_start / 512 + s, FAT32_WALK_DEMAND, &lba) ||
+        !remember_lba(mapped_lbas, &nr_mapped, lba) ||
+        !append_io_run(runs, &nr_runs, lba, s)) {
       mapping_failed = true;
-      sectors = s;
-      admitted_pages = s < 8 ? 1 : s / 8;
       break;
     }
-    if (s && lba != prev_lba + 1) {
-      if (s < 8)
-        fragmented_demand = true;
-      else {
-        admitted_pages = fragmented_demand ? 1 : s / 8;
-        sectors = admitted_pages * 8;
+  }
+
+  /* Speculative pages are admitted atomically and only while the complete
+   * physical stream remains adjacent to the demand page. */
+  if (!mapping_failed && nr_runs <= 1) {
+    for (uint32_t page = 1; page < nr; page++) {
+      uint32_t first = page * SECTORS_PER_PAGE;
+      if (first >= sectors)
+        break;
+      uint32_t page_sectors = sectors - first;
+      if (page_sectors > SECTORS_PER_PAGE)
+        page_sectors = SECTORS_PER_PAGE;
+      uint32_t saved_runs = nr_runs;
+      uint32_t saved_mapped = nr_mapped;
+      uint16_t saved_last_sectors = nr_runs ? runs[nr_runs - 1].sectors : 0;
+      bool accept = true;
+      for (uint32_t offset = 0; offset < page_sectors; offset++) {
+        uint32_t lba;
+        uint64_t expected = nr_runs ? (uint64_t)runs[nr_runs - 1].lba +
+                                          runs[nr_runs - 1].sectors
+                                    : UINT64_MAX;
+        if (!page_sector_lba(ip, byte_start / 512 + first + offset,
+                             FAT32_WALK_READAHEAD, &lba) ||
+            expected != lba || !remember_lba(mapped_lbas, &nr_mapped, lba) ||
+            !append_io_run(runs, &nr_runs, lba, first + offset)) {
+          accept = false;
+          break;
+        }
+      }
+      if (!accept) {
+        nr_runs = saved_runs;
+        nr_mapped = saved_mapped;
+        if (nr_runs)
+          runs[nr_runs - 1].sectors = saved_last_sectors;
         break;
       }
+      admitted_pages = page + 1;
     }
-    prev_lba = lba;
   }
-  if (fragmented_demand && admitted_pages > 1) {
+
+  if (mapping_failed)
     admitted_pages = 1;
-    sectors = sectors > 8 ? 8 : sectors;
-  }
+  sectors = demand_sectors;
+  if (!mapping_failed && nr_runs)
+    sectors = runs[nr_runs - 1].dst_sector + runs[nr_runs - 1].sectors;
 
   if (admitted_pages < nr) {
     __atomic_fetch_add(&cache_stats.readahead_fragment_truncations, 1,
@@ -459,10 +510,21 @@ int page_cache_get_ra(struct inode *ip, uint64_t page_index,
 
   int io_error = 0;
   if (ip->type == INODE_REGULAR || ip->type == INODE_DIR) {
-    if (mapping_failed && sectors < 8 && byte_start < ip->size)
+    if (mapping_failed && byte_start < ip->size)
       io_error = -EIO;
-    else if (sectors)
-      io_error = read_mapped_sectors(ip, byte_start / 512, sectors, io_buf);
+    else {
+      for (uint32_t i = 0; i < nr_runs; i++) {
+        struct page_cache_io_run *run = &runs[i];
+        if (!run->sectors || run->sectors > AHCI_MAX_SECTORS ||
+            (uint64_t)run->lba + run->sectors > (uint64_t)UINT32_MAX + 1 ||
+            (uint32_t)run->dst_sector + run->sectors > sectors ||
+            blk_read(run->lba, run->sectors,
+                     io_buf + (size_t)run->dst_sector * 512) != 0) {
+          io_error = -EIO;
+          break;
+        }
+      }
+    }
   }
   if (staging && !io_error) {
     for (uint32_t i = 0; i < nr; i++)
@@ -566,7 +628,7 @@ int page_cache_writeback_pages(struct cache_page **pages, int nr_pages) {
   uint64_t first_file_sector = pages[0]->page_index * (PAGE_SIZE / 512);
   for (uint32_t s = 0; s < total_sectors && rc == 0; s++) {
     uint32_t lba;
-    if (!page_sector_lba(ip, first_file_sector + s, &lba)) {
+    if (!page_sector_lba(ip, first_file_sector + s, FAT32_WALK_DEMAND, &lba)) {
       /* FAT32 only allocates clusters covering the written byte range.  The
        * final cache page therefore commonly ends before its 4 KiB boundary.
        * Missing sectors after at least one mapped sector are the allocation

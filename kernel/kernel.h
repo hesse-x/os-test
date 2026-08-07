@@ -25,6 +25,7 @@ size_t hostname_get(char *dst, size_t maxlen);
 void xcore_init(boot_info *bi);
 void driver_init(void);
 void bsd_init(void);
+void kernel_perf_counter_init(void);
 
 // /proc/version contents (procfs.md §3.3). Compiler and build tags injected at
 // build time.

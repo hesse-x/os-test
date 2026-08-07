@@ -14,10 +14,13 @@ struct blk_stats {
   uint64_t submitted;
   uint64_t completed;
   uint64_t failed;
+  uint64_t validation_rejected;
   uint64_t read_cmds;
   uint64_t write_cmds;
   uint64_t read_sectors;
   uint64_t write_sectors;
+  uint64_t read_size_buckets[5];
+  uint64_t write_size_buckets[5];
 };
 
 int blk_read(uint32_t lba, uint32_t count, void *buf);

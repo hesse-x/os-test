@@ -32,6 +32,17 @@ void sched_try_steal_task(void);
 void sched_timer_queue_insert(int cpu, xtask *proc);
 void sched_timer_queue_remove(xtask *proc);
 
+#define SCHED_WAIT_EVENT_COUNT (WAIT_MUTEX + 1)
+struct sched_wake_stats {
+  uint64_t valid[SCHED_WAIT_EVENT_COUNT];
+  uint64_t noop[SCHED_WAIT_EVENT_COUNT];
+  uint64_t cross_cpu_ipi;
+  uint64_t spurious_cancels;
+};
+void sched_get_wake_stats(struct sched_wake_stats *out);
+void sched_account_wake(wait_event event, bool valid, bool cross_cpu);
+void sched_account_spurious_cancel(void);
+
 // (frame_opt.md block 4) Stack canary + high-water-mark accounting.  Each
 // task's kernel stack gets a canary word at its bottom (lowest address);
 // schedule() verifies it on entry so an overrun into neighboring heap objects
@@ -183,8 +194,13 @@ static inline void wake_from_wait(xtask *p) {
     curr->need_resched = 1;
     int my_cpu = get_cpu_local()->cpu_id;
     if (cpu != my_cpu) {
+      sched_account_wake(perf_wait_event, true, true);
       lapic_send_reschedule(cpu);
+    } else {
+      sched_account_wake(perf_wait_event, true, false);
     }
+  } else {
+    sched_account_wake(perf_wait_event, true, false);
   }
 }
 
@@ -207,6 +223,7 @@ static inline void sched_cancel_spurious_wake(xtask *proc) {
   spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &flags);
   if (!list_empty(&proc->run_node)) {
     run_queue_pop(proc); // removes from cpu's run_queue, list_init, run_count--
+    sched_account_spurious_cancel();
   }
   proc->state = RUNNING;
   proc->wait_event = WAIT_NONE;
@@ -225,6 +242,8 @@ static inline void wake_with_event(xtask *target, wait_event expected_event) {
   spin_lock_irqsave(&cpu_locals[tcpu].scheduler_lock, &flags);
   if (target->state == BLOCKED && target->wait_event == expected_event) {
     wake_from_wait(target);
+  } else {
+    sched_account_wake(expected_event, false, false);
   }
   spin_unlock_irqrestore(&cpu_locals[tcpu].scheduler_lock, flags);
 }

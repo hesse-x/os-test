@@ -37,6 +37,8 @@
 #include <wlr/types/wlr_xdg_shell.h>
 #include <wlr/util/log.h>
 #include <xkbcommon/xkbcommon.h>
+#include <xos/perf.h>
+#include <xos/syscall_nums.h>
 
 #include "cursor.h"
 
@@ -1573,6 +1575,8 @@ int main(int argc, char *argv[]) {
   /* Set the WAYLAND_DISPLAY environment variable to our socket and run the
    * startup command if requested. */
   setenv("WAYLAND_DISPLAY", socket, true);
+  (void)syscall(SYS_PERF, XOS_PERF_COUNTER_MARK, XOS_PERF_GUI_COMPOSITOR_READY,
+                0, 0, 0, 0);
   if (startup_cmd) {
     if (fork() == 0) {
       /* No /bin/sh on this system: exec the startup binary directly. */

@@ -83,6 +83,7 @@ static uint64_t fat_sector_reads;
 static uint64_t fat1_writes;
 static uint64_t fat2_writes;
 static uint64_t fat_zero_commands;
+static struct fat32_stats fat_stats;
 static uint8_t fat_zero_region[AHCI_MAX_SECTORS * 512]
     __attribute__((aligned(4096)));
 
@@ -255,22 +256,38 @@ uint32_t fat32_walk_chain(uint32_t start_cluster, uint64_t page_index) {
 // it. Letting the most recently completed walk publish its position also keeps
 // the cursor near the active mmap fault region instead of pinning it at the
 // highest index seen.
-uint32_t fat32_walk_chain_cached(struct inode *ip, uint64_t cluster_index) {
+uint32_t fat32_walk_chain_cached(struct inode *ip, uint64_t cluster_index,
+                                 enum fat32_walk_source source) {
+  if (source != FAT32_WALK_DEMAND && source != FAT32_WALK_READAHEAD) {
+    source = FAT32_WALK_DEMAND;
+    __atomic_fetch_add(&fat_stats.walk_invalid[source], 1, __ATOMIC_RELAXED);
+  }
+  __atomic_fetch_add(&fat_stats.walk_calls[source], 1, __ATOMIC_RELAXED);
   uint64_t cur = __atomic_load_n(&ip->walk_cursor, __ATOMIC_ACQUIRE);
   uint32_t cur_idx = (uint32_t)(cur >> 32);
   uint32_t c = (uint32_t)(cur & 0xFFFFFFFF);
   if (c < 2 || c >= 0x0FFFFFF8 || cur_idx > cluster_index) {
     // Cursor unusable, holds an EOF marker, or target is behind it — restart at
     // the chain head.
+    __atomic_fetch_add(&fat_stats.walk_head_restarts[source], 1,
+                       __ATOMIC_RELAXED);
+    if (cur_idx > cluster_index)
+      __atomic_fetch_add(&fat_stats.walk_backtracks[source], 1,
+                         __ATOMIC_RELAXED);
     cur_idx = 0;
     c = ip->start_cluster;
   }
   while (cur_idx < cluster_index) {
-    if (c < 2 || c >= 0x0FFFFFF8)
+    if (c < 2 || c >= 0x0FFFFFF8) {
+      __atomic_fetch_add(&fat_stats.walk_invalid[source], 1, __ATOMIC_RELAXED);
       return c; // EOF before target; leave the cursor at the last valid cluster
+    }
     uint32_t next = fat32_read_entry(c);
-    if (next >= 0x0FFFFFF8)
+    __atomic_fetch_add(&fat_stats.walk_steps[source], 1, __ATOMIC_RELAXED);
+    if (next < 2 || next >= 0x0FFFFFF8) {
+      __atomic_fetch_add(&fat_stats.walk_invalid[source], 1, __ATOMIC_RELAXED);
       return next; // EOF at the target boundary
+    }
     c = next;
     cur_idx++;
   }
@@ -280,6 +297,39 @@ uint32_t fat32_walk_chain_cached(struct inode *ip, uint64_t cluster_index) {
     __atomic_store_n(&ip->walk_cursor, ((uint64_t)cur_idx << 32) | (uint64_t)c,
                      __ATOMIC_RELEASE);
   return c;
+}
+
+void fat32_get_stats(struct fat32_stats *out) {
+  if (!out)
+    return;
+  out->cache_hits = __atomic_load_n(&fat_cache_hits, __ATOMIC_RELAXED);
+  out->cache_misses = __atomic_load_n(&fat_cache_misses, __ATOMIC_RELAXED);
+  out->cache_fill_waits =
+      __atomic_load_n(&fat_cache_fill_waits, __ATOMIC_RELAXED);
+  out->cache_io_commands =
+      __atomic_load_n(&fat_cache_io_commands, __ATOMIC_RELAXED);
+  out->cache_io_sectors =
+      __atomic_load_n(&fat_cache_io_sectors, __ATOMIC_RELAXED);
+  for (unsigned i = 0; i < 2; i++) {
+    out->walk_calls[i] =
+        __atomic_load_n(&fat_stats.walk_calls[i], __ATOMIC_RELAXED);
+    out->walk_steps[i] =
+        __atomic_load_n(&fat_stats.walk_steps[i], __ATOMIC_RELAXED);
+    out->walk_head_restarts[i] =
+        __atomic_load_n(&fat_stats.walk_head_restarts[i], __ATOMIC_RELAXED);
+    out->walk_backtracks[i] =
+        __atomic_load_n(&fat_stats.walk_backtracks[i], __ATOMIC_RELAXED);
+    out->walk_invalid[i] =
+        __atomic_load_n(&fat_stats.walk_invalid[i], __ATOMIC_RELAXED);
+    out->mapped_sectors[i] =
+        __atomic_load_n(&fat_stats.mapped_sectors[i], __ATOMIC_RELAXED);
+  }
+}
+
+void fat32_account_mapped_sector(enum fat32_walk_source source) {
+  if (source != FAT32_WALK_DEMAND && source != FAT32_WALK_READAHEAD)
+    source = FAT32_WALK_DEMAND;
+  __atomic_fetch_add(&fat_stats.mapped_sectors[source], 1, __ATOMIC_RELAXED);
 }
 
 // ==================== Cluster allocation ====================

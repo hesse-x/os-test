@@ -43,6 +43,35 @@ _Static_assert(sizeof(trapframe) == 176,
 _Static_assert(
     offsetof(cpu_local, tss_rsp0) == 48,
     "syscall_fast_entry asm: tss_rsp0 offset mismatch (expected 48)");
+
+static struct sched_wake_stats wake_stats;
+
+void sched_account_wake(wait_event event, bool valid, bool cross_cpu) {
+  if ((unsigned)event >= SCHED_WAIT_EVENT_COUNT)
+    event = WAIT_NONE;
+  uint64_t *counter =
+      valid ? &wake_stats.valid[event] : &wake_stats.noop[event];
+  __atomic_fetch_add(counter, 1, __ATOMIC_RELAXED);
+  if (cross_cpu)
+    __atomic_fetch_add(&wake_stats.cross_cpu_ipi, 1, __ATOMIC_RELAXED);
+}
+
+void sched_account_spurious_cancel(void) {
+  __atomic_fetch_add(&wake_stats.spurious_cancels, 1, __ATOMIC_RELAXED);
+}
+
+void sched_get_wake_stats(struct sched_wake_stats *out) {
+  if (!out)
+    return;
+  for (unsigned i = 0; i < SCHED_WAIT_EVENT_COUNT; i++) {
+    out->valid[i] = __atomic_load_n(&wake_stats.valid[i], __ATOMIC_RELAXED);
+    out->noop[i] = __atomic_load_n(&wake_stats.noop[i], __ATOMIC_RELAXED);
+  }
+  out->cross_cpu_ipi =
+      __atomic_load_n(&wake_stats.cross_cpu_ipi, __ATOMIC_RELAXED);
+  out->spurious_cancels =
+      __atomic_load_n(&wake_stats.spurious_cancels, __ATOMIC_RELAXED);
+}
 // GS offsets consumed by __irq_entry (trapentry.S): the hard-IRQ stack switch
 // and the in_hardirq sti-gate read these via gs:<offset>.  Pin them so a layout
 // change is caught at compile time rather than corrupting per-CPU state.
