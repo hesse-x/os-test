@@ -7,9 +7,12 @@
 /* test_clock_cputime — S15: CLOCK_PROCESS_CPUTIME_ID process-level CPU time
  * (sums the whole thread group, not just the calling thread). */
 
+#include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/times.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 #include <unity.h>
@@ -52,9 +55,49 @@ void test_process_ge_thread_cputime(void) {
   TEST_ASSERT_TRUE(p + 1000000000ULL >= t); /* p >= t within 1s slack */
 }
 
+void test_times_process_and_null(void) {
+  struct tms before, after;
+  clock_t elapsed0 = times(&before);
+  TEST_ASSERT_TRUE(elapsed0 >= 0);
+  burn(50);
+  clock_t elapsed1 = times(&after);
+  TEST_ASSERT_TRUE(elapsed1 >= elapsed0);
+  TEST_ASSERT_TRUE(after.tms_utime >= before.tms_utime + 2);
+  TEST_ASSERT_EQUAL_INT64(0, after.tms_stime);
+  TEST_ASSERT_TRUE(times(NULL) >= elapsed1);
+}
+
+void test_times_accumulates_reaped_child(void) {
+  struct tms before, after;
+  TEST_ASSERT_TRUE(times(&before) >= 0);
+
+  pid_t pid = fork();
+  TEST_ASSERT_TRUE(pid >= 0);
+  if (pid == 0) {
+    burn(50);
+    _exit(0);
+  }
+
+  int status = 0;
+  TEST_ASSERT_EQUAL_INT(pid, waitpid(pid, &status, 0));
+  TEST_ASSERT_TRUE(WIFEXITED(status));
+  TEST_ASSERT_TRUE(times(&after) >= 0);
+  TEST_ASSERT_TRUE(after.tms_cutime >= before.tms_cutime + 2);
+  TEST_ASSERT_EQUAL_INT64(0, after.tms_cstime);
+}
+
+void test_times_bad_pointer(void) {
+  errno = 0;
+  TEST_ASSERT_EQUAL_INT64(-1, syscall(100, (void *)1));
+  TEST_ASSERT_EQUAL_INT(EFAULT, errno);
+}
+
 int main(void) {
   UNITY_BEGIN();
   RUN_TEST(test_process_cputime_advances);
   RUN_TEST(test_process_ge_thread_cputime);
+  RUN_TEST(test_times_process_and_null);
+  RUN_TEST(test_times_accumulates_reaped_child);
+  RUN_TEST(test_times_bad_pointer);
   return UNITY_END();
 }

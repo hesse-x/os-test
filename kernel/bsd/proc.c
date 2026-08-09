@@ -44,7 +44,6 @@
 #include "kernel/xcore/mem/slab.h"
 #include "kernel/xcore/mem/vma.h"
 #include "kernel/xcore/mm_types.h"
-#include "kernel/xcore/perf/event.h"
 #include "kernel/xcore/rcu.h"
 #include "kernel/xcore/sched.h"
 #include "kernel/xcore/sparse.h"
@@ -61,7 +60,6 @@
 #include <xos/errno.h>
 #include <xos/mman.h>
 #include <xos/page.h>
-#include <xos/perf.h>
 #include <xos/signal.h>
 #include <xos/socket.h>
 #include <xos/thread.h>
@@ -80,6 +78,8 @@ typedef struct file_io_close_req {
 long strncpy_from_user(char *dst, const char __user *src, long maxlen);
 
 #ifdef PERF
+#include "kernel/xcore/perf/event.h"
+#include <xos/perf.h>
 static const char *exec_basename(const char *path) {
   const char *base = path;
   for (const char *cursor = path; cursor && *cursor; cursor++) {
@@ -1417,6 +1417,7 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   child->msg_reply_buf = NULL;
   child->msg_replied = 0;
   child->cpu_time_ns = 0;
+  child->children_cpu_time_ns = 0;
   child->last_sched = 0;
   child->exit_code = 0;
   list_init(&child->run_node);
@@ -1567,7 +1568,9 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
       sys_open((int64_t)(uintptr_t)pathname, O_RDONLY, 0, 0, 0, 0);
   int32_t fd = (int32_t)(open_result & 0xFFFFFFFFULL);
   if (fd < 0) {
-    printk(LOG_ERROR, "execve: open failed pid=%d path=%s err=%d\n", proc->pid,
+    int level = (fd == -ENOENT || fd == -ENOTDIR || fd == -EACCES) ? LOG_DEBUG
+                                                                   : LOG_ERROR;
+    printk(level, "execve: open failed pid=%d path=%s err=%d\n", proc->pid,
            pathname, fd);
     return (int64_t)fd;
   }

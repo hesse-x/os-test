@@ -121,6 +121,8 @@ typedef struct xtask {
 
   // === CPU time accounting ===
   uint64_t cpu_time_ns;
+  // CPU time of children already reaped by this process, for times(2).
+  uint64_t children_cpu_time_ns;
   uint64_t last_sched;
 
   // (frame_opt.md block 4) deepest kernel-stack usage observed for this task

@@ -35,6 +35,7 @@ int64_t sys_exit_group(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t do_exit_with_code(int32_t encoded_exit_code);
 int64_t sys_waitpid(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_wait4(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t sys_times(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_fork(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_execve(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 int64_t sys_mmap(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);

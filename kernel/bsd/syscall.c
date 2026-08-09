@@ -589,6 +589,23 @@ static void fill_rusage(struct k_rusage *ru, uint64_t cpu_time_ns) {
   ru->ru_utime.tv_usec = (long)((cpu_time_ns % 1000000000ULL) / 1000);
 }
 
+// Preserve a reaped child's CPU usage on the calling process's group leader.
+// Include the child's accumulated descendants, matching times(2) semantics.
+static void account_reaped_child_time(const xtask *child) {
+  uint64_t ns = child->cpu_time_ns + child->children_cpu_time_ns;
+  pid_t parent_tgid = current_task->tgid;
+
+  spin_lock(&tasks_lock);
+  for (int i = 0; i < MAX_PROC; i++) {
+    xtask *t = tasks[i];
+    if (t && t->pid == parent_tgid && t->tgid == parent_tgid) {
+      t->children_cpu_time_ns += ns;
+      break;
+    }
+  }
+  spin_unlock(&tasks_lock);
+}
+
 // S01 helper: report a stopped child to a waitpid caller. Writes the
 // WIFSTOPPED encoding into *wstatus and sets the one-shot stop_reported flag
 // so the same stop is not reported twice. Returns 1 if reported, 0 if the
@@ -704,6 +721,7 @@ static int64_t sys_waitpid_rusage(int64_t arg1, int64_t arg2, int64_t options,
         // (reap may kmem_cache_free the xtask object → UAF if read after).
         if (rusage_out)
           fill_rusage(rusage_out, zombie->cpu_time_ns);
+        account_reaped_child_time(zombie);
         sched_task_reap(zombie);
         return (int64_t)zpid;
       }
@@ -934,6 +952,7 @@ static int64_t sys_waitpid_rusage(int64_t arg1, int64_t arg2, int64_t options,
   // S19 §5.2: capture rusage BEFORE sched_task_reap frees the xtask.
   if (rusage_out)
     fill_rusage(rusage_out, child->cpu_time_ns);
+  account_reaped_child_time(child);
   sched_task_reap(child);
   return (int64_t)pid;
 }
@@ -967,6 +986,52 @@ int64_t sys_wait4(int64_t pid, int64_t wstatus, int64_t options, int64_t rusage,
     return (int64_t)-EFAULT;
   return ret;
 }
+
+// Linux x86-64 times(2). This kernel currently accounts combined user+kernel
+// CPU time, so it reports that total as user time and leaves system time zero.
+// CLK_TCK is 100 in musl's sysconf implementation.
+struct k_tms {
+  int64_t tms_utime;
+  int64_t tms_stime;
+  int64_t tms_cutime;
+  int64_t tms_cstime;
+};
+
+#define CPU_TICK_NS 10000000ULL
+
+int64_t sys_times(int64_t tms_arg, int64_t unused1, int64_t unused2,
+                  int64_t unused3, int64_t unused4, int64_t unused5) {
+  (void)unused1;
+  (void)unused2;
+  (void)unused3;
+  (void)unused4;
+  (void)unused5;
+
+  if (tms_arg) {
+    struct k_tms ktms = {0};
+    pid_t tgid = current_task->tgid;
+    uint64_t process_ns = 0;
+
+    spin_lock(&tasks_lock);
+    for (int i = 0; i < MAX_PROC; i++) {
+      xtask *t = tasks[i];
+      if (!t || t->state == UNUSED || t->state == REAPING || t->tgid != tgid)
+        continue;
+      process_ns += t->cpu_time_ns;
+      if (t->pid == tgid)
+        ktms.tms_cutime = (int64_t)(t->children_cpu_time_ns / CPU_TICK_NS);
+    }
+    spin_unlock(&tasks_lock);
+    ktms.tms_utime = (int64_t)(process_ns / CPU_TICK_NS);
+
+    if (copy_to_user((void __user *)(uintptr_t)tms_arg, &ktms, sizeof(ktms)))
+      return -EFAULT;
+  }
+
+  return (int64_t)(sched_clock() / CPU_TICK_NS);
+}
+
+#undef CPU_TICK_NS
 
 // ===================== S12: file-backed mmap =====================
 // Helpers below are called from sys_mmap *under* proc->mm->mmap_lock (the
@@ -6980,6 +7045,8 @@ int64_t syscall_dispatch(trapframe *tf) {
     return sys_exit(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_WAIT4:
     return sys_wait4(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
+  case SYS_TIMES:
+    return sys_times(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_MMAP:
     return sys_mmap(tf->rdi, tf->rsi, tf->rdx, tf->r10, tf->r8, tf->r9);
   case SYS_MUNMAP:

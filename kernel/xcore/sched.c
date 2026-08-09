@@ -352,6 +352,7 @@ xtask *sched_create_idle_process(int cpu_id) {
   proc->iopm = NULL;
   proc->proc = NULL; // will be created by proc_create for user processes
   proc->cpu_time_ns = 0;
+  proc->children_cpu_time_ns = 0;
   proc->last_sched = 0;
   // POSIX fields are in proc (created separately)
   list_init(&proc->run_node);
@@ -980,6 +981,7 @@ void sched_task_reap(xtask *proc) {
   proc->msg_target_pid = -1;
   proc->msg_replied = 0;
   proc->cpu_time_ns = 0;
+  proc->children_cpu_time_ns = 0;
   proc->last_sched = 0;
   // Clear threading fields
   proc->fs_base = 0;
