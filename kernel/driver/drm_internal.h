@@ -10,8 +10,11 @@
 #include "kernel/bsd/devtmpfs.h" /* __poll, xtask via inode.h chain */
 #include "kernel/xcore/spinlock.h"
 #include "kernel/xcore/wait_queue.h"
+#include "kernel/xcore/workqueue.h"
 #include <stdbool.h>
 #include <stdint.h>
+
+struct drm_gem_object;
 
 /* The virtio topology is fixed, but its IDs belong to the device namespace. */
 #define DRM_CRTC_ID (g_drm.crtc_id)
@@ -67,6 +70,8 @@ struct drm_fence {
   refcount_t refcount; /* see 2A-3 / 2D-1: sync_file fd holds a ref */
   spinlock lock;       /* irqsave: signal runs in ISR, add runs in process */
   wait_queue_head wq;  /* tasks waiting for signal */
+  struct drm_gem_object **objects;
+  uint32_t object_count;
 };
 
 /* virgl legacy (v1) resource: kernel-allocated guest backing attached to a
@@ -79,17 +84,14 @@ struct drm_virgl_resource {
   void *kernel_vaddr;  /* kernel virtual address of backing pages */
   uint64_t size;
   int refcount;
+  struct drm_gem_object *gem;
+  struct work release_work;
   /* A resource may be shared through PRIME and used by several contexts. */
   uint32_t ctx_attach_bitmap[(MAX_CTX_IDS + 31) / 32];
   /* Most recent EXECBUFFER which referenced this BO. */
   uint32_t last_ctx_id;
   uint8_t last_ring_idx;
   uint64_t last_fence_id;
-};
-
-struct drm_prime_object {
-  uint32_t handle;
-  bool is_virgl;
 };
 
 /* Cached capset info fetched at init via GET_CAPSET_INFO/GET_CAPSET. */
@@ -139,6 +141,8 @@ extern spinlock g_drm_files_lock;
 struct drm_dumb_buffer {
   int handle; /* 1-based handle, 0 = free slot */
   int refcount;
+  struct drm_gem_object *gem;
+  struct work release_work;
   uint64_t guest_phys; /* guest physical address of buffer pages */
   void *kernel_vaddr;  /* kernel virtual address */
   uint32_t width;
@@ -156,6 +160,8 @@ struct drm_framebuffer {
   int refcount;
   int dumb_handle; /* references drm_dumb_buffer.handle */
   bool is_virgl;
+  struct drm_gem_object *gem;
+  struct drm_file *owner;
   uint32_t width;
   uint32_t height;
   uint32_t pitch;

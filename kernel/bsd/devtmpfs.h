@@ -19,8 +19,24 @@
 
 struct inode;
 struct file;
-struct dev_mmap_request;
-struct dev_mmap_backing;
+
+#define DEV_MMAP_CACHE_UC 0x1u
+
+struct dev_mmap_request {
+  uint64_t addr;
+  uint64_t length;
+  uint64_t offset;
+  uint32_t prot;
+  uint32_t flags;
+};
+
+struct dev_mmap_backing {
+  void *owner;
+  const struct vma_owner_ops *owner_ops;
+  struct page **pages;
+  uint32_t page_count;
+  uint32_t cache_flags;
+};
 
 // Linux 64-bit dev_t encoding (mirrors user sysmacros.h; pure arithmetic, no
 // deps).

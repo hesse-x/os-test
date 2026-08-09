@@ -11,6 +11,7 @@
 #include <stddef.h>
 
 #include "arch/x64/apic.h"
+#include "arch/x64/memlayout.h"
 #include "arch/x64/paging.h"
 #include "arch/x64/smp.h"
 #include "arch/x64/trap.h"
@@ -57,6 +58,7 @@ static uint32_t drm_page_flip_log_count;
 spinlock g_drm_files_lock = SPINLOCK_INIT;
 struct drm_file **g_drm_files;
 int g_drm_files_capacity;
+struct drm_gem_object;
 static struct drm_core_device *g_virtio_drm_core;
 static struct workqueue *g_drm_event_wq;
 static struct work g_drm_event_work;
@@ -106,9 +108,6 @@ extern dev_driver virtio_gpu_driver;
  * boundary (only devtmpfs/sysfs/poll_types are allowed). drm_fence is opaque to
  * the BSD layer; the pointer is just handed across. */
 int bsd_sync_file_fd_install(xtask *proc, struct drm_fence *fence);
-int bsd_drm_prime_fd_install(xtask *proc, struct drm_prime_object *object,
-                             bool cloexec);
-struct file *bsd_drm_prime_fd_get(xtask *proc, int fd);
 
 /* plan2 forward declarations: these are defined later in the file but used by
  * the ISR (drm_fence_find/signal) and the EXECBUFFER ioctl (drm_file_current)
@@ -116,9 +115,6 @@ struct file *bsd_drm_prime_fd_get(xtask *proc, int fd);
 static struct drm_fence *drm_fence_find(uint32_t ctx_id, uint8_t ring_idx,
                                         uint64_t fence_id);
 static void drm_fence_signal(struct drm_fence *fence);
-static long drm_ioctl_prime_handle_to_fd(void *arg, xtask *proc);
-static long drm_ioctl_prime_fd_to_handle(void *arg, xtask *proc,
-                                         struct drm_file *df);
 
 /* ===== 2.B: ctrlq initialization ===== */
 
@@ -600,7 +596,8 @@ static struct drm_framebuffer *drm_find_fb(int fb_id) {
 
 static int drm_alloc_dumb_handle(void) {
   for (int i = 0; i < MAX_DUMB_BUFFERS; i++) {
-    if (g_drm.dumbs[i].handle == 0) {
+    if (g_drm.dumbs[i].handle == 0 &&
+        g_drm.dumbs[i].release_work.state == WORK_IDLE) {
       g_drm.dumbs[i].handle = i + 1; /* handle = slot index + 1 */
       g_drm.dumbs[i].refcount = 1;
       return g_drm.dumbs[i].handle;
@@ -608,6 +605,85 @@ static int drm_alloc_dumb_handle(void) {
   }
   return -1;
 }
+
+static struct page **drm_gem_contiguous_pages(uint64_t guest_phys,
+                                              uint32_t page_count) {
+  struct page **pages = kmalloc(sizeof(*pages) * page_count);
+  if (!pages)
+    return NULL;
+  for (uint32_t i = 0; i < page_count; i++)
+    pages[i] = &bfc_frames[PHY_TO_PAGE(guest_phys + i * PAGE_SIZE)];
+  return pages;
+}
+
+static void drm_dumb_release_work(struct work *work) {
+  struct drm_dumb_buffer *buf =
+      LIST_ENTRY(work, struct drm_dumb_buffer, release_work);
+  spin_lock(&g_drm.dumb_lock);
+  uint32_t rid = buf->virtio_res_id;
+  void *vaddr = buf->kernel_vaddr;
+  uint32_t npages = (uint32_t)ALIGN_UP(buf->size, PAGE_SIZE) / PAGE_SIZE;
+  buf->refcount = 0;
+  buf->gem = NULL;
+  buf->guest_phys = 0;
+  buf->kernel_vaddr = NULL;
+  buf->width = 0;
+  buf->height = 0;
+  buf->pitch = 0;
+  buf->size = 0;
+  buf->virtio_res_id = 0;
+  buf->handle = 0;
+  spin_unlock(&g_drm.dumb_lock);
+  printk(LOG_INFO, "drm gem free dumb rid=%u vaddr=%p pages=%u\n", rid, vaddr,
+         npages);
+  virtio_gpu_resource_unref(rid);
+  bfc_free_page_data(vaddr, npages);
+}
+
+static void drm_dumb_gem_release(struct drm_gem_object *object) {
+  struct drm_dumb_buffer *buf = drm_gem_object_private(object);
+  BUG_ON(!buf || buf->gem != object ||
+         !queue_work(g_drm_event_wq, &buf->release_work));
+}
+
+static void drm_virgl_release_work(struct work *work) {
+  struct drm_virgl_resource *resource =
+      LIST_ENTRY(work, struct drm_virgl_resource, release_work);
+  spin_lock(&g_drm.virgl_lock);
+  uint32_t rid = resource->res_handle;
+  void *vaddr = resource->kernel_vaddr;
+  uint32_t npages = (uint32_t)ALIGN_UP(resource->size, PAGE_SIZE) / PAGE_SIZE;
+  resource->res_handle = 0;
+  resource->guest_phys = 0;
+  resource->kernel_vaddr = NULL;
+  resource->size = 0;
+  resource->refcount = 0;
+  resource->gem = NULL;
+  __memset(resource->ctx_attach_bitmap, 0, sizeof(resource->ctx_attach_bitmap));
+  resource->last_ctx_id = 0;
+  resource->last_ring_idx = 0;
+  resource->last_fence_id = 0;
+  resource->bo_handle = 0;
+  spin_unlock(&g_drm.virgl_lock);
+  printk(LOG_INFO, "drm gem free virgl rid=%u vaddr=%p pages=%u\n", rid, vaddr,
+         npages);
+  virtio_gpu_resource_unref(rid);
+  bfc_free_page_data(vaddr, npages);
+}
+
+static void drm_virgl_gem_release(struct drm_gem_object *object) {
+  struct drm_virgl_resource *resource = drm_gem_object_private(object);
+  BUG_ON(!resource || resource->gem != object ||
+         !queue_work(g_drm_event_wq, &resource->release_work));
+}
+
+static const struct drm_gem_object_ops drm_dumb_gem_ops = {
+    .release = drm_dumb_gem_release,
+};
+
+static const struct drm_gem_object_ops drm_virgl_gem_ops = {
+    .release = drm_virgl_gem_release,
+};
 
 /* ===== Fence (plan2) ===== */
 
@@ -624,6 +700,8 @@ static struct drm_fence *drm_fence_create(uint32_t ctx_id, uint8_t ring_idx,
       f->ring_idx = ring_idx;
       f->fence_id = fence_id;
       f->signaled = false;
+      f->objects = NULL;
+      f->object_count = 0;
       refcount_set(&f->refcount, 1);
       f->lock = SPINLOCK_INIT;
       init_wait_queue_head(&f->wq);
@@ -664,8 +742,15 @@ void drm_fence_put(struct drm_fence *fence) {
     spin_unlock_irqrestore(&g_drm.fence_lock, flags);
     return;
   }
+  struct drm_gem_object **objects = fence->objects;
+  uint32_t object_count = fence->object_count;
+  fence->objects = NULL;
+  fence->object_count = 0;
   fence->ctx_id = 0; /* mark slot free */
   spin_unlock_irqrestore(&g_drm.fence_lock, flags);
+  for (uint32_t i = 0; i < object_count; i++)
+    drm_gem_object_put(objects[i]);
+  kfree(objects);
 }
 
 /* Read-only signaled probe for sync_file poll (BSD file_poll.c). */
@@ -692,7 +777,15 @@ static void drm_fence_signal(struct drm_fence *fence) {
     return;
   }
   fence->signaled = true;
+  struct drm_gem_object **objects = fence->objects;
+  uint32_t object_count = fence->object_count;
+  fence->objects = NULL;
+  fence->object_count = 0;
   spin_unlock_irqrestore(&fence->lock, flags);
+
+  for (uint32_t i = 0; i < object_count; i++)
+    drm_gem_object_put(objects[i]);
+  kfree(objects);
 
   spin_lock_irqsave(&g_drm.fence_lock, &flags);
   if (fence->ctx_id > 0 && fence->ctx_id <= MAX_CTX_IDS &&
@@ -874,7 +967,6 @@ static uint32_t alloc_virgl_handle(void);
 static void free_virgl_handle(uint32_t handle);
 static struct drm_virgl_resource *drm_find_virgl_resource(uint32_t handle);
 static bool virgl_capset_present(uint32_t capset_id);
-static bool drm_file_has_handle(struct drm_file *df, int handle, bool virgl);
 
 /* DRM_IOCTL_VIRTGPU_GET_CAPS — return cached capset payload. addr is a
  * user-space pointer; copy up to c->size bytes. Serves any host-cached capset
@@ -1019,7 +1111,8 @@ static long drm_ioctl_virtgpu_context_init(void *arg, struct drm_file *df) {
  * kernel allocates guest backing and attaches it to the host resource here.
  * The bo_handle→res_handle mapping is persisted in g_drm.virgl_res[] so later
  * TRANSFER_TO/FROM_HOST and WAIT (which pass only bo_handle) can resolve it. */
-static long drm_ioctl_virtgpu_resource_create(void *arg, struct drm_file *df) {
+static long drm_ioctl_virtgpu_resource_create(void *arg, struct drm_file *df,
+                                              struct file *file) {
   struct drm_virtgpu_resource_create *rc =
       (struct drm_virtgpu_resource_create *)arg;
 
@@ -1043,6 +1136,8 @@ static long drm_ioctl_virtgpu_resource_create(void *arg, struct drm_file *df) {
   }
   __memset(vaddr, 0, rc->size);
   uint64_t guest_phys = (uint64_t)PHY_ADDR((uintptr_t)vaddr);
+  printk(LOG_INFO, "drm gem alloc virgl handle=%u vaddr=%p pages=%u\n", handle,
+         vaddr, npages);
 
   struct virtio_gpu_resource_create_3d cmd;
   __memset(&cmd, 0, sizeof(cmd));
@@ -1084,12 +1179,35 @@ static long drm_ioctl_virtgpu_resource_create(void *arg, struct drm_file *df) {
   r->size = rc->size;
   r->refcount = 1;
   __memset(r->ctx_attach_bitmap, 0, sizeof(r->ctx_attach_bitmap));
+  init_work(&r->release_work, drm_virgl_release_work);
 
-  rc->bo_handle = handle;
+  struct page **pages = drm_gem_contiguous_pages(guest_phys, npages);
+  struct drm_gem_object *object =
+      pages ? drm_gem_object_create(g_virtio_drm_core, r->size, pages, npages,
+                                    r, &drm_virgl_gem_ops)
+            : NULL;
+  uint32_t file_handle = 0;
+  if (object)
+    r->gem = object;
+  if (!object ||
+      drm_core_gem_handle_create(file, object, handle, &file_handle)) {
+    if (object) {
+      drm_gem_object_put(object);
+    } else {
+      kfree(pages);
+      virtio_gpu_resource_unref(res_id);
+      bfc_free_page_data(vaddr, npages);
+      free_virgl_handle(handle);
+    }
+    return -ENOMEM;
+  }
+  rc->bo_handle = file_handle;
   rc->res_handle = res_id;
 
   if (df && df->created_virgl_count < MAX_VIRGL_RESOURCES)
     df->created_virgl_handles[df->created_virgl_count++] = (int)handle;
+
+  drm_gem_object_put(object);
 
   printk(LOG_DEBUG,
          "drm: RESOURCE_CREATE(v1) %ux%ux%u fmt=%u -> bo=%u res=%u\n",
@@ -1097,39 +1215,50 @@ static long drm_ioctl_virtgpu_resource_create(void *arg, struct drm_file *df) {
   return 0;
 }
 
+static struct drm_virgl_resource *
+drm_virgl_lookup_file(struct file *file, uint32_t handle,
+                      struct drm_gem_object **object_out) {
+  struct drm_gem_object *object = drm_core_gem_object_lookup(file, handle);
+  if (!object)
+    return NULL;
+  struct drm_virgl_resource *resource = drm_gem_object_private(object);
+  if (!resource || resource != drm_find_virgl_resource(handle)) {
+    drm_gem_object_put(object);
+    return NULL;
+  }
+  *object_out = object;
+  return resource;
+}
+
 /* DRM_IOCTL_VIRTGPU_RESOURCE_INFO — return res_handle/size/blob_mem.
  * virgl legacy (v1) resources only; handles live at/above VIRGL_HANDLE_BASE. */
-static long drm_ioctl_virtgpu_resource_info(void *arg) {
+static long drm_ioctl_virtgpu_resource_info(void *arg, struct file *file) {
   struct drm_virtgpu_resource_info *ri =
       (struct drm_virtgpu_resource_info *)arg;
 
-  struct drm_virgl_resource *r = drm_find_virgl_resource(ri->bo_handle);
+  struct drm_gem_object *object = NULL;
+  struct drm_virgl_resource *r =
+      drm_virgl_lookup_file(file, ri->bo_handle, &object);
   if (!r)
     return -EINVAL;
 
   ri->res_handle = r->res_handle;
   ri->size = (uint32_t)r->size;
   ri->blob_mem = 0;
+  drm_gem_object_put(object);
   return 0;
 }
 
 /* DRM_IOCTL_VIRTGPU_MAP — return an mmap offset for a legacy virgl BO. */
-static long drm_ioctl_virtgpu_map(void *arg, struct drm_file *df) {
+static long drm_ioctl_virtgpu_map(void *arg, struct file *file) {
   struct drm_virtgpu_map *map = (struct drm_virtgpu_map *)arg;
-  if (!map || !df)
+  if (!map || !file)
     return -EFAULT;
-  if (!drm_file_has_handle(df, (int)map->handle, true))
+  struct drm_gem_object *object = NULL;
+  if (!drm_virgl_lookup_file(file, map->handle, &object))
     return -ENOENT;
-
-  spin_lock(&g_drm.virgl_lock);
-  struct drm_virgl_resource *r = drm_find_virgl_resource(map->handle);
-  if (!r) {
-    spin_unlock(&g_drm.virgl_lock);
-    return -ENOENT;
-  }
-  map->offset = (uint64_t)map->handle << PAGE_SHIFT;
-  spin_unlock(&g_drm.virgl_lock);
-  return 0;
+  drm_gem_object_put(object);
+  return drm_core_gem_mmap_offset(file, map->handle, &map->offset);
 }
 
 /* Forward declaration for the plan2 sync_file fd install helper, used by
@@ -1198,12 +1327,15 @@ static void drm_virgl_forget_context(uint32_t ctx_id) {
  * winsys passes only bo_handle; resolve to the host res_handle here. v1
  * transfers are not context-bound on the host (ctx_id=0); virglrenderer
  * reaches the guest backing via the resource id. */
-static long virgl_transfer_host_3d(void *arg, uint32_t cmd_type) {
+static long virgl_transfer_host_3d(void *arg, uint32_t cmd_type,
+                                   struct file *file) {
   struct drm_virtgpu_3d_transfer_to_host *t =
       (struct drm_virtgpu_3d_transfer_to_host *)arg;
   /* drm_virtgpu_3d_transfer_from_host has an identical field layout. */
 
-  struct drm_virgl_resource *r = drm_find_virgl_resource(t->bo_handle);
+  struct drm_gem_object *object = NULL;
+  struct drm_virgl_resource *r =
+      drm_virgl_lookup_file(file, t->bo_handle, &object);
   if (!r)
     return -ENOENT;
 
@@ -1227,20 +1359,22 @@ static long virgl_transfer_host_3d(void *arg, uint32_t cmd_type) {
   __memset(&resp, 0, sizeof(resp));
   int rc = virtio_gpu_send_cmd_3d(&g_virtio_gpu, &cmd, sizeof(cmd), &resp,
                                   sizeof(resp));
+  drm_gem_object_put(object);
   if (rc || resp.hdr.type != VIRTIO_GPU_RESP_OK_NODATA)
     return rc ? rc : -EIO;
   return 0;
 }
 
 /* DRM_IOCTL_VIRTGPU_TRANSFER_TO_HOST — upload guest backing → host resource. */
-static long drm_ioctl_virtgpu_transfer_to_host(void *arg) {
-  return virgl_transfer_host_3d(arg, VIRTIO_GPU_CMD_TRANSFER_TO_HOST_3D);
+static long drm_ioctl_virtgpu_transfer_to_host(void *arg, struct file *file) {
+  return virgl_transfer_host_3d(arg, VIRTIO_GPU_CMD_TRANSFER_TO_HOST_3D, file);
 }
 
 /* DRM_IOCTL_VIRTGPU_TRANSFER_FROM_HOST — download host resource → guest
  * backing. */
-static long drm_ioctl_virtgpu_transfer_from_host(void *arg) {
-  return virgl_transfer_host_3d(arg, VIRTIO_GPU_CMD_TRANSFER_FROM_HOST_3D);
+static long drm_ioctl_virtgpu_transfer_from_host(void *arg, struct file *file) {
+  return virgl_transfer_host_3d(arg, VIRTIO_GPU_CMD_TRANSFER_FROM_HOST_3D,
+                                file);
 }
 
 /* DRM_IOCTL_VIRTGPU_WAIT — virgl legacy busy/block query. `handle` is a GEM
@@ -1250,11 +1384,17 @@ static long drm_ioctl_virtgpu_transfer_from_host(void *arg) {
  * is reported busy if any unsignaled fence for the current fd's context exists.
  * This is conservative (a different resource's submit may be in flight) but
  * never races — virgl only uses this to decide whether to stall. */
-static long drm_ioctl_virtgpu_3d_wait(void *arg, struct drm_file *df) {
+static long drm_ioctl_virtgpu_3d_wait(void *arg, struct drm_file *df,
+                                      struct file *file) {
   struct drm_virtgpu_3d_wait *w = (struct drm_virtgpu_3d_wait *)arg;
   (void)df;
 
   bool nowait = w->flags & VIRTGPU_WAIT_NOWAIT;
+  struct drm_gem_object *object = NULL;
+  struct drm_virgl_resource *held_resource =
+      drm_virgl_lookup_file(file, w->handle, &object);
+  if (!held_resource)
+    return -ENOENT;
 
   for (;;) {
     uint32_t ctx_id;
@@ -1262,18 +1402,16 @@ static long drm_ioctl_virtgpu_3d_wait(void *arg, struct drm_file *df) {
     uint64_t fence_id;
 
     spin_lock(&g_drm.virgl_lock);
-    struct drm_virgl_resource *r = drm_find_virgl_resource(w->handle);
-    if (!r) {
-      spin_unlock(&g_drm.virgl_lock);
-      return -ENOENT;
-    }
+    struct drm_virgl_resource *r = held_resource;
     ctx_id = r->last_ctx_id;
     ring_idx = r->last_ring_idx;
     fence_id = r->last_fence_id;
     spin_unlock(&g_drm.virgl_lock);
 
-    if (ctx_id == 0 || fence_id == 0)
+    if (ctx_id == 0 || fence_id == 0) {
+      drm_gem_object_put(object);
       return 0;
+    }
 
     struct drm_fence *fence = NULL;
     uint64_t flags;
@@ -1281,6 +1419,7 @@ static long drm_ioctl_virtgpu_3d_wait(void *arg, struct drm_file *df) {
     if (ctx_id <= MAX_CTX_IDS && ring_idx < MAX_CTX_RINGS &&
         g_drm.completed_fence_ids[ctx_id - 1][ring_idx] >= fence_id) {
       spin_unlock_irqrestore(&g_drm.fence_lock, flags);
+      drm_gem_object_put(object);
       return 0;
     }
     for (int i = 0; i < MAX_FENCES; i++) {
@@ -1296,6 +1435,7 @@ static long drm_ioctl_virtgpu_3d_wait(void *arg, struct drm_file *df) {
 
     if (nowait) {
       drm_fence_put(fence);
+      drm_gem_object_put(object);
       return -EBUSY;
     }
 
@@ -1312,7 +1452,8 @@ static long drm_ioctl_virtgpu_3d_wait(void *arg, struct drm_file *df) {
 /* DRM_IOCTL_VIRTGPU_EXECBUFFER — submit a 3D command stream on a ring.
  * Out-fence: optional sync_file fd (FENCE_FD_OUT) signaled when the host
  * completes this submission. */
-static long drm_ioctl_virtgpu_execbuffer(void *arg, struct drm_file *df) {
+static long drm_ioctl_virtgpu_execbuffer(void *arg, struct drm_file *df,
+                                         struct file *file) {
   struct drm_virtgpu_execbuffer *eb = (struct drm_virtgpu_execbuffer *)arg;
   int rc = 0;
   if (!df || df->ctx_id == 0)
@@ -1330,38 +1471,38 @@ static long drm_ioctl_virtgpu_execbuffer(void *arg, struct drm_file *df) {
     return -EINVAL;
 
   uint32_t *bo_handles = NULL;
+  struct drm_gem_object **bo_objects = NULL;
   if (eb->num_bo_handles != 0) {
     size_t handles_size = eb->num_bo_handles * sizeof(*bo_handles);
     bo_handles = kmalloc(handles_size);
     if (!bo_handles)
       return -ENOMEM;
+    bo_objects = kmalloc(eb->num_bo_handles * sizeof(*bo_objects));
+    if (!bo_objects) {
+      kfree(bo_handles);
+      return -ENOMEM;
+    }
+    __memset(bo_objects, 0, eb->num_bo_handles * sizeof(*bo_objects));
     if (copy_from_user(bo_handles, (void *)(uintptr_t)eb->bo_handles,
                        handles_size)) {
       kfree(bo_handles);
+      kfree(bo_objects);
       return -EFAULT;
     }
 
     /* Reject handles which aren't present in this DRM file before changing
      * host context state. This also excludes non-virgl GEM objects. */
     for (uint32_t i = 0; i < eb->num_bo_handles; i++) {
-      if (!drm_file_has_handle(df, (int)bo_handles[i], true)) {
-        kfree(bo_handles);
-        return -ENOENT;
-      }
-      spin_lock(&g_drm.virgl_lock);
-      bool exists = drm_find_virgl_resource(bo_handles[i]) != NULL;
-      spin_unlock(&g_drm.virgl_lock);
-      if (!exists) {
-        kfree(bo_handles);
-        return -ENOENT;
+      if (!drm_virgl_lookup_file(file, bo_handles[i], &bo_objects[i])) {
+        rc = -ENOENT;
+        goto err_free_handles;
       }
     }
 
     for (uint32_t i = 0; i < eb->num_bo_handles; i++) {
-      int rc = drm_virgl_attach_resource(bo_handles[i], df->ctx_id);
+      rc = drm_virgl_attach_resource(bo_handles[i], df->ctx_id);
       if (rc) {
-        kfree(bo_handles);
-        return rc;
+        goto err_free_handles;
       }
     }
   }
@@ -1404,6 +1545,12 @@ static long drm_ioctl_virtgpu_execbuffer(void *arg, struct drm_file *df) {
     rc = -ENOMEM;
     goto err_free_handles;
   }
+
+  spin_lock(&fence->lock);
+  fence->objects = bo_objects;
+  fence->object_count = eb->num_bo_handles;
+  spin_unlock(&fence->lock);
+  bo_objects = NULL;
 
   /* Reserve a reference for the async completion before publishing the
    * descriptor. The creator's reference remains live until out-fence setup is
@@ -1463,6 +1610,9 @@ static long drm_ioctl_virtgpu_execbuffer(void *arg, struct drm_file *df) {
   return 0;
 
 err_free_handles:
+  for (uint32_t i = 0; i < eb->num_bo_handles; i++)
+    drm_gem_object_put(bo_objects ? bo_objects[i] : NULL);
+  kfree(bo_objects);
   kfree(bo_handles);
   return rc;
 }
@@ -1938,7 +2088,7 @@ static long drm_ioctl_getplane(void *arg) {
 }
 
 /* DRM_IOCTL_MODE_CREATE_DUMB */
-static long drm_ioctl_create_dumb(void *arg, struct drm_file *cf) {
+static long drm_ioctl_create_dumb(void *arg, struct file *file) {
   struct drm_mode_create_dumb *d = (struct drm_mode_create_dumb *)arg;
   if (d->width != g_drm.fb_width || d->height != g_drm.fb_height ||
       d->bpp != g_drm.fb_bpp)
@@ -1962,158 +2112,103 @@ static long drm_ioctl_create_dumb(void *arg, struct drm_file *cf) {
 
   uint32_t npages = (d->size + PAGE_SIZE - 1) / PAGE_SIZE;
   buf->kernel_vaddr = bfc_alloc_page_data(npages);
-  if (!buf->kernel_vaddr)
+  if (!buf->kernel_vaddr) {
+    spin_lock(&g_drm.dumb_lock);
+    __memset(buf, 0, sizeof(*buf));
+    spin_unlock(&g_drm.dumb_lock);
     return -ENOMEM;
+  }
   __memset(buf->kernel_vaddr, 0, d->size);
   buf->guest_phys = (uint64_t)PHY_ADDR((uintptr_t)buf->kernel_vaddr);
+  printk(LOG_INFO, "drm gem alloc dumb handle=%d vaddr=%p pages=%u\n", handle,
+         buf->kernel_vaddr, npages);
 
   buf->virtio_res_id = (uint32_t)handle;
   if (virtio_gpu_create_2d(buf->virtio_res_id, d->width, d->height,
                            VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM) < 0) {
+    bfc_free_page_data(buf->kernel_vaddr, npages);
+    spin_lock(&g_drm.dumb_lock);
+    __memset(buf, 0, sizeof(*buf));
+    spin_unlock(&g_drm.dumb_lock);
     return -EIO;
   }
   if (virtio_gpu_attach_backing(buf->virtio_res_id, buf->guest_phys, d->size) <
       0) {
+    virtio_gpu_resource_unref(buf->virtio_res_id);
+    bfc_free_page_data(buf->kernel_vaddr, npages);
+    spin_lock(&g_drm.dumb_lock);
+    __memset(buf, 0, sizeof(*buf));
+    spin_unlock(&g_drm.dumb_lock);
     return -EIO;
   }
 
-  d->handle = (uint32_t)handle;
-
-  /* Track in per-fd list (Phase C) */
-  if (cf && cf->created_dumb_count < MAX_DUMB_BUFFERS) {
-    cf->created_dumb_handles[cf->created_dumb_count++] = (int)d->handle;
+  struct page **pages = drm_gem_contiguous_pages(buf->guest_phys, npages);
+  init_work(&buf->release_work, drm_dumb_release_work);
+  struct drm_gem_object *object =
+      pages ? drm_gem_object_create(g_virtio_drm_core, buf->size, pages, npages,
+                                    buf, &drm_dumb_gem_ops)
+            : NULL;
+  uint32_t file_handle = 0;
+  if (object)
+    buf->gem = object;
+  if (!object || drm_core_gem_handle_create(file, object, (uint32_t)handle,
+                                            &file_handle)) {
+    if (object) {
+      drm_gem_object_put(object);
+    } else {
+      kfree(pages);
+      virtio_gpu_resource_unref(buf->virtio_res_id);
+      bfc_free_page_data(buf->kernel_vaddr, npages);
+      spin_lock(&g_drm.dumb_lock);
+      __memset(buf, 0, sizeof(*buf));
+      spin_unlock(&g_drm.dumb_lock);
+    }
+    return -ENOMEM;
   }
+  d->handle = file_handle;
+  drm_gem_object_put(object);
 
   return 0;
 }
 
 /* DRM_IOCTL_MODE_MAP_DUMB */
-static long drm_ioctl_map_dumb(void *arg) {
+static long drm_ioctl_map_dumb(void *arg, struct file *file) {
   struct drm_mode_map_dumb *m = (struct drm_mode_map_dumb *)arg;
-  spin_lock(&g_drm.dumb_lock);
-  struct drm_dumb_buffer *d = drm_find_dumb((int)m->handle);
-  if (!d) {
-    spin_unlock(&g_drm.dumb_lock);
-    return -EINVAL;
-  }
-  m->offset = (uint64_t)m->handle << 12;
-  spin_unlock(&g_drm.dumb_lock);
-  return 0;
+  return drm_core_gem_mmap_offset(file, m->handle, &m->offset);
 }
 
 /* DRM_IOCTL_MODE_DESTROY_DUMB */
-static void drm_file_untrack_handle(struct drm_file *df, int handle,
-                                    bool virgl) {
-  if (!df)
-    return;
-  int *handles = virgl ? df->created_virgl_handles : df->created_dumb_handles;
-  int *count = virgl ? &df->created_virgl_count : &df->created_dumb_count;
-  for (int i = 0; i < *count; i++) {
-    if (handles[i] != handle)
-      continue;
-    handles[i] = handles[--(*count)];
-    return;
-  }
-}
-
-static long drm_ioctl_destroy_dumb(void *arg, struct drm_file *df) {
+static long drm_ioctl_destroy_dumb(void *arg, struct file *file) {
   struct drm_mode_destroy_dumb *d = (struct drm_mode_destroy_dumb *)arg;
-  spin_lock(&g_drm.dumb_lock);
-  struct drm_dumb_buffer *buf = drm_find_dumb((int)d->handle);
-  if (!buf) {
-    spin_unlock(&g_drm.dumb_lock);
-    return -EINVAL;
-  }
-  drm_file_untrack_handle(df, (int)d->handle, false);
-  buf->refcount--;
-  if (buf->refcount <= 0) {
-    uint32_t rid = buf->virtio_res_id;
-    void *vaddr = buf->kernel_vaddr;
-    uint32_t npages = (uint32_t)((buf->size + PAGE_SIZE - 1) / PAGE_SIZE);
-    __memset(buf, 0, sizeof(*buf));
-    spin_unlock(&g_drm.dumb_lock);
-    virtio_gpu_resource_unref(rid);
-    bfc_free_page_data(vaddr, npages);
-    return 0;
-  }
-  spin_unlock(&g_drm.dumb_lock);
-  return 0;
+  return drm_core_gem_handle_delete(file, d->handle);
 }
 
 /* DRM_IOCTL_GEM_CLOSE
  * Called by Mesa after ADDFB2 to release the handle reference.
  * In this simplified model, same semantics as DESTROY_DUMB. */
-static long drm_ioctl_gem_close(void *arg, struct drm_file *df) {
+static long drm_ioctl_gem_close(void *arg, struct file *file) {
   struct drm_gem_close *c = (struct drm_gem_close *)arg;
   if (!c)
     return -EFAULT;
 
-  /* virgl legacy (v1) resource: handle lives at/above VIRGL_HANDLE_BASE. */
-  if ((uint32_t)c->handle >= VIRGL_HANDLE_BASE) {
-    spin_lock(&g_drm.virgl_lock);
-    struct drm_virgl_resource *r = drm_find_virgl_resource((uint32_t)c->handle);
-    if (!r) {
-      spin_unlock(&g_drm.virgl_lock);
-      return -ENOENT;
-    }
-    drm_file_untrack_handle(df, (int)c->handle, true);
-    r->refcount--;
-    if (r->refcount > 0) {
-      spin_unlock(&g_drm.virgl_lock);
-      return 0;
-    }
-    uint32_t rid = r->res_handle;
-    void *vaddr = r->kernel_vaddr;
-    uint64_t sz = r->size;
-    free_virgl_handle((uint32_t)c->handle); /* zeroes the slot */
-    spin_unlock(&g_drm.virgl_lock);
-    /* Tear down host resource + free guest backing outside the spinlock
-     * (these block/sleep on the host). */
-    virtio_gpu_resource_unref(rid);
-    uint32_t npages = (sz + PAGE_SIZE - 1) / PAGE_SIZE;
-    bfc_free_page_data(vaddr, npages);
-    return 0;
-  }
-
-  if (c->handle == 0 || c->handle > MAX_DUMB_BUFFERS)
-    return -ENOENT;
-
-  spin_lock(&g_drm.dumb_lock);
-  struct drm_dumb_buffer *buf = drm_find_dumb((int)c->handle);
-  if (!buf) {
-    spin_unlock(&g_drm.dumb_lock);
-    return -ENOENT;
-  }
-  drm_file_untrack_handle(df, (int)c->handle, false);
-  buf->refcount--;
-  if (buf->refcount <= 0) {
-    uint32_t rid = buf->virtio_res_id;
-    void *vaddr = buf->kernel_vaddr;
-    uint32_t npages = (uint32_t)((buf->size + PAGE_SIZE - 1) / PAGE_SIZE);
-    __memset(buf, 0, sizeof(*buf));
-    spin_unlock(&g_drm.dumb_lock);
-    virtio_gpu_resource_unref(rid);
-    bfc_free_page_data(vaddr, npages);
-    return 0;
-  }
-  spin_unlock(&g_drm.dumb_lock);
-  return 0;
+  return drm_core_gem_handle_delete(file, c->handle);
 }
 
 /* DRM_IOCTL_MODE_ADDFB */
-static long drm_ioctl_addfb(void *arg, struct drm_file *cf) {
+static long drm_ioctl_addfb(void *arg, struct drm_file *cf, struct file *file) {
   struct drm_mode_fb_cmd *f = (struct drm_mode_fb_cmd *)arg;
-  spin_lock(&g_drm.dumb_lock);
-  struct drm_dumb_buffer *d = drm_find_dumb((int)f->handle);
-  int dref = d ? 1 : 0;
-  spin_unlock(&g_drm.dumb_lock);
-  if (!dref)
+  struct drm_gem_object *gem = drm_core_gem_object_lookup(file, f->handle);
+  struct drm_dumb_buffer *d = gem ? drm_gem_object_private(gem) : NULL;
+  if (!d || f->handle >= VIRGL_HANDLE_BASE) {
+    drm_gem_object_put(gem);
     return -EINVAL;
+  }
 
   spin_lock(&g_drm.fb_lock);
   int fb_id = drm_alloc_fb_id();
   if (fb_id < 0) {
     spin_unlock(&g_drm.fb_lock);
+    drm_gem_object_put(gem);
     return -ENOMEM;
   }
   struct drm_framebuffer *fb = &g_drm.fbs[fb_id - 1];
@@ -2121,16 +2216,12 @@ static long drm_ioctl_addfb(void *arg, struct drm_file *cf) {
 
   fb->dumb_handle = (int)f->handle;
   fb->is_virgl = false;
+  fb->gem = gem;
+  fb->owner = cf;
   fb->width = f->width;
   fb->height = f->height;
   fb->pitch = f->pitch;
   fb->bpp = f->bpp;
-
-  spin_lock(&g_drm.dumb_lock);
-  d = drm_find_dumb((int)f->handle);
-  if (d)
-    d->refcount++;
-  spin_unlock(&g_drm.dumb_lock);
 
   f->fb_id = (uint32_t)fb_id;
 
@@ -2158,7 +2249,8 @@ static int bpp_from_format(uint32_t pixel_format) {
 }
 
 /* DRM_IOCTL_MODE_ADDFB2 */
-static long drm_ioctl_addfb2(void *arg, struct drm_file *cf) {
+static long drm_ioctl_addfb2(void *arg, struct drm_file *cf,
+                             struct file *file) {
   struct drm_mode_fb_cmd2 *c = (struct drm_mode_fb_cmd2 *)arg;
   if (!c)
     return -EFAULT;
@@ -2173,23 +2265,24 @@ static long drm_ioctl_addfb2(void *arg, struct drm_file *cf) {
     return -EINVAL;
 
   bool is_virgl = c->handles[0] >= VIRGL_HANDLE_BASE;
-  struct drm_dumb_buffer *d = NULL;
+  struct drm_gem_object *gem = drm_core_gem_object_lookup(file, c->handles[0]);
+  void *backing = gem ? drm_gem_object_private(gem) : NULL;
+  if (!backing) {
+    drm_gem_object_put(gem);
+    return -ENOENT;
+  }
   if (is_virgl) {
-    spin_lock(&g_drm.virgl_lock);
     struct drm_virgl_resource *r = drm_find_virgl_resource(c->handles[0]);
-    if (r)
-      r->refcount++;
-    spin_unlock(&g_drm.virgl_lock);
-    if (!r)
+    if (!r || backing != r) {
+      drm_gem_object_put(gem);
       return -ENOENT;
+    }
   } else {
-    spin_lock(&g_drm.dumb_lock);
-    d = drm_find_dumb((int)c->handles[0]);
-    if (d)
-      d->refcount++;
-    spin_unlock(&g_drm.dumb_lock);
-    if (!d)
+    struct drm_dumb_buffer *d = drm_find_dumb((int)c->handles[0]);
+    if (!d || backing != d) {
+      drm_gem_object_put(gem);
       return -ENOENT;
+    }
   }
 
   /* Allocate fb_id (shared with ADDFB) */
@@ -2197,8 +2290,7 @@ static long drm_ioctl_addfb2(void *arg, struct drm_file *cf) {
   int fb_id = drm_alloc_fb_id();
   if (fb_id < 0) {
     spin_unlock(&g_drm.fb_lock);
-    struct drm_gem_close close = {.handle = c->handles[0]};
-    drm_ioctl_gem_close(&close, NULL);
+    drm_gem_object_put(gem);
     return -ENOMEM;
   }
   struct drm_framebuffer *fb = &g_drm.fbs[fb_id - 1];
@@ -2206,6 +2298,8 @@ static long drm_ioctl_addfb2(void *arg, struct drm_file *cf) {
 
   fb->dumb_handle = (int)c->handles[0];
   fb->is_virgl = is_virgl;
+  fb->gem = gem;
+  fb->owner = cf;
   fb->width = c->width;
   fb->height = c->height;
   fb->pitch = c->pitches[0];
@@ -2252,14 +2346,13 @@ static long drm_ioctl_rmfb(void *arg) {
     return -EINVAL;
   }
   fb->refcount--;
-  int dumb_handle = fb->dumb_handle;
+  struct drm_gem_object *gem = fb->gem;
   if (fb->refcount <= 0) {
     __memset(fb, 0, sizeof(*fb));
   }
   spin_unlock(&g_drm.fb_lock);
 
-  struct drm_gem_close close = {.handle = (uint32_t)dumb_handle};
-  drm_ioctl_gem_close(&close, NULL);
+  drm_gem_object_put(gem);
   return 0;
 }
 
@@ -2484,19 +2577,19 @@ static long drm_ioctl_file(xtask *proc, struct file *file, uint32_t cmd,
   case DRM_IOCTL_VIRTGPU_CONTEXT_INIT:
     return drm_ioctl_virtgpu_context_init(arg, df);
   case DRM_IOCTL_VIRTGPU_RESOURCE_CREATE:
-    return drm_ioctl_virtgpu_resource_create(arg, df);
+    return drm_ioctl_virtgpu_resource_create(arg, df, file);
   case DRM_IOCTL_VIRTGPU_RESOURCE_INFO:
-    return drm_ioctl_virtgpu_resource_info(arg);
+    return drm_ioctl_virtgpu_resource_info(arg, file);
   case DRM_IOCTL_VIRTGPU_MAP:
-    return drm_ioctl_virtgpu_map(arg, df);
+    return drm_ioctl_virtgpu_map(arg, file);
   case DRM_IOCTL_VIRTGPU_EXECBUFFER:
-    return drm_ioctl_virtgpu_execbuffer(arg, df);
+    return drm_ioctl_virtgpu_execbuffer(arg, df, file);
   case DRM_IOCTL_VIRTGPU_TRANSFER_TO_HOST:
-    return drm_ioctl_virtgpu_transfer_to_host(arg);
+    return drm_ioctl_virtgpu_transfer_to_host(arg, file);
   case DRM_IOCTL_VIRTGPU_TRANSFER_FROM_HOST:
-    return drm_ioctl_virtgpu_transfer_from_host(arg);
+    return drm_ioctl_virtgpu_transfer_from_host(arg, file);
   case DRM_IOCTL_VIRTGPU_WAIT:
-    return drm_ioctl_virtgpu_3d_wait(arg, df);
+    return drm_ioctl_virtgpu_3d_wait(arg, df, file);
   case DRM_IOCTL_GET_CAP:
     return drm_ioctl_get_cap(arg);
   case DRM_IOCTL_SET_CLIENT_CAP:
@@ -2520,15 +2613,15 @@ static long drm_ioctl_file(xtask *proc, struct file *file, uint32_t cmd,
   case DRM_IOCTL_MODE_GETPLANE:
     return drm_ioctl_getplane(arg);
   case DRM_IOCTL_MODE_CREATE_DUMB:
-    return drm_ioctl_create_dumb(arg, df);
+    return drm_ioctl_create_dumb(arg, file);
   case DRM_IOCTL_MODE_MAP_DUMB:
-    return drm_ioctl_map_dumb(arg);
+    return drm_ioctl_map_dumb(arg, file);
   case DRM_IOCTL_MODE_DESTROY_DUMB:
-    return drm_ioctl_destroy_dumb(arg, df);
+    return drm_ioctl_destroy_dumb(arg, file);
   case DRM_IOCTL_MODE_ADDFB:
-    return drm_ioctl_addfb(arg, df);
+    return drm_ioctl_addfb(arg, df, file);
   case DRM_IOCTL_MODE_ADDFB2:
-    return drm_ioctl_addfb2(arg, df);
+    return drm_ioctl_addfb2(arg, df, file);
   case DRM_IOCTL_MODE_RMFB:
     return drm_ioctl_rmfb(arg);
   case DRM_IOCTL_MODE_PAGE_FLIP:
@@ -2546,7 +2639,7 @@ static long drm_ioctl_file(xtask *proc, struct file *file, uint32_t cmd,
   case DRM_IOCTL_AUTH_MAGIC:
     return -ENOTTY;
   case DRM_IOCTL_GEM_CLOSE:
-    return drm_ioctl_gem_close(arg, df);
+    return drm_ioctl_gem_close(arg, file);
   case DRM_IOCTL_MODE_GETPROPERTY:
     return -ENOTTY;
   case DRM_IOCTL_MODE_SETPROPERTY:
@@ -2561,9 +2654,9 @@ static long drm_ioctl_file(xtask *proc, struct file *file, uint32_t cmd,
     /* Empty leases are optional. wlroots falls back to reopening the node. */
     return -EOPNOTSUPP;
   case DRM_IOCTL_PRIME_HANDLE_TO_FD:
-    return drm_ioctl_prime_handle_to_fd(arg, proc);
+    return -ENOTTY;
   case DRM_IOCTL_PRIME_FD_TO_HANDLE:
-    return drm_ioctl_prime_fd_to_handle(arg, proc, df);
+    return -ENOTTY;
   default:
     printk(LOG_WARN, "drm_ioctl: unknown cmd 0x%x\n", cmd);
     return -ENOSYS;
@@ -2601,7 +2694,7 @@ static uint32_t alloc_virgl_handle(void) {
   for (uint32_t i = 0; i < MAX_VIRGL_RESOURCES; i++) {
     uint32_t index = (start + i) % MAX_VIRGL_RESOURCES;
     struct drm_virgl_resource *r = &g_drm.virgl_res[index];
-    if (r->bo_handle != 0)
+    if (r->bo_handle != 0 || r->release_work.state != WORK_IDLE)
       continue;
 
     uint32_t h = VIRGL_HANDLE_BASE + index;
@@ -2631,106 +2724,6 @@ static void free_virgl_handle(uint32_t handle) {
   if (r->bo_handle != handle)
     return;
   __memset(r, 0, sizeof(*r));
-}
-
-static bool drm_bo_get(uint32_t handle, bool is_virgl) {
-  if (is_virgl) {
-    spin_lock(&g_drm.virgl_lock);
-    struct drm_virgl_resource *r = drm_find_virgl_resource(handle);
-    if (r)
-      r->refcount++;
-    spin_unlock(&g_drm.virgl_lock);
-    return r != NULL;
-  }
-
-  spin_lock(&g_drm.dumb_lock);
-  struct drm_dumb_buffer *d = drm_find_dumb((int)handle);
-  if (d)
-    d->refcount++;
-  spin_unlock(&g_drm.dumb_lock);
-  return d != NULL;
-}
-
-void drm_prime_object_put(struct drm_prime_object *object) {
-  if (!object)
-    return;
-  struct drm_gem_close close = {.handle = object->handle};
-  drm_ioctl_gem_close(&close, NULL);
-  kfree(object);
-}
-
-static bool drm_file_has_handle(struct drm_file *df, int handle, bool virgl) {
-  int *handles = virgl ? df->created_virgl_handles : df->created_dumb_handles;
-  int count = virgl ? df->created_virgl_count : df->created_dumb_count;
-  for (int i = 0; i < count; i++) {
-    if (handles[i] == handle)
-      return true;
-  }
-  return false;
-}
-
-static long drm_ioctl_prime_handle_to_fd(void *arg, xtask *proc) {
-  struct drm_prime_handle *prime = (struct drm_prime_handle *)arg;
-  if (!prime || !proc)
-    return -EFAULT;
-  if (prime->flags & ~(DRM_CLOEXEC | DRM_RDWR))
-    return -EINVAL;
-
-  bool is_virgl = prime->handle >= VIRGL_HANDLE_BASE;
-  if (!drm_bo_get(prime->handle, is_virgl))
-    return -ENOENT;
-
-  struct drm_prime_object *object = kmalloc(sizeof(*object));
-  if (!object) {
-    struct drm_gem_close close = {.handle = prime->handle};
-    drm_ioctl_gem_close(&close, NULL);
-    return -ENOMEM;
-  }
-  object->handle = prime->handle;
-  object->is_virgl = is_virgl;
-
-  int fd =
-      bsd_drm_prime_fd_install(proc, object, (prime->flags & DRM_CLOEXEC) != 0);
-  if (fd < 0) {
-    drm_prime_object_put(object);
-    return fd;
-  }
-  prime->fd = fd;
-  return 0;
-}
-
-static long drm_ioctl_prime_fd_to_handle(void *arg, xtask *proc,
-                                         struct drm_file *df) {
-  struct drm_prime_handle *prime = (struct drm_prime_handle *)arg;
-  if (!prime || !proc || !df)
-    return -EFAULT;
-
-  struct file *file = bsd_drm_prime_fd_get(proc, prime->fd);
-  if (!file)
-    return -EBADF;
-  struct drm_prime_object *object = file->drm_prime;
-  uint32_t handle = object->handle;
-  bool is_virgl = object->is_virgl;
-
-  if (!drm_file_has_handle(df, (int)handle, is_virgl)) {
-    int *count = is_virgl ? &df->created_virgl_count : &df->created_dumb_count;
-    int limit = is_virgl ? MAX_VIRGL_RESOURCES : MAX_DUMB_BUFFERS;
-    int *handles =
-        is_virgl ? df->created_virgl_handles : df->created_dumb_handles;
-    if (*count >= limit) {
-      file_put(file);
-      return -ENOSPC;
-    }
-    if (!drm_bo_get(handle, is_virgl)) {
-      file_put(file);
-      return -ENOENT;
-    }
-    handles[(*count)++] = (int)handle;
-  }
-
-  prime->handle = handle;
-  file_put(file);
-  return 0;
 }
 
 /* True if capset_id was cached from the host. */
@@ -2829,30 +2822,21 @@ static int drm_render_open_file(xtask *proc, struct file *file) {
 }
 
 /* Helper: release a framebuffer (refcount decrement + cleanup) */
-static void drm_release_fb(int fb_id) {
+static void drm_release_fb(int fb_id, struct drm_file *owner) {
   spin_lock(&g_drm.fb_lock);
   struct drm_framebuffer *fb = drm_find_fb(fb_id);
-  if (!fb) {
+  if (!fb || (owner && fb->owner != owner)) {
     spin_unlock(&g_drm.fb_lock);
     return;
   }
-  int dumb_handle = fb->dumb_handle;
+  struct drm_gem_object *gem = fb->gem;
   fb->refcount--;
   if (fb->refcount <= 0) {
     __memset(fb, 0, sizeof(*fb));
   }
   spin_unlock(&g_drm.fb_lock);
 
-  if (dumb_handle > 0) {
-    struct drm_gem_close close = {.handle = (uint32_t)dumb_handle};
-    drm_ioctl_gem_close(&close, NULL);
-  }
-}
-
-/* Drop the GEM-handle reference owned by a DRM file. */
-static void drm_release_dumb(int handle) {
-  struct drm_gem_close close = {.handle = (uint32_t)handle};
-  drm_ioctl_gem_close(&close, NULL);
+  drm_gem_object_put(gem);
 }
 
 static int drm_close_file(xtask *proc, struct file *file) {
@@ -2860,79 +2844,47 @@ static int drm_close_file(xtask *proc, struct file *file) {
   if (!target)
     return 0;
   int close_slot = -1;
+  int used_count = 0;
+  int capacity = 0;
   spin_lock(&g_drm_files_lock);
   for (int i = 0; i < g_drm_files_capacity; i++) {
     struct drm_file *f = g_drm_files[i];
     if (!f || !f->used || f != target)
       continue;
     close_slot = i;
-    /* Release per-fd resources (Phase C) */
-    for (int j = 0; j < f->created_fb_count; j++) {
-      drm_release_fb(f->created_fb_ids[j]);
-    }
-    for (int j = 0; j < f->created_dumb_count; j++) {
-      drm_release_dumb(f->created_dumb_handles[j]);
-    }
-
-    /* Release Venus context (plan1) */
-    if (f->ctx_id != 0) {
-      struct virtio_gpu_ctx_create destroy;
-      struct virtio_gpu_ctrl_hdr_response resp;
-      __memset(&destroy, 0, sizeof(destroy));
-      __memset(&resp, 0, sizeof(resp));
-      destroy.hdr.type = VIRTIO_GPU_CMD_CTX_DESTROY;
-      destroy.hdr.ctx_id = f->ctx_id;
-      virtio_gpu_send_cmd_3d(&g_virtio_gpu, &destroy, sizeof(destroy), &resp,
-                             sizeof(resp));
-      drm_virgl_forget_context(f->ctx_id);
-      free_ctx_id(f->ctx_id);
-      f->ctx_id = 0;
-    }
-    if (f->ring_fence_counters) {
-      kfree(f->ring_fence_counters);
-      f->ring_fence_counters = NULL;
-    }
-
-    /* Release virgl legacy (v1) resources: unref host resource + free guest
-     * backing. Per-fd tracking guarantees each handle is torn down once. */
-    for (int j = 0; j < f->created_virgl_count; j++) {
-      uint32_t h = (uint32_t)f->created_virgl_handles[j];
-      spin_lock(&g_drm.virgl_lock);
-      struct drm_virgl_resource *r = drm_find_virgl_resource(h);
-      if (!r) {
-        spin_unlock(&g_drm.virgl_lock);
-        continue;
-      }
-      r->refcount--;
-      if (r->refcount > 0) {
-        spin_unlock(&g_drm.virgl_lock);
-        continue;
-      }
-      uint32_t rid = r->res_handle;
-      void *vaddr = r->kernel_vaddr;
-      uint64_t sz = r->size;
-      free_virgl_handle(h);
-      spin_unlock(&g_drm.virgl_lock);
-      virtio_gpu_resource_unref(rid);
-      uint32_t npages = (sz + PAGE_SIZE - 1) / PAGE_SIZE;
-      bfc_free_page_data(vaddr, npages);
-    }
-
     g_drm_files[i] = NULL;
     file->private_data = NULL;
-    int used_count = 0;
     for (int j = 0; j < g_drm_files_capacity; j++)
       if (g_drm_files[j])
         used_count++;
-    int capacity = g_drm_files_capacity;
+    capacity = g_drm_files_capacity;
     spin_unlock(&g_drm_files_lock);
-    kfree(f);
-    printk(LOG_DEBUG, "drm: close slot=%d pid=%d used=%d/%d\n", close_slot,
-           proc ? proc->pid : -1, used_count, capacity);
-    return 0;
+    goto detached;
   }
   spin_unlock(&g_drm_files_lock);
   return 0; /* ignore close on unknown fd */
+
+detached:
+  for (int j = 0; j < target->created_fb_count; j++)
+    drm_release_fb(target->created_fb_ids[j], target);
+
+  if (target->ctx_id != 0) {
+    struct virtio_gpu_ctx_create destroy;
+    struct virtio_gpu_ctrl_hdr_response resp;
+    __memset(&destroy, 0, sizeof(destroy));
+    __memset(&resp, 0, sizeof(resp));
+    destroy.hdr.type = VIRTIO_GPU_CMD_CTX_DESTROY;
+    destroy.hdr.ctx_id = target->ctx_id;
+    virtio_gpu_send_cmd_3d(&g_virtio_gpu, &destroy, sizeof(destroy), &resp,
+                           sizeof(resp));
+    drm_virgl_forget_context(target->ctx_id);
+    free_ctx_id(target->ctx_id);
+  }
+  kfree(target->ring_fence_counters);
+  kfree(target);
+  printk(LOG_DEBUG, "drm: close slot=%d pid=%d used=%d/%d\n", close_slot,
+         proc ? proc->pid : -1, used_count, capacity);
+  return 0;
 }
 
 struct dev_ops drm_dev_ops = {

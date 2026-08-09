@@ -9,6 +9,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <xos/errno.h>
+#include <xos/page.h>
 #include <xos/socket.h>
 
 #include "arch/x64/apic.h"
@@ -16,6 +17,7 @@
 #include "drm/drm.h"
 #include "drm/drm_mode.h"
 #include "kernel/bsd/devtmpfs.h"
+#include "kernel/bsd/kfcntl.h" // IWYU pragma: keep
 #include "kernel/bsd/poll_types.h"
 #include "kernel/bsd/sysfs.h"
 #include "kernel/driver/bsd_types.h"
@@ -29,6 +31,7 @@
 #include "kernel/xcore/spinlock.h"
 #include "kernel/xcore/wait_queue.h"
 #include "kernel/xcore/xtask.h"
+#include "utils/macro.h"
 
 #define DRM_CORE_MAJOR 226
 #define DRM_CORE_SLOTS 64
@@ -37,6 +40,28 @@
 #define DRM_CORE_MAX_OBJECT_PROPERTIES 16
 #define DRM_CORE_MAX_PROPERTY_ENUMS 16
 #define DRM_CORE_MAX_BLOBS 32
+#define DRM_CORE_MAX_HANDLES 256
+#define DRM_CORE_MMAP_OFFSET_START 0x100000ULL
+
+int bsd_drm_prime_fd_install(xtask *proc, struct drm_prime_object *object,
+                             bool cloexec);
+struct file *bsd_drm_prime_fd_get(xtask *proc, int fd);
+
+struct drm_gem_object {
+  refcount_t refcount;
+  struct drm_core_device *dev;
+  uint64_t size;
+  uint64_t mmap_offset;
+  struct page **pages;
+  uint32_t page_count;
+  void *private;
+  const struct drm_gem_object_ops *ops;
+};
+
+struct drm_core_handle {
+  uint32_t handle;
+  struct drm_gem_object *object;
+};
 
 enum drm_core_property_type {
   DRM_CORE_PROPERTY_RANGE,
@@ -108,6 +133,7 @@ struct drm_core_device {
   uint32_t next_object_id;
   uint32_t next_property_id;
   uint32_t next_blob_id;
+  uint64_t next_mmap_page;
   struct drm_core_object objects[DRM_CORE_MAX_OBJECTS];
   struct drm_core_property properties[DRM_CORE_MAX_PROPERTIES];
   struct drm_core_blob blobs[DRM_CORE_MAX_BLOBS];
@@ -132,6 +158,8 @@ struct drm_core_file {
   uint32_t event_crtc_id;
   uint32_t event_sequence;
   wait_queue_head event_wq;
+  struct drm_core_handle *handles;
+  uint32_t next_handle;
 };
 
 static mutex drm_registry_mutex;
@@ -277,6 +305,12 @@ static int drm_minor_open_file(xtask *proc, struct file *file) {
   if (!df)
     return -ENOMEM;
   __memset(df, 0, sizeof(*df));
+  df->handles = kmalloc(sizeof(*df->handles) * DRM_CORE_MAX_HANDLES);
+  if (!df->handles) {
+    kfree(df);
+    return -ENOMEM;
+  }
+  __memset(df->handles, 0, sizeof(*df->handles) * DRM_CORE_MAX_HANDLES);
   list_init(&df->node);
   df->dev = minor->dev;
   df->file = file;
@@ -300,6 +334,7 @@ static int drm_minor_open_file(xtask *proc, struct file *file) {
     list_remove(&df->node);
     mutex_unlock(&df->dev->file_mutex);
     drm_core_device_put(df->dev);
+    kfree(df->handles);
     kfree(df);
   }
   return rc;
@@ -327,12 +362,22 @@ static int drm_minor_close_file(xtask *proc, struct file *file) {
     df->event_pending = false;
     spin_unlock(&df->event_lock);
     list_remove(&df->node);
+    for (size_t i = 0; i < DRM_CORE_MAX_HANDLES; i++) {
+      df->handles[i].handle = 0;
+    }
   }
   mutex_unlock(&minor->dev->file_mutex);
   if (dropped_master && minor->dev->master_drop)
     minor->dev->master_drop(minor->dev->driver_private);
   if (df) {
+    for (size_t i = 0; i < DRM_CORE_MAX_HANDLES; i++) {
+      struct drm_gem_object *object = df->handles[i].object;
+      df->handles[i].object = NULL;
+      if (object)
+        drm_gem_object_put(object);
+    }
     drm_core_device_put(df->dev);
+    kfree(df->handles);
     kfree(df);
   }
   return rc;
@@ -539,7 +584,8 @@ static long drm_core_kms_ioctl(struct drm_core_file *df, uint32_t cmd,
   }
 }
 
-static long drm_core_common_ioctl(struct drm_core_file *df, uint32_t cmd,
+static long drm_core_common_ioctl(xtask *proc, struct file *file,
+                                  struct drm_core_file *df, uint32_t cmd,
                                   void *arg, bool *handled) {
   *handled = true;
   switch (cmd) {
@@ -633,6 +679,55 @@ static long drm_core_common_ioctl(struct drm_core_file *df, uint32_t cmd,
       df->client_caps &= ~bit;
     return 0;
   }
+  case DRM_IOCTL_GEM_CLOSE: {
+    struct drm_gem_close *close = arg;
+    if (!close)
+      return -EFAULT;
+    return drm_core_gem_handle_delete(file, close->handle);
+  }
+  case DRM_IOCTL_PRIME_HANDLE_TO_FD: {
+    struct drm_prime_handle *prime = arg;
+    if (!prime || !proc)
+      return -EFAULT;
+    if (prime->flags & ~(DRM_CLOEXEC | DRM_RDWR))
+      return -EINVAL;
+    struct drm_gem_object *object =
+        drm_core_gem_object_lookup(file, prime->handle);
+    if (!object)
+      return -ENOENT;
+    struct drm_prime_object *wrapper = kmalloc(sizeof(*wrapper));
+    if (!wrapper) {
+      drm_gem_object_put(object);
+      return -ENOMEM;
+    }
+    wrapper->object = object;
+    wrapper->handle_hint = prime->handle;
+    int fd = bsd_drm_prime_fd_install(proc, wrapper,
+                                      (prime->flags & DRM_CLOEXEC) != 0);
+    if (fd < 0) {
+      drm_prime_object_put(wrapper);
+      return fd;
+    }
+    prime->fd = fd;
+    return 0;
+  }
+  case DRM_IOCTL_PRIME_FD_TO_HANDLE: {
+    struct drm_prime_handle *prime = arg;
+    if (!prime || !proc)
+      return -EFAULT;
+    struct file *prime_file = bsd_drm_prime_fd_get(proc, prime->fd);
+    if (!prime_file)
+      return -EBADF;
+    struct drm_prime_object *wrapper = prime_file->drm_prime;
+    uint32_t handle = 0;
+    int rc = drm_core_gem_handle_create(file, wrapper->object,
+                                        wrapper->handle_hint, &handle);
+    file_put(prime_file);
+    if (rc)
+      return rc == -EINVAL ? -EXDEV : rc;
+    prime->handle = handle;
+    return 0;
+  }
   default:
     *handled = false;
     return 0;
@@ -695,7 +790,7 @@ static long drm_minor_ioctl_file(xtask *proc, struct file *file, uint32_t cmd,
   if (!df)
     return -EBADF;
   bool handled = false;
-  long rc = drm_core_common_ioctl(df, cmd, arg, &handled);
+  long rc = drm_core_common_ioctl(proc, file, df, cmd, arg, &handled);
   if (handled)
     return rc;
   if (df->render && drm_ioctl_is_kms(cmd))
@@ -759,6 +854,52 @@ static ssize_t drm_minor_read_file(xtask *proc, struct file *file, void *buf,
                                                   : (ssize_t)sizeof(event);
 }
 
+static void drm_gem_vma_get(void *owner) { drm_gem_object_get(owner); }
+
+static void drm_gem_vma_put(void *owner) { drm_gem_object_put(owner); }
+
+static const struct vma_owner_ops drm_gem_vma_owner_ops = {
+    .get = drm_gem_vma_get,
+    .put = drm_gem_vma_put,
+};
+
+static int drm_minor_mmap_prepare_file(struct file *file,
+                                       const struct dev_mmap_request *request,
+                                       struct dev_mmap_backing *backing) {
+  if (!file || !request || !backing || !request->length ||
+      (request->offset & (PAGE_SIZE - 1)))
+    return -EINVAL;
+  struct drm_core_file *df = drm_file_find(file);
+  if (!df)
+    return -EBADF;
+
+  mutex_lock(&df->dev->file_mutex);
+  struct drm_gem_object *object = NULL;
+  for (size_t i = 0; i < DRM_CORE_MAX_HANDLES; i++) {
+    struct drm_gem_object *candidate = df->handles[i].object;
+    if (candidate && candidate->mmap_offset == request->offset) {
+      object = candidate;
+      drm_gem_object_get(object);
+      break;
+    }
+  }
+  mutex_unlock(&df->dev->file_mutex);
+  if (!object)
+    return -EACCES;
+  if (request->length > ALIGN_UP(object->size, PAGE_SIZE) ||
+      request->length / PAGE_SIZE > object->page_count) {
+    drm_gem_object_put(object);
+    return -EINVAL;
+  }
+
+  backing->owner = object;
+  backing->owner_ops = &drm_gem_vma_owner_ops;
+  backing->pages = object->pages;
+  backing->page_count = request->length / PAGE_SIZE;
+  backing->cache_flags = 0;
+  return 0;
+}
+
 struct drm_core_device *
 drm_core_device_alloc(const struct drm_core_config *config) {
   if (!config || !config->driver_name || !config->driver_name[0] ||
@@ -786,6 +927,7 @@ drm_core_device_alloc(const struct drm_core_config *config) {
   dev->next_object_id = 1;
   dev->next_property_id = 1;
   dev->next_blob_id = 1;
+  dev->next_mmap_page = DRM_CORE_MMAP_OFFSET_START;
   dev->primary.dev = dev;
   dev->primary.type = DRM_NODE_PRIMARY;
   dev->render.dev = dev;
@@ -821,6 +963,9 @@ static int drm_minor_publish(struct drm_core_device *dev,
   minor->ops.open_file = drm_minor_open_file;
   minor->ops.close_file = drm_minor_close_file;
   minor->ops.ioctl_file = drm_minor_ioctl_file;
+  minor->ops.mmap = NULL;
+  minor->ops.mmap_file = NULL;
+  minor->ops.mmap_prepare_file = drm_minor_mmap_prepare_file;
   if (minor->type == DRM_NODE_PRIMARY) {
     minor->ops.read = NULL;
     minor->ops.poll = NULL;
@@ -1000,6 +1145,168 @@ bool drm_core_file_is_master(struct file *file) {
 bool drm_core_file_is_authenticated(struct file *file) {
   struct drm_core_file *df = drm_file_find(file);
   return df && (df->render || df->master || df->authenticated);
+}
+
+struct drm_gem_object *
+drm_gem_object_create(struct drm_core_device *dev, uint64_t size,
+                      struct page **pages, uint32_t page_count, void *private,
+                      const struct drm_gem_object_ops *ops) {
+  if (!dev || !size || !pages || !page_count ||
+      page_count != ALIGN_UP(size, PAGE_SIZE) / PAGE_SIZE)
+    return NULL;
+  struct drm_gem_object *object = kmalloc(sizeof(*object));
+  if (!object)
+    return NULL;
+  __memset(object, 0, sizeof(*object));
+  refcount_set(&object->refcount, 1);
+  object->dev = dev;
+  object->size = size;
+  object->pages = pages;
+  object->page_count = page_count;
+  object->private = private;
+  object->ops = ops;
+  drm_core_device_get(dev);
+
+  mutex_lock(&dev->file_mutex);
+  if (dev->next_mmap_page > UINT64_MAX / PAGE_SIZE - page_count) {
+    mutex_unlock(&dev->file_mutex);
+    drm_core_device_put(dev);
+    kfree(object);
+    return NULL;
+  }
+  object->mmap_offset = dev->next_mmap_page * PAGE_SIZE;
+  dev->next_mmap_page += page_count;
+  mutex_unlock(&dev->file_mutex);
+  return object;
+}
+
+void drm_gem_object_get(struct drm_gem_object *object) {
+  if (object)
+    refcount_inc(&object->refcount);
+}
+
+void drm_gem_object_put(struct drm_gem_object *object) {
+  if (!object || !refcount_dec_and_test(&object->refcount))
+    return;
+  if (object->ops && object->ops->release)
+    object->ops->release(object);
+  kfree(object->pages);
+  drm_core_device_put(object->dev);
+  kfree(object);
+}
+
+void drm_prime_object_put(struct drm_prime_object *object) {
+  if (!object)
+    return;
+  drm_gem_object_put(object->object);
+  kfree(object);
+}
+
+void *drm_gem_object_private(struct drm_gem_object *object) {
+  return object ? object->private : NULL;
+}
+
+uint64_t drm_gem_object_size(const struct drm_gem_object *object) {
+  return object ? object->size : 0;
+}
+
+int drm_core_gem_handle_create(struct file *file, struct drm_gem_object *object,
+                               uint32_t preferred_handle, uint32_t *handle) {
+  struct drm_core_file *df = drm_file_find(file);
+  if (!df || !object || !handle || object->dev != df->dev)
+    return -EINVAL;
+  mutex_lock(&df->dev->file_mutex);
+  struct drm_core_handle *free_entry = NULL;
+  bool preferred_busy = false;
+  for (size_t i = 0; i < DRM_CORE_MAX_HANDLES; i++) {
+    struct drm_core_handle *entry = &df->handles[i];
+    if (entry->object == object) {
+      *handle = entry->handle;
+      mutex_unlock(&df->dev->file_mutex);
+      return 0;
+    }
+    if (!entry->object && !free_entry)
+      free_entry = entry;
+    if (preferred_handle && entry->handle == preferred_handle && entry->object)
+      preferred_busy = true;
+  }
+  if (!free_entry) {
+    mutex_unlock(&df->dev->file_mutex);
+    return -ENOSPC;
+  }
+  uint32_t candidate =
+      preferred_handle && !preferred_busy ? preferred_handle : df->next_handle;
+  if (!candidate)
+    candidate = 1;
+  for (;;) {
+    bool busy = false;
+    for (size_t i = 0; i < DRM_CORE_MAX_HANDLES; i++)
+      busy |= df->handles[i].object && df->handles[i].handle == candidate;
+    if (!busy)
+      break;
+    if (++candidate == 0) {
+      mutex_unlock(&df->dev->file_mutex);
+      return -ENOSPC;
+    }
+  }
+  free_entry->handle = candidate;
+  free_entry->object = object;
+  drm_gem_object_get(object);
+  df->next_handle = candidate + 1;
+  *handle = candidate;
+  mutex_unlock(&df->dev->file_mutex);
+  return 0;
+}
+
+struct drm_gem_object *drm_core_gem_object_lookup(struct file *file,
+                                                  uint32_t handle) {
+  struct drm_core_file *df = drm_file_find(file);
+  if (!df || !handle)
+    return NULL;
+  mutex_lock(&df->dev->file_mutex);
+  struct drm_gem_object *object = NULL;
+  for (size_t i = 0; i < DRM_CORE_MAX_HANDLES; i++) {
+    if (df->handles[i].object && df->handles[i].handle == handle) {
+      object = df->handles[i].object;
+      drm_gem_object_get(object);
+      break;
+    }
+  }
+  mutex_unlock(&df->dev->file_mutex);
+  return object;
+}
+
+int drm_core_gem_handle_delete(struct file *file, uint32_t handle) {
+  struct drm_core_file *df = drm_file_find(file);
+  if (!df || !handle)
+    return -ENOENT;
+  mutex_lock(&df->dev->file_mutex);
+  struct drm_gem_object *object = NULL;
+  for (size_t i = 0; i < DRM_CORE_MAX_HANDLES; i++) {
+    if (df->handles[i].object && df->handles[i].handle == handle) {
+      object = df->handles[i].object;
+      df->handles[i].handle = 0;
+      df->handles[i].object = NULL;
+      break;
+    }
+  }
+  mutex_unlock(&df->dev->file_mutex);
+  if (!object)
+    return -ENOENT;
+  drm_gem_object_put(object);
+  return 0;
+}
+
+int drm_core_gem_mmap_offset(struct file *file, uint32_t handle,
+                             uint64_t *offset) {
+  if (!offset)
+    return -EINVAL;
+  struct drm_gem_object *object = drm_core_gem_object_lookup(file, handle);
+  if (!object)
+    return -ENOENT;
+  *offset = object->mmap_offset;
+  drm_gem_object_put(object);
+  return 0;
 }
 
 uint32_t drm_core_object_alloc(struct drm_core_device *dev) {

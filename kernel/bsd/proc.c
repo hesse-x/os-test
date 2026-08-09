@@ -644,9 +644,17 @@ void mm_release(mm *mm, pid_t owner_pid) {
           uint64_t pte = pt_virt[pt_idx];
           if (pte_present(pte)) {
             uint64_t leaf_phys = pte & 0x000FFFFFFFFFF000ULL;
+            uint64_t leaf_vaddr =
+                ((uint64_t)pml4_idx << 39) | ((uint64_t)pdpt_idx << 30) |
+                ((uint64_t)pd_idx << 21) | ((uint64_t)pt_idx << 12);
             // Check mmap_regions: skip SHM fd mappings and MAP_PHYSICAL
             bool is_shared = false;
             for (mmap_region *mr = mm->mmap_regions; mr; mr = mr->next) {
+              if ((mr->flags & KMAP_VMA_OWNER) && leaf_vaddr >= mr->vaddr &&
+                  leaf_vaddr < mr->vaddr + mr->size) {
+                is_shared = true;
+                break;
+              }
               if (mr->shm_obj != NULL) {
                 shm *s = mr->shm_obj;
                 if (s->page_list) {
@@ -822,8 +830,16 @@ void mm_release_pages(mm *mm) {
           uint64_t pte = pt_virt[pt_idx];
           if (pte_present(pte)) {
             uint64_t leaf_phys = pte & 0x000FFFFFFFFFF000ULL;
+            uint64_t leaf_vaddr =
+                ((uint64_t)pml4_idx << 39) | ((uint64_t)pdpt_idx << 30) |
+                ((uint64_t)pd_idx << 21) | ((uint64_t)pt_idx << 12);
             bool skip = false;
             for (mmap_region *mr = mm->mmap_regions; mr; mr = mr->next) {
+              if ((mr->flags & KMAP_VMA_OWNER) && leaf_vaddr >= mr->vaddr &&
+                  leaf_vaddr < mr->vaddr + mr->size) {
+                skip = true;
+                break;
+              }
               if (mr->shm_obj) {
                 shm *s = mr->shm_obj;
                 if (s->page_list) {

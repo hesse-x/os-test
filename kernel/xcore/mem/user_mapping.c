@@ -16,6 +16,7 @@
 #include "arch/x64/utils.h" // invlpg
 #include "kernel/xcore/atomic.h"
 #include "kernel/xcore/kpi.h"
+#include "kernel/xcore/log.h"
 #include "kernel/xcore/mem/alloc.h"
 #include "kernel/xcore/mm_types.h"
 #include "kernel/xcore/sparse.h"
@@ -419,6 +420,14 @@ copy_page_table(uint64_t *src_pml4, uint64_t *dst_pml4,
           }
 
           // COW: mark writable pages as read-only with COW flag
+          if (PHY_TO_PAGE(leaf_phys) >= total_page_frames) {
+            printk(LOG_ERROR,
+                   "copy_page_table: invalid leaf va=0x%llx pte=0x%llx "
+                   "phys=0x%llx regions=%p\n",
+                   (unsigned long long)leaf_vaddr, (unsigned long long)pte,
+                   (unsigned long long)leaf_phys, mmap_regions);
+            return -EFAULT;
+          }
           struct page *phys_page = &bfc_frames[PHY_TO_PAGE(leaf_phys)];
           refcount_inc(&phys_page->p_refcount);
 

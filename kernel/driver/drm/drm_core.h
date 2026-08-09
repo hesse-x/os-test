@@ -12,6 +12,7 @@
 #include <stdint.h>
 
 struct file;
+struct page;
 
 #define DRM_NODE_PRIMARY (1u << 0)
 #define DRM_NODE_RENDER (1u << 1)
@@ -26,6 +27,16 @@ enum drm_core_state {
 };
 
 struct drm_core_device;
+struct drm_gem_object;
+
+struct drm_prime_object {
+  struct drm_gem_object *object;
+  uint32_t handle_hint;
+};
+
+struct drm_gem_object_ops {
+  void (*release)(struct drm_gem_object *object);
+};
 
 struct drm_core_config {
   const char *driver_name;
@@ -50,6 +61,22 @@ void *drm_core_driver_private(const struct drm_core_device *dev);
 struct drm_core_device *drm_core_file_device(struct file *file);
 bool drm_core_file_is_master(struct file *file);
 bool drm_core_file_is_authenticated(struct file *file);
+struct drm_gem_object *
+drm_gem_object_create(struct drm_core_device *dev, uint64_t size,
+                      struct page **pages, uint32_t page_count, void *private,
+                      const struct drm_gem_object_ops *ops);
+void drm_gem_object_get(struct drm_gem_object *object);
+void drm_gem_object_put(struct drm_gem_object *object);
+void drm_prime_object_put(struct drm_prime_object *object);
+void *drm_gem_object_private(struct drm_gem_object *object);
+uint64_t drm_gem_object_size(const struct drm_gem_object *object);
+int drm_core_gem_handle_create(struct file *file, struct drm_gem_object *object,
+                               uint32_t preferred_handle, uint32_t *handle);
+struct drm_gem_object *drm_core_gem_object_lookup(struct file *file,
+                                                  uint32_t handle);
+int drm_core_gem_handle_delete(struct file *file, uint32_t handle);
+int drm_core_gem_mmap_offset(struct file *file, uint32_t handle,
+                             uint64_t *offset);
 uint32_t drm_core_object_alloc(struct drm_core_device *dev);
 uint32_t drm_core_object_create(struct drm_core_device *dev,
                                 uint32_t object_type);

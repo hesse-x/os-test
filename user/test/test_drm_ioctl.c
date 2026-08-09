@@ -15,6 +15,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #include <unity.h>
 #include <xos/ioctl.h>
@@ -322,6 +323,115 @@ void test_drm_core_device_isolation(void) {
   close(mock_master);
 }
 
+// 9. GEM mmap authorization is per file; the VMA, not the handle, owns the
+// backing after GEM_CLOSE and fd close.
+void test_drm_gem_vma_lifetime_and_authorization(void) {
+  const size_t page_size = 4096;
+  int owner = open("/dev/dri/card0", O_RDWR);
+  int peer = open("/dev/dri/card0", O_RDWR);
+  if (owner < 0 || peer < 0) {
+    if (owner >= 0)
+      close(owner);
+    if (peer >= 0)
+      close(peer);
+    TEST_IGNORE_MESSAGE("/dev/dri/card0 not available");
+    return;
+  }
+
+  struct drm_mode_create_dumb dumb = {.width = 800, .height = 600, .bpp = 32};
+  TEST_ASSERT_EQUAL_INT(0, ioctl(owner, DRM_IOCTL_MODE_CREATE_DUMB, &dumb));
+  struct drm_mode_map_dumb map = {.handle = dumb.handle};
+  TEST_ASSERT_EQUAL_INT(0, ioctl(owner, DRM_IOCTL_MODE_MAP_DUMB, &map));
+  TEST_ASSERT_NOT_EQUAL((uint64_t)dumb.handle << 12, map.offset);
+
+  void *guessed = mmap(NULL, dumb.size, PROT_READ | PROT_WRITE, MAP_SHARED,
+                       peer, (off_t)map.offset);
+  TEST_ASSERT_EQUAL_PTR(MAP_FAILED, guessed);
+  TEST_ASSERT_EQUAL_INT(EACCES, errno);
+
+  uint32_t *view = mmap(NULL, dumb.size, PROT_READ | PROT_WRITE, MAP_SHARED,
+                        owner, (off_t)map.offset);
+  TEST_ASSERT_NOT_EQUAL(MAP_FAILED, view);
+  view[page_size / sizeof(*view)] = 0x15a15a15u;
+
+  struct drm_gem_close gem_close = {.handle = dumb.handle};
+  TEST_ASSERT_EQUAL_INT(0, ioctl(owner, DRM_IOCTL_GEM_CLOSE, &gem_close));
+  close(owner);
+  TEST_ASSERT_EQUAL_HEX32(0x15a15a15u, view[page_size / sizeof(*view)]);
+
+  pid_t child = fork();
+  TEST_ASSERT_NOT_EQUAL(-1, child);
+  if (child == 0) {
+    if (view[page_size / sizeof(*view)] != 0x15a15a15u)
+      _exit(2);
+    view[2 * page_size / sizeof(*view)] = 0x25a25a25u;
+    _exit(0);
+  }
+  TEST_ASSERT_GREATER_THAN_INT(0, child);
+  int status = 0;
+  TEST_ASSERT_EQUAL_INT(child, waitpid(child, &status, 0));
+  TEST_ASSERT_TRUE(WIFEXITED(status));
+  TEST_ASSERT_EQUAL_INT(0, WEXITSTATUS(status));
+  TEST_ASSERT_EQUAL_HEX32(0x25a25a25u, view[2 * page_size / sizeof(*view)]);
+  TEST_ASSERT_EQUAL_INT(0, munmap(view, page_size));
+  TEST_ASSERT_EQUAL_INT(
+      0, munmap((char *)view + page_size, dumb.size - page_size));
+  close(peer);
+}
+
+// 10. PRIME fd owns the GEM object independently and rejects cross-device
+// imports even when numeric handles overlap.
+void test_drm_prime_object_lifetime_and_cross_device(void) {
+  int exporter = open("/dev/dri/card0", O_RDWR);
+  int importer = open("/dev/dri/card0", O_RDWR);
+  int foreign = open("/dev/dri/card1", O_RDWR);
+  if (exporter < 0 || importer < 0 || foreign < 0) {
+    if (exporter >= 0)
+      close(exporter);
+    if (importer >= 0)
+      close(importer);
+    if (foreign >= 0)
+      close(foreign);
+    TEST_IGNORE_MESSAGE("virtio + mock DRM devices not available");
+    return;
+  }
+
+  struct drm_mode_create_dumb dumb = {.width = 800, .height = 600, .bpp = 32};
+  TEST_ASSERT_EQUAL_INT(0, ioctl(exporter, DRM_IOCTL_MODE_CREATE_DUMB, &dumb));
+  struct drm_prime_handle prime = {.handle = dumb.handle,
+                                   .flags = DRM_CLOEXEC | DRM_RDWR};
+  TEST_ASSERT_EQUAL_INT(0,
+                        ioctl(exporter, DRM_IOCTL_PRIME_HANDLE_TO_FD, &prime));
+  TEST_ASSERT_GREATER_OR_EQUAL_INT(0, prime.fd);
+
+  struct drm_gem_close gem_close = {.handle = dumb.handle};
+  TEST_ASSERT_EQUAL_INT(0, ioctl(exporter, DRM_IOCTL_GEM_CLOSE, &gem_close));
+  close(exporter);
+
+  struct drm_prime_handle cross = {.fd = prime.fd};
+  TEST_ASSERT_EQUAL_INT(-1,
+                        ioctl(foreign, DRM_IOCTL_PRIME_FD_TO_HANDLE, &cross));
+  TEST_ASSERT_EQUAL_INT(EXDEV, errno);
+
+  struct drm_prime_handle imported = {.fd = prime.fd};
+  TEST_ASSERT_EQUAL_INT(
+      0, ioctl(importer, DRM_IOCTL_PRIME_FD_TO_HANDLE, &imported));
+  close(prime.fd);
+
+  struct drm_mode_map_dumb map = {.handle = imported.handle};
+  TEST_ASSERT_EQUAL_INT(0, ioctl(importer, DRM_IOCTL_MODE_MAP_DUMB, &map));
+  uint32_t *view = mmap(NULL, dumb.size, PROT_READ | PROT_WRITE, MAP_SHARED,
+                        importer, (off_t)map.offset);
+  TEST_ASSERT_NOT_EQUAL(MAP_FAILED, view);
+  view[0] = 0x51515151u;
+  gem_close.handle = imported.handle;
+  TEST_ASSERT_EQUAL_INT(0, ioctl(importer, DRM_IOCTL_GEM_CLOSE, &gem_close));
+  close(importer);
+  TEST_ASSERT_EQUAL_HEX32(0x51515151u, view[0]);
+  TEST_ASSERT_EQUAL_INT(0, munmap(view, dumb.size));
+  close(foreign);
+}
+
 int main(int argc, char **argv, char **envp) {
   (void)argc;
   (void)argv;
@@ -335,5 +445,7 @@ int main(int argc, char **argv, char **envp) {
   RUN_TEST(test_drm_render_rdev);
   RUN_TEST(test_drm_mock_device);
   RUN_TEST(test_drm_core_device_isolation);
+  RUN_TEST(test_drm_gem_vma_lifetime_and_authorization);
+  RUN_TEST(test_drm_prime_object_lifetime_and_cross_device);
   return UNITY_END();
 }
