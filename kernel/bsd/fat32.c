@@ -154,10 +154,12 @@ static int fat32_sync_fs(struct super_block *sb, bool wait) {
 }
 
 // ==================== FAT sector cache ====================
-// A cache miss fetches a whole aligned group. FAT chain walks are sequential,
-// so this turns up to eight 512-byte polling commands into one 4KB command.
-#define FAT_CACHE_PAGES 128
-#define FAT_CACHE_READAHEAD_SECTORS 8
+// Keep the common root-volume FAT resident. The shipped image has a 3.7 MiB
+// FAT, while a 64 KiB cache thrashed during random faults of the LLVM DSOs and
+// reread hundreds of MiB of FAT metadata. Larger volumes still use this as a
+// bounded direct-mapped cache.
+#define FAT_CACHE_PAGES 8192
+#define FAT_CACHE_READAHEAD_SECTORS AHCI_MAX_SECTORS
 
 #if (FAT_CACHE_PAGES & (FAT_CACHE_PAGES - 1)) != 0
 #error "FAT_CACHE_PAGES must be a power of two"
