@@ -197,6 +197,131 @@ void test_drm_render_rdev(void) {
   close(fd);
 }
 
+// 7. The M1.3 mock is a distinct DRM device with its own minor and ioctl path.
+void test_drm_mock_device(void) {
+  int fd = open("/dev/dri/card1", O_RDWR);
+  if (fd < 0) {
+    TEST_IGNORE_MESSAGE("/dev/dri/card1 not available");
+    return;
+  }
+
+  struct stat st;
+  memset(&st, 0, sizeof(st));
+  TEST_ASSERT_EQUAL_INT(0, fstat(fd, &st));
+  TEST_ASSERT_EQUAL_INT(226, major(st.st_rdev));
+  TEST_ASSERT_EQUAL_INT(1, minor(st.st_rdev));
+
+  char name[32] = {0};
+  struct drm_version version;
+  memset(&version, 0, sizeof(version));
+  version.name = name;
+  version.name_len = sizeof(name);
+  TEST_ASSERT_EQUAL_INT(0, ioctl(fd, DRM_IOCTL_VERSION, &version));
+  TEST_ASSERT_TRUE(strncmp(name, "xos_drm_mock", 12) == 0);
+
+  struct drm_get_cap cap;
+  memset(&cap, 0, sizeof(cap));
+  cap.capability = DRM_CAP_TIMESTAMP_MONOTONIC;
+  TEST_ASSERT_EQUAL_INT(0, ioctl(fd, DRM_IOCTL_GET_CAP, &cap));
+  TEST_ASSERT_EQUAL_UINT64(1, cap.value);
+  close(fd);
+
+  int render_fd = open("/dev/dri/renderD129", O_RDWR);
+  TEST_ASSERT_GREATER_OR_EQUAL_INT(0, render_fd);
+  memset(&st, 0, sizeof(st));
+  TEST_ASSERT_EQUAL_INT(0, fstat(render_fd, &st));
+  TEST_ASSERT_EQUAL_INT(226, major(st.st_rdev));
+  TEST_ASSERT_EQUAL_INT(129, minor(st.st_rdev));
+  close(render_fd);
+}
+
+// 8. M1.4 common file state must be isolated by device and node type.
+void test_drm_core_device_isolation(void) {
+  int mock_master = open("/dev/dri/card1", O_RDWR);
+  int mock_peer = open("/dev/dri/card1", O_RDWR);
+  int virtio_peer = open("/dev/dri/card0", O_RDWR);
+  int mock_render = open("/dev/dri/renderD129", O_RDWR);
+  if (mock_master < 0 || mock_peer < 0 || virtio_peer < 0 || mock_render < 0) {
+    if (mock_master >= 0)
+      close(mock_master);
+    if (mock_peer >= 0)
+      close(mock_peer);
+    if (virtio_peer >= 0)
+      close(virtio_peer);
+    if (mock_render >= 0)
+      close(mock_render);
+    TEST_IGNORE_MESSAGE("virtio + mock DRM devices not available");
+    return;
+  }
+
+  TEST_ASSERT_EQUAL_INT(0, ioctl(mock_master, DRM_IOCTL_SET_MASTER, 0));
+  TEST_ASSERT_EQUAL_INT(-1, ioctl(mock_peer, DRM_IOCTL_SET_MASTER, 0));
+  TEST_ASSERT_EQUAL_INT(EBUSY, errno);
+
+  struct drm_auth foreign_magic;
+  memset(&foreign_magic, 0, sizeof(foreign_magic));
+  TEST_ASSERT_EQUAL_INT(
+      0, ioctl(virtio_peer, DRM_IOCTL_GET_MAGIC, &foreign_magic));
+  TEST_ASSERT_EQUAL_INT(
+      -1, ioctl(mock_master, DRM_IOCTL_AUTH_MAGIC, &foreign_magic));
+  TEST_ASSERT_EQUAL_INT(EPERM, errno);
+
+  struct drm_auth local_magic;
+  memset(&local_magic, 0, sizeof(local_magic));
+  TEST_ASSERT_EQUAL_INT(0, ioctl(mock_peer, DRM_IOCTL_GET_MAGIC, &local_magic));
+  TEST_ASSERT_EQUAL_INT(0,
+                        ioctl(mock_master, DRM_IOCTL_AUTH_MAGIC, &local_magic));
+
+  TEST_ASSERT_EQUAL_INT(-1, ioctl(mock_render, DRM_IOCTL_SET_MASTER, 0));
+  TEST_ASSERT_EQUAL_INT(EACCES, errno);
+
+  struct drm_mode_obj_get_properties object = {
+      .obj_id = 3,
+      .obj_type = DRM_MODE_OBJECT_CONNECTOR,
+  };
+  TEST_ASSERT_EQUAL_INT(
+      0, ioctl(mock_master, DRM_IOCTL_MODE_OBJ_GETPROPERTIES, &object));
+  TEST_ASSERT_EQUAL_UINT32(2, object.count_props);
+  uint32_t properties[2] = {0};
+  uint64_t values[2] = {0};
+  object.props_ptr = (uint64_t)(uintptr_t)properties;
+  object.prop_values_ptr = (uint64_t)(uintptr_t)values;
+  TEST_ASSERT_EQUAL_INT(
+      0, ioctl(mock_master, DRM_IOCTL_MODE_OBJ_GETPROPERTIES, &object));
+
+  struct drm_mode_get_property mock_property = {.prop_id = properties[0]};
+  TEST_ASSERT_EQUAL_INT(
+      0, ioctl(mock_master, DRM_IOCTL_MODE_GETPROPERTY, &mock_property));
+  TEST_ASSERT_EQUAL_STRING("MOCK_VALUE", mock_property.name);
+  TEST_ASSERT_EQUAL_UINT64(2, values[0]);
+
+  /* The same numeric property ID resolves in card0's own namespace. */
+  struct drm_mode_get_property virtio_property = {.prop_id = properties[0]};
+  TEST_ASSERT_EQUAL_INT(
+      0, ioctl(virtio_peer, DRM_IOCTL_MODE_GETPROPERTY, &virtio_property));
+  TEST_ASSERT_EQUAL_STRING("SRC_X", virtio_property.name);
+
+  struct drm_mode_get_blob blob = {
+      .blob_id = (uint32_t)values[1],
+      .length = sizeof(uint64_t),
+  };
+  uint64_t blob_generation = 0;
+  blob.data = (uint64_t)(uintptr_t)&blob_generation;
+  TEST_ASSERT_EQUAL_INT(0,
+                        ioctl(mock_master, DRM_IOCTL_MODE_GETPROPBLOB, &blob));
+  TEST_ASSERT_EQUAL_UINT64(2, blob_generation);
+
+  TEST_ASSERT_EQUAL_INT(
+      -1, ioctl(mock_render, DRM_IOCTL_MODE_OBJ_GETPROPERTIES, &object));
+  TEST_ASSERT_EQUAL_INT(EACCES, errno);
+  TEST_ASSERT_EQUAL_INT(0, ioctl(mock_master, DRM_IOCTL_DROP_MASTER, 0));
+
+  close(mock_render);
+  close(virtio_peer);
+  close(mock_peer);
+  close(mock_master);
+}
+
 int main(int argc, char **argv, char **envp) {
   (void)argc;
   (void)argv;
@@ -208,5 +333,7 @@ int main(int argc, char **argv, char **envp) {
   RUN_TEST(test_drm_addfb2_getfb);
   RUN_TEST(test_drm_gem_close);
   RUN_TEST(test_drm_render_rdev);
+  RUN_TEST(test_drm_mock_device);
+  RUN_TEST(test_drm_core_device_isolation);
   return UNITY_END();
 }

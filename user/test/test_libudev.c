@@ -225,6 +225,8 @@ void test_enumerate_drm_primary(void) {
   TEST_ASSERT_EQUAL_INT(0, udev_enumerate_add_match_sysname(e, "card[0-9]*"));
   TEST_ASSERT_EQUAL_INT(0, udev_enumerate_scan_devices(e));
   int primary_count = 0;
+  int found_card0 = 0;
+  int found_card1 = 0;
   struct udev_list_entry *entry;
   udev_list_entry_foreach(entry, udev_enumerate_get_list_entry(e)) {
     struct udev_device *device =
@@ -232,12 +234,21 @@ void test_enumerate_drm_primary(void) {
     if (!device)
       continue;
     TEST_ASSERT_EQUAL_STRING("drm", udev_device_get_subsystem(device));
-    TEST_ASSERT_EQUAL_STRING("/dev/dri/card0", udev_device_get_devnode(device));
+    const char *devnode = udev_device_get_devnode(device);
+    TEST_ASSERT_NOT_NULL(devnode);
+    if (strcmp(devnode, "/dev/dri/card0") == 0)
+      found_card0 = 1;
+    else if (strcmp(devnode, "/dev/dri/card1") == 0)
+      found_card1 = 1;
+    else
+      TEST_FAIL_MESSAGE("unexpected DRM primary node");
     TEST_ASSERT_EQUAL_PTR(u, udev_device_get_udev(device));
     primary_count++;
     udev_device_unref(device);
   }
-  TEST_ASSERT_EQUAL_INT(1, primary_count);
+  TEST_ASSERT_EQUAL_INT(2, primary_count);
+  TEST_ASSERT_TRUE(found_card0);
+  TEST_ASSERT_TRUE(found_card1);
   udev_enumerate_unref(e);
   udev_unref(u);
 }

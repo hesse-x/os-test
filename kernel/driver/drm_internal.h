@@ -13,65 +13,14 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-/* ===== Static KMS object IDs (1:1 hardcoded topology) ===== */
-#define DRM_CRTC_ID 1
-#define DRM_CONNECTOR_ID 2
-#define DRM_ENCODER_ID 3
-#define DRM_PLANE_ID 4
+/* The virtio topology is fixed, but its IDs belong to the device namespace. */
+#define DRM_CRTC_ID (g_drm.crtc_id)
+#define DRM_CONNECTOR_ID (g_drm.connector_id)
+#define DRM_ENCODER_ID (g_drm.encoder_id)
+#define DRM_PLANE_ID (g_drm.plane_id)
 #define DRM_PLANE_TYPE_OVERLAY 0
 #define DRM_PLANE_TYPE_PRIMARY 1
 #define DRM_PLANE_TYPE_CURSOR 2
-
-/* ===== Property infrastructure (Phase C) ===== */
-#define DRM_MAX_PROPERTIES 32
-#define DRM_MAX_PROPS_PER_OBJECT 16
-#define DRM_MAX_BLOBS 16
-#define DRM_PROP_NAME_LEN 32
-
-enum drm_prop_type {
-  DRM_PROP_RANGE,
-  DRM_PROP_ENUM,
-  DRM_PROP_BLOB,
-  DRM_PROP_OBJECT,
-};
-
-struct drm_prop_enum {
-  uint64_t value;
-  char name[DRM_PROP_NAME_LEN];
-};
-
-struct drm_property {
-  uint32_t prop_id; /* 1-based, 0 = free slot */
-  bool allocated;
-  char name[DRM_PROP_NAME_LEN];
-  enum drm_prop_type type;
-
-  /* RANGE: {min, max}, ENUM: {count, values[], names[]} */
-  uint32_t range_min;
-  uint32_t range_max;
-
-  int enum_count;
-  struct drm_prop_enum enums[16];
-
-  bool is_immutable; /* DRM_MODE_PROP_IMMUTABLE */
-
-  /* BLOB: only flag (actual data stored in drm_blob) */
-};
-
-struct drm_blob {
-  uint32_t blob_id; /* 1-based, 0 = free slot */
-  bool allocated;
-  int refcount;
-  size_t length;
-  void *data; /* kmalloc'd copy */
-};
-
-struct drm_object_props {
-  uint32_t prop_ids[DRM_MAX_PROPS_PER_OBJECT];
-  uint64_t prop_values[DRM_MAX_PROPS_PER_OBJECT];
-  int count;
-  spinlock lock;
-};
 
 /* ===== Software cursor (Phase C) ===== */
 #define CURSOR_WIDTH 64
@@ -88,8 +37,6 @@ struct drm_cursor {
   bool dirty; /* cursor position/content changed since last flip */
   spinlock lock;
 };
-
-extern struct drm_cursor g_drm_cursor;
 
 /* ===== Resource pool sizes (shared across per-fd tracking, dumb, fb) ===== */
 #define MAX_DUMB_BUFFERS 16
@@ -154,13 +101,10 @@ struct drm_capset {
 };
 
 struct drm_file {
-  int fd;                       /* system fd number, 0 = free slot */
-  xtask *proc;                  /* owning process */
-  bool is_master;               /* this fd holds master */
-  uint32_t authenticated_magic; /* the magic this fd got via GET_MAGIC */
-  bool auth_valid;              /* magic has been authenticated */
-  bool used;                    /* slot in use */
-  bool is_render;               /* render node (renderD128): no master/auth */
+  int fd;         /* system fd number, 0 = free slot */
+  xtask *proc;    /* owning process */
+  bool used;      /* slot in use */
+  bool is_render; /* render node (renderD128): no master/auth */
 
   /* Venus 3D context (plan1 CONTEXT_INIT) */
   uint32_t ctx_id;    /* 0 = no context */
@@ -221,9 +165,10 @@ struct drm_framebuffer {
 /* ===== DRM device ===== */
 struct drm_device {
   bool initialized;
-  bool is_master;    /* SET_MASTER/DROP_MASTER */
-  int magic_counter; /* GET_MAGIC: auto-increment magic number */
-
+  uint32_t crtc_id;
+  uint32_t connector_id;
+  uint32_t encoder_id;
+  uint32_t plane_id;
   /* current CRTC state */
   uint32_t current_fb_id;
   bool mode_valid;
@@ -264,37 +209,16 @@ struct drm_device {
   int next_fb_id;
   spinlock fb_lock;
 
-  /* Single-entry page-flip event, promoted to readable on the next emulated
-   * vblank instead of immediately from DRM_IOCTL_MODE_PAGE_FLIP. */
-  spinlock event_lock;
-  bool event_armed;
-  bool event_pending;
-  uint64_t event_deadline_ns;
-  uint32_t event_sequence;
-  uint64_t event_user_data;
-
-  /* Unified vblank/event wait queue: drm_poll waiters register here via
-   * file_wq_get, and the periodic GPU poll wakes it at the emulated vblank.
-   * Without this, waiters sat on a per-file f->wq that page_flip never woke
-   * (poll(deadline=0) + no EVENT flag = permanent deadlock). See bug.md. */
-  wait_queue_head event_wq;
+  struct drm_cursor cursor;
 };
 
 extern struct drm_device g_drm;
-extern struct dev_ops
-    drm_dev_ops; /* card0 ops — file_wq_get identifies DRM
-                  * card0 fds (inode->i_priv == &drm_dev_ops)
-                  * to route poll waiters to g_drm.event_wq. */
-extern struct drm_property g_drm_properties[DRM_MAX_PROPERTIES];
-extern int g_drm_next_prop_id;
-extern struct drm_blob g_drm_blobs[DRM_MAX_BLOBS];
-extern int g_drm_next_blob_id;
+/* Virtio's primary-node template. DRM core copies it into a per-minor dev_ops;
+ * poll waiters route through the copied wait_queue_file callback. */
+extern struct dev_ops drm_dev_ops;
 
 /* ===== DRM mmap handler (called from dev_ops.mmap) ===== */
 uint64_t drm_mmap_handler(xtask *proc, uint64_t size, uint64_t offset);
-
-/* ===== DRM poll handler ===== */
-__poll drm_poll(xtask *proc, int events);
 
 /* ===== Fence lifecycle (plan2). drm_fence_put reclaims the slot when the
  * last ref drops; called from sync_file fd close (proc.c file_put) and

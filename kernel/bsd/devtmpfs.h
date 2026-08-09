@@ -59,6 +59,9 @@ struct dev_ops {
   char subsystem[8]; // "input" / "drm" / "block" / "tty"
   char devtype[8];   // "evdev" / "card" / "disk" / "ptmx"
   void *subsys_priv; // -> input_dev_props* / NULL
+  // Owning framework instance. Unlike subsys_priv, copied backend metadata
+  // remains untouched when a framework embeds dev_ops in a dynamic object.
+  void *instance_priv;
   void *uevent_priv; // -> uevent_attr_priv* (sysfs uevent attr priv) / NULL
   struct sysfs_node *sysfs_dir; // sysfs subtree root (used on removal)
 

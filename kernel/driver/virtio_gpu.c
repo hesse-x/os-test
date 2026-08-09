@@ -17,10 +17,10 @@
 #include "arch/x64/utils.h"
 #include "kernel/bsd/devtmpfs.h"
 #include "kernel/bsd/kfcntl.h" // IWYU pragma: keep
-#include "kernel/bsd/poll_types.h"
 #include "kernel/bsd/sysfs.h"
 #include "kernel/driver/bsd_types.h"
 #include "kernel/driver/driver.h"
+#include "kernel/driver/drm/drm_core.h"
 #include "kernel/driver/drm_internal.h"
 #include "kernel/driver/pci.h"
 #include "kernel/xcore/atomic.h"
@@ -36,12 +36,12 @@
 #include "kernel/xcore/sparse.h"
 #include "kernel/xcore/trap.h"
 #include "kernel/xcore/wait_queue.h"
+#include "kernel/xcore/workqueue.h"
 #include "kernel/xcore/xtask.h"
 #include "utils/macro.h"
 
 #include <xos/errno.h>
 #include <xos/page.h>
-#include <xos/socket.h>
 
 #include "drm/drm.h"
 #include "drm/drm_fourcc.h"
@@ -54,15 +54,12 @@
 struct virtio_gpu_device g_virtio_gpu;
 struct drm_device g_drm;
 static uint32_t drm_page_flip_log_count;
-static uint32_t drm_flip_event_log_count;
-struct drm_property g_drm_properties[DRM_MAX_PROPERTIES];
-int g_drm_next_prop_id = 1;
-struct drm_blob g_drm_blobs[DRM_MAX_BLOBS];
-int g_drm_next_blob_id = 1;
 spinlock g_drm_files_lock = SPINLOCK_INIT;
 struct drm_file **g_drm_files;
 int g_drm_files_capacity;
-struct drm_cursor g_drm_cursor;
+static struct drm_core_device *g_virtio_drm_core;
+static struct workqueue *g_drm_event_wq;
+static struct work g_drm_event_work;
 
 /* Single vring completion callback shared by sync and async paths. The ctx is
  * either a struct virtgpu_sync_ctx (sync send_cmd path) or a
@@ -101,6 +98,7 @@ static void virtio_gpu_isr(trapframe *tf);
 static int virtio_gpu_send_cmd(struct virtio_gpu_device *vgpu, void *cmd_buf,
                                size_t cmd_len, void *resp_buf, size_t resp_len);
 extern void drm_dev_register(void);
+static bool drm_dev_alloc(void);
 extern dev_driver virtio_gpu_driver;
 
 /* BSD-layer KPI for sync_file fd install/lookup (plan2). Declared here as
@@ -611,30 +609,6 @@ static int drm_alloc_dumb_handle(void) {
   return -1;
 }
 
-/* ===== Property infrastructure helpers (Phase C) ===== */
-/* File-level obj_props_tbl — shared between add_to_object and get,
-   avoiding the bug of duplicate per-function static arrays. */
-static struct drm_object_props obj_props_tbl[8];
-static bool obj_props_inited = false;
-
-static struct drm_property *drm_find_property(uint32_t prop_id) {
-  if (prop_id == 0 || prop_id > DRM_MAX_PROPERTIES)
-    return NULL;
-  struct drm_property *p = &g_drm_properties[prop_id - 1];
-  if (!p->allocated)
-    return NULL;
-  return p;
-}
-
-static struct drm_blob *drm_find_blob(uint32_t blob_id) {
-  if (blob_id == 0 || blob_id > DRM_MAX_BLOBS)
-    return NULL;
-  struct drm_blob *b = &g_drm_blobs[blob_id - 1];
-  if (!b->allocated)
-    return NULL;
-  return b;
-}
-
 /* ===== Fence (plan2) ===== */
 
 /* Find or allocate a fence slot. Returns fence with refcount=1, or NULL if
@@ -792,208 +766,6 @@ static int drm_fence_install_sync_file(struct drm_fence *fence, xtask *proc) {
   if (fd < 0)
     drm_fence_put(fence); /* reclaim the ref the fd won't be holding */
   return fd;
-}
-
-static uint32_t drm_property_create_range(const char *name, uint32_t min,
-                                          uint32_t max, bool is_immutable) {
-  int id = g_drm_next_prop_id++;
-  if (id > DRM_MAX_PROPERTIES) {
-    g_drm_next_prop_id = DRM_MAX_PROPERTIES + 1;
-    return 0;
-  }
-  struct drm_property *p = &g_drm_properties[id - 1];
-  p->prop_id = (uint32_t)id;
-  p->allocated = true;
-  __memset(p->name, 0, sizeof(p->name));
-  size_t nlen = 0;
-  while (name[nlen] && nlen < DRM_PROP_NAME_LEN - 1) {
-    p->name[nlen] = name[nlen];
-    nlen++;
-  }
-  p->name[nlen] = '\0';
-  p->type = DRM_PROP_RANGE;
-  p->range_min = min;
-  p->range_max = max;
-  p->is_immutable = is_immutable;
-  p->enum_count = 0;
-  return (uint32_t)id;
-}
-
-static uint32_t drm_property_create_enum(const char *name,
-                                         const uint64_t *enum_values,
-                                         const char *const *enum_names,
-                                         int count, bool is_immutable) {
-  int id = g_drm_next_prop_id++;
-  if (id > DRM_MAX_PROPERTIES) {
-    g_drm_next_prop_id = DRM_MAX_PROPERTIES + 1;
-    return 0;
-  }
-  struct drm_property *p = &g_drm_properties[id - 1];
-  p->prop_id = (uint32_t)id;
-  p->allocated = true;
-  __memset(p->name, 0, sizeof(p->name));
-  size_t nlen = 0;
-  while (name[nlen] && nlen < DRM_PROP_NAME_LEN - 1) {
-    p->name[nlen] = name[nlen];
-    nlen++;
-  }
-  p->name[nlen] = '\0';
-  p->type = DRM_PROP_ENUM;
-  p->is_immutable = is_immutable;
-  int copy_count = count < 16 ? count : 16;
-  p->enum_count = copy_count;
-  for (int i = 0; i < copy_count; i++) {
-    p->enums[i].value = enum_values[i];
-    __memset(p->enums[i].name, 0, sizeof(p->enums[i].name));
-    const char *s = enum_names[i];
-    size_t slen = 0;
-    while (s[slen] && slen < DRM_PROP_NAME_LEN - 1) {
-      p->enums[i].name[slen] = s[slen];
-      slen++;
-    }
-    p->enums[i].name[slen] = '\0';
-  }
-  return (uint32_t)id;
-}
-
-static uint32_t drm_property_create_blob(const char *name, bool is_immutable) {
-  int id = g_drm_next_prop_id++;
-  if (id > DRM_MAX_PROPERTIES) {
-    g_drm_next_prop_id = DRM_MAX_PROPERTIES + 1;
-    return 0;
-  }
-  struct drm_property *p = &g_drm_properties[id - 1];
-  p->prop_id = (uint32_t)id;
-  p->allocated = true;
-  __memset(p->name, 0, sizeof(p->name));
-  size_t nlen = 0;
-  while (name[nlen] && nlen < DRM_PROP_NAME_LEN - 1) {
-    p->name[nlen] = name[nlen];
-    nlen++;
-  }
-  p->name[nlen] = '\0';
-  p->type = DRM_PROP_BLOB;
-  p->is_immutable = is_immutable;
-  return (uint32_t)id;
-}
-
-static uint32_t drm_property_create_object(const char *name, uint32_t type,
-                                           bool is_immutable) {
-  int id = g_drm_next_prop_id++;
-  if (id > DRM_MAX_PROPERTIES) {
-    g_drm_next_prop_id = DRM_MAX_PROPERTIES + 1;
-    return 0;
-  }
-  struct drm_property *p = &g_drm_properties[id - 1];
-  p->prop_id = (uint32_t)id;
-  p->allocated = true;
-  __memset(p->name, 0, sizeof(p->name));
-  size_t nlen = 0;
-  while (name[nlen] && nlen < DRM_PROP_NAME_LEN - 1) {
-    p->name[nlen] = name[nlen];
-    nlen++;
-  }
-  p->name[nlen] = '\0';
-  p->type = DRM_PROP_OBJECT;
-  p->is_immutable = is_immutable;
-  (void)type;
-  return (uint32_t)id;
-}
-
-static int drm_property_add_to_object(uint32_t obj_type, uint32_t obj_id,
-                                      uint32_t prop_id,
-                                      uint64_t initial_value) {
-  (void)obj_type;
-  /* For now, single object per type: map by obj_id directly.
-   * Connector=2, Plane=4, CRTC=1 */
-  if (!obj_props_inited) {
-    for (int i = 0; i < 8; i++)
-      obj_props_tbl[i].lock = SPINLOCK_INIT;
-    obj_props_inited = true;
-  }
-  int idx = (int)obj_id;
-  if (idx < 0 || idx >= 8)
-    return -EINVAL;
-  struct drm_object_props *props = &obj_props_tbl[idx];
-  spin_lock(&props->lock);
-  if (props->count >= DRM_MAX_PROPS_PER_OBJECT) {
-    spin_unlock(&props->lock);
-    return -ENOSPC;
-  }
-  props->prop_ids[props->count] = prop_id;
-  props->prop_values[props->count] = initial_value;
-  props->count++;
-  spin_unlock(&props->lock);
-  return 0;
-}
-
-static struct drm_object_props *obj_props_get(uint32_t obj_id,
-                                              uint32_t obj_type) {
-  (void)obj_type;
-  if (!obj_props_inited) {
-    for (int i = 0; i < 8; i++)
-      obj_props_tbl[i].lock = SPINLOCK_INIT;
-    obj_props_inited = true;
-  }
-  int idx = (int)obj_id;
-  if (idx < 0 || idx >= 8)
-    return NULL;
-  return &obj_props_tbl[idx];
-}
-
-static uint32_t drm_blob_create(const void *data, size_t length) {
-  int id = g_drm_next_blob_id++;
-  if (id > DRM_MAX_BLOBS) {
-    g_drm_next_blob_id = DRM_MAX_BLOBS + 1;
-    return 0;
-  }
-  struct drm_blob *b = &g_drm_blobs[id - 1];
-  b->blob_id = (uint32_t)id;
-  b->allocated = true;
-  b->refcount = 1;
-  b->length = length;
-  /* Allocate blob data on a dedicated page (kmalloc may place it in a slab
-   * page shared with other objects; a neighbour's overwrite can corrupt
-   * the blob's content). Page-level allocation isolates the blob data. */
-  size_t alloc_size = (length <= PAGE_SIZE) ? PAGE_SIZE : length;
-  b->data = kmalloc(alloc_size);
-  if (!b->data) {
-    b->allocated = false;
-    return 0;
-  }
-  __memcpy(b->data, data, length);
-  return (uint32_t)id;
-}
-
-static __attribute__((unused)) void drm_blob_release(uint32_t blob_id) {
-  struct drm_blob *b = drm_find_blob(blob_id);
-  if (!b)
-    return;
-  b->refcount--;
-  if (b->refcount <= 0) {
-    if (b->data)
-      kfree(b->data);
-    __memset(b, 0, sizeof(*b));
-  }
-}
-
-static __attribute__((unused)) int
-drm_object_prop_set(uint32_t obj_id, const char *name, uint64_t value) {
-  struct drm_object_props *props = obj_props_get(obj_id, 0);
-  if (!props)
-    return -EINVAL;
-  spin_lock(&props->lock);
-  for (int i = 0; i < props->count; i++) {
-    uint32_t pid = props->prop_ids[i];
-    struct drm_property *p = drm_find_property(pid);
-    if (p && __strncmp(p->name, name, DRM_PROP_NAME_LEN) == 0) {
-      props->prop_values[i] = value;
-      spin_unlock(&props->lock);
-      return 0;
-    }
-  }
-  spin_unlock(&props->lock);
-  return -ENOENT;
 }
 
 static int drm_alloc_fb_id(void) {
@@ -1735,19 +1507,6 @@ static long drm_ioctl_get_cap(void *arg) {
 }
 
 /* DRM_IOCTL_SET_CLIENT_CAP */
-static long drm_ioctl_set_client_cap(void *arg) {
-  struct drm_set_client_cap *c = (struct drm_set_client_cap *)arg;
-  switch (c->capability) {
-  case DRM_CLIENT_CAP_UNIVERSAL_PLANES:
-    c->value = 1;
-    return 0;
-  case DRM_CLIENT_CAP_ATOMIC:
-    return -EINVAL; /* not supported */
-  default:
-    return -EINVAL;
-  }
-}
-
 /* DROP_MASTER 清理 — 重置 master 相关状态 */
 static void drm_master_cleanup(void) {
   /* 1. Clear current FB (unbind CRTC scanout) */
@@ -1755,262 +1514,14 @@ static void drm_master_cleanup(void) {
     g_drm.current_fb_id = 0;
   }
 
-  /* 2. Clear pending page flip event */
-  spin_lock(&g_drm.event_lock);
-  g_drm.event_armed = false;
-  g_drm.event_pending = false;
-  g_drm.event_deadline_ns = 0;
-  g_drm.event_sequence = 0;
-  g_drm.event_user_data = 0;
-  spin_unlock(&g_drm.event_lock);
-
-  /* 3. Disable cursor */
-  extern struct drm_cursor g_drm_cursor;
-  g_drm_cursor.enabled = false;
-  g_drm_cursor.dirty = false;
+  /* Disable cursor. Per-file events are cancelled by drm_core first. */
+  g_drm.cursor.enabled = false;
+  g_drm.cursor.dirty = false;
 }
 
-/* Forward declaration (defined later in per-fd section) */
-/* DRM_IOCTL_SET_MASTER — per-fd 互斥 */
-static long drm_ioctl_set_master(struct drm_file *f) {
-  if (!f)
-    return -EBADF;
-  if (f->is_render)
-    return -EACCES;
-
-  spin_lock(&g_drm_files_lock);
-  if (f->is_master) {
-    /* Already master: idempotent */
-    spin_unlock(&g_drm_files_lock);
-    return 0;
-  }
-
-  /* Check if any other fd holds master */
-  for (int i = 0; i < g_drm_files_capacity; i++) {
-    if (g_drm_files[i] && g_drm_files[i]->used && g_drm_files[i]->is_master) {
-      spin_unlock(&g_drm_files_lock);
-      return -EBUSY;
-    }
-  }
-
-  f->is_master = true;
-  g_drm.is_master = true;
-  spin_unlock(&g_drm_files_lock);
-  return 0;
-}
-
-static long drm_ioctl_drop_master(struct drm_file *f) {
-  if (!f)
-    return -EBADF;
-  if (f->is_render)
-    return -EACCES;
-
-  spin_lock(&g_drm_files_lock);
-  if (!f->is_master) {
-    spin_unlock(&g_drm_files_lock);
-    return -EPERM;
-  }
-  f->is_master = false;
-  g_drm.is_master = false;
-  spin_unlock(&g_drm_files_lock);
-
+static void drm_master_drop(void *driver_private) {
+  (void)driver_private;
   drm_master_cleanup();
-  return 0;
-}
-
-/* DRM_IOCTL_GET_MAGIC — 记录到 per-fd */
-static long drm_ioctl_get_magic(void *arg, struct drm_file *f) {
-  struct drm_auth *a = (struct drm_auth *)arg;
-  if (!a)
-    return -EFAULT;
-  if (!f)
-    return -EBADF;
-  if (f->is_render)
-    return -EACCES;
-
-  a->magic = ++g_drm.magic_counter;
-  f->authenticated_magic = a->magic;
-  f->auth_valid = false; /* not yet authenticated */
-  return 0;
-}
-
-/* DRM_IOCTL_AUTH_MAGIC — 严格校验：仅 master fd 可认证，且 magic 必须是已签发的
- */
-static long drm_ioctl_auth_magic(void *arg, struct drm_file *current) {
-  struct drm_auth *a = (struct drm_auth *)arg;
-  if (!a)
-    return -EFAULT;
-  if (!current)
-    return -EBADF;
-  if (current->is_render)
-    return -EACCES;
-
-  spin_lock(&g_drm_files_lock);
-  /* Only the master fd can authenticate magics */
-  if (!current->is_master) {
-    spin_unlock(&g_drm_files_lock);
-    return -EPERM;
-  }
-
-  /* Search all open fds for matching magic */
-  for (int i = 0; i < g_drm_files_capacity; i++) {
-    if (g_drm_files[i] && g_drm_files[i]->used &&
-        g_drm_files[i]->authenticated_magic == a->magic) {
-      g_drm_files[i]->auth_valid = true;
-      spin_unlock(&g_drm_files_lock);
-      return 0;
-    }
-  }
-  spin_unlock(&g_drm_files_lock);
-  return -EPERM;
-}
-
-/* DRM_IOCTL_MODE_GETPROPERTY */
-static long drm_ioctl_getproperty(void *arg) {
-  struct drm_mode_get_property *p = (struct drm_mode_get_property *)arg;
-  if (!p)
-    return -EFAULT;
-  struct drm_property *prop = drm_find_property(p->prop_id);
-  if (!prop)
-    return -ENOENT;
-
-  __memset(p->name, 0, sizeof(p->name));
-  __memcpy(p->name, prop->name, DRM_PROP_NAME_LEN);
-  p->flags = prop->is_immutable ? DRM_MODE_PROP_IMMUTABLE : 0;
-
-  switch (prop->type) {
-  case DRM_PROP_RANGE:
-    p->flags |= DRM_MODE_PROP_RANGE;
-    if (p->values_ptr) {
-      uint64_t vals[2] = {prop->range_min, prop->range_max};
-      if (copy_to_user((void *)(uintptr_t)p->values_ptr, vals, sizeof(vals)))
-        return -EFAULT;
-      p->count_values = 2;
-    }
-    break;
-  case DRM_PROP_ENUM:
-    p->flags |= DRM_MODE_PROP_ENUM;
-    p->count_values = 0;
-    if (p->enum_blob_ptr) {
-      for (int i = 0; i < prop->enum_count; i++) {
-        struct drm_mode_property_enum e;
-        e.value = prop->enums[i].value;
-        __memset(e.name, 0, sizeof(e.name));
-        __memcpy(e.name, prop->enums[i].name, DRM_PROP_NAME_LEN);
-        if (copy_to_user((void *)(uintptr_t)(p->enum_blob_ptr + i * sizeof(e)),
-                         &e, sizeof(e)))
-          return -EFAULT;
-      }
-    }
-    p->count_enum_blobs = prop->enum_count;
-    break;
-  case DRM_PROP_BLOB:
-    p->flags |= DRM_MODE_PROP_BLOB;
-    break;
-  case DRM_PROP_OBJECT:
-    p->flags |= DRM_MODE_PROP_OBJECT;
-    p->count_values = 0;
-    break;
-  }
-  return 0;
-}
-
-/* DRM_IOCTL_MODE_GETPROPBLOB */
-static long drm_ioctl_getpropblob(void *arg) {
-  struct drm_mode_get_blob *b = (struct drm_mode_get_blob *)arg;
-  if (!b)
-    return -EFAULT;
-  struct drm_blob *blob = drm_find_blob(b->blob_id);
-  if (!blob)
-    return -ENOENT;
-
-  b->length = (uint32_t)blob->length;
-  if (b->data && b->length > 0) {
-    if (copy_to_user((void *)(uintptr_t)b->data, blob->data, b->length))
-      return -EFAULT;
-  }
-  return 0;
-}
-
-/* DRM_IOCTL_MODE_OBJ_GETPROPERTIES */
-static long drm_ioctl_obj_getproperties(void *arg) {
-  struct drm_mode_obj_get_properties *o =
-      (struct drm_mode_obj_get_properties *)arg;
-  if (!o)
-    return -EFAULT;
-  struct drm_object_props *props = obj_props_get(o->obj_id, o->obj_type);
-  if (!props)
-    return -EINVAL;
-
-  spin_lock(&props->lock);
-  o->count_props = props->count;
-
-  if (o->props_ptr && o->prop_values_ptr) {
-    if (copy_to_user((void *)(uintptr_t)o->props_ptr, props->prop_ids,
-                     props->count * sizeof(uint32_t))) {
-      spin_unlock(&props->lock);
-      return -EFAULT;
-    }
-    if (copy_to_user((void *)(uintptr_t)o->prop_values_ptr, props->prop_values,
-                     props->count * sizeof(uint64_t))) {
-      spin_unlock(&props->lock);
-      return -EFAULT;
-    }
-  }
-  spin_unlock(&props->lock);
-  return 0;
-}
-
-static long drm_set_object_property(uint32_t obj_id, uint32_t obj_type,
-                                    uint32_t prop_id, uint64_t value) {
-  struct drm_property *prop = drm_find_property(prop_id);
-  if (!prop)
-    return -ENOENT;
-  if (prop->is_immutable)
-    return -EINVAL;
-
-  if (prop->type == DRM_PROP_RANGE &&
-      (value < prop->range_min || value > prop->range_max))
-    return -EINVAL;
-  if (prop->type == DRM_PROP_ENUM) {
-    bool found = false;
-    for (int i = 0; i < prop->enum_count; i++)
-      found |= prop->enums[i].value == value;
-    if (!found)
-      return -EINVAL;
-  }
-
-  struct drm_object_props *props = obj_props_get(obj_id, obj_type);
-  if (!props)
-    return -ENOENT;
-  spin_lock(&props->lock);
-  for (int i = 0; i < props->count; i++) {
-    if (props->prop_ids[i] != prop_id)
-      continue;
-    props->prop_values[i] = value;
-    spin_unlock(&props->lock);
-    return 0;
-  }
-  spin_unlock(&props->lock);
-  return -ENOENT;
-}
-
-static long drm_ioctl_setproperty(void *arg) {
-  struct drm_mode_connector_set_property *set = arg;
-  if (!set)
-    return -EFAULT;
-  if (set->connector_id != DRM_CONNECTOR_ID)
-    return -ENOENT;
-  return drm_set_object_property(set->connector_id, DRM_MODE_OBJECT_CONNECTOR,
-                                 set->prop_id, set->value);
-}
-
-static long drm_ioctl_obj_setproperty(void *arg) {
-  struct drm_mode_obj_set_property *set = arg;
-  if (!set)
-    return -EFAULT;
-  return drm_set_object_property(set->obj_id, set->obj_type, set->prop_id,
-                                 set->value);
 }
 
 /* ===== EDID generation (Phase C) ===== */
@@ -2332,44 +1843,19 @@ static long drm_ioctl_getconnector(void *arg) {
   c->count_modes = 1;
   c->count_props = 2;
   if (c->props_ptr && c->prop_values_ptr) {
-    /* Find DPMS and EDID prop_ids dynamically */
-    uint32_t props[2];
-    uint64_t values[2];
-    int found = 0;
-    for (int i = 0; i < DRM_MAX_PROPERTIES; i++) {
-      if (!g_drm_properties[i].allocated)
-        continue;
-      if (__strncmp(g_drm_properties[i].name, "DPMS", 5) == 0) {
-        props[found] = g_drm_properties[i].prop_id;
-        values[found] = DRM_MODE_DPMS_ON;
-        found++;
-      } else if (__strncmp(g_drm_properties[i].name, "EDID", 5) == 0) {
-        props[found] = g_drm_properties[i].prop_id;
-        /* Find the EDID blob value from obj_props */
-        struct drm_object_props *op =
-            obj_props_get(DRM_CONNECTOR_ID, DRM_MODE_OBJECT_CONNECTOR);
-        if (op) {
-          spin_lock(&op->lock);
-          for (int j = 0; j < op->count; j++) {
-            struct drm_property *pp = drm_find_property(op->prop_ids[j]);
-            if (pp && __strncmp(pp->name, "EDID", 5) == 0) {
-              values[found] = op->prop_values[j];
-              break;
-            }
-          }
-          spin_unlock(&op->lock);
-        }
-        found++;
-      }
-      if (found >= 2)
-        break;
-    }
-    if (found == 2) {
-      if (copy_to_user((void *)(uintptr_t)c->props_ptr, props, sizeof(props)) ||
-          copy_to_user((void *)(uintptr_t)c->prop_values_ptr, values,
-                       sizeof(values)))
-        return -EFAULT;
-    }
+    uint32_t props[2] = {0};
+    uint64_t values[2] = {0};
+    if (drm_core_object_property_by_name(g_virtio_drm_core, DRM_CONNECTOR_ID,
+                                         DRM_MODE_OBJECT_CONNECTOR, "DPMS",
+                                         &props[0], &values[0]) ||
+        drm_core_object_property_by_name(g_virtio_drm_core, DRM_CONNECTOR_ID,
+                                         DRM_MODE_OBJECT_CONNECTOR, "EDID",
+                                         &props[1], &values[1]))
+      return -ENOENT;
+    if (copy_to_user((void *)(uintptr_t)c->props_ptr, props, sizeof(props)) ||
+        copy_to_user((void *)(uintptr_t)c->prop_values_ptr, values,
+                     sizeof(values)))
+      return -EFAULT;
   }
 
   /* Fill mode data buffer (second ioctl call).
@@ -2779,15 +2265,15 @@ static long drm_ioctl_rmfb(void *arg) {
 
 /* ===== Cursor overlay (Phase C) ===== */
 static void drm_cursor_overlay(struct drm_dumb_buffer *target) {
-  if (!g_drm_cursor.dirty || !g_drm_cursor.enabled)
+  if (!g_drm.cursor.dirty || !g_drm.cursor.enabled)
     return;
 
   uint32_t *fb = (uint32_t *)target->kernel_vaddr;
   int fb_w = (int)target->width;
   int fb_h = (int)target->height;
 
-  int sx = (g_drm_cursor.x - g_drm_cursor.hotspot_x);
-  int sy = (g_drm_cursor.y - g_drm_cursor.hotspot_y);
+  int sx = (g_drm.cursor.x - g_drm.cursor.hotspot_x);
+  int sy = (g_drm.cursor.y - g_drm.cursor.hotspot_y);
 
   for (int cy = 0; cy < CURSOR_HEIGHT; cy++) {
     for (int cx = 0; cx < CURSOR_WIDTH; cx++) {
@@ -2795,7 +2281,7 @@ static void drm_cursor_overlay(struct drm_dumb_buffer *target) {
       if (fx < 0 || fx >= fb_w || fy < 0 || fy >= fb_h)
         continue;
 
-      uint32_t cpixel = g_drm_cursor.buffer[cy * CURSOR_WIDTH + cx];
+      uint32_t cpixel = g_drm.cursor.buffer[cy * CURSOR_WIDTH + cx];
       uint8_t a = (cpixel >> 24) & 0xFF;
       if (a == 0)
         continue; /* fully transparent */
@@ -2815,7 +2301,7 @@ static void drm_cursor_overlay(struct drm_dumb_buffer *target) {
     }
   }
 
-  g_drm_cursor.dirty = false;
+  g_drm.cursor.dirty = false;
 }
 
 /* DRM_IOCTL_MODE_CURSOR2 */
@@ -2829,8 +2315,8 @@ static long drm_ioctl_cursor2(void *arg) {
   switch (c->flags & DRM_MODE_CURSOR_FLAGS) {
   case DRM_MODE_CURSOR_BO: {
     if (c->handle == 0) {
-      g_drm_cursor.enabled = false;
-      g_drm_cursor.dirty = true;
+      g_drm.cursor.enabled = false;
+      g_drm.cursor.dirty = true;
       return 0;
     }
     /* Set cursor bitmap: c->handle is a dumb buffer handle containing cursor
@@ -2841,18 +2327,18 @@ static long drm_ioctl_cursor2(void *arg) {
       spin_unlock(&g_drm.dumb_lock);
       return -EINVAL;
     }
-    __memcpy(g_drm_cursor.buffer, d->kernel_vaddr, CURSOR_SIZE);
+    __memcpy(g_drm.cursor.buffer, d->kernel_vaddr, CURSOR_SIZE);
     spin_unlock(&g_drm.dumb_lock);
-    g_drm_cursor.hotspot_x = (int16_t)c->hot_x;
-    g_drm_cursor.hotspot_y = (int16_t)c->hot_y;
-    g_drm_cursor.enabled = true;
-    g_drm_cursor.dirty = true;
+    g_drm.cursor.hotspot_x = (int16_t)c->hot_x;
+    g_drm.cursor.hotspot_y = (int16_t)c->hot_y;
+    g_drm.cursor.enabled = true;
+    g_drm.cursor.dirty = true;
     return 0;
   }
   case DRM_MODE_CURSOR_MOVE:
-    g_drm_cursor.x = (int16_t)c->x;
-    g_drm_cursor.y = (int16_t)c->y;
-    g_drm_cursor.dirty = true;
+    g_drm.cursor.x = (int16_t)c->x;
+    g_drm.cursor.y = (int16_t)c->y;
+    g_drm.cursor.dirty = true;
     return 0;
   default:
     return -EINVAL;
@@ -2880,7 +2366,7 @@ static long drm_ioctl_cursor(void *arg) {
 }
 
 /* DRM_IOCTL_MODE_PAGE_FLIP */
-static long drm_ioctl_page_flip(void *arg) {
+static long drm_ioctl_page_flip(struct file *file, void *arg) {
   struct drm_mode_crtc_page_flip *p = (struct drm_mode_crtc_page_flip *)arg;
   if (p->crtc_id != DRM_CRTC_ID)
     return -EINVAL;
@@ -2899,15 +2385,10 @@ static long drm_ioctl_page_flip(void *arg) {
 
   bool armed_event = false;
   if (p->flags & DRM_MODE_PAGE_FLIP_EVENT) {
-    spin_lock(&g_drm.event_lock);
-    if (g_drm.event_armed || g_drm.event_pending) {
-      spin_unlock(&g_drm.event_lock);
-      return -EBUSY;
-    }
-    g_drm.event_armed = true;
-    g_drm.event_deadline_ns = sched_clock() + DRM_VBLANK_INTERVAL_NS;
-    g_drm.event_user_data = p->user_data;
-    spin_unlock(&g_drm.event_lock);
+    int rc = drm_core_event_queue(file, p->user_data, p->crtc_id,
+                                  sched_clock() + DRM_VBLANK_INTERVAL_NS);
+    if (rc)
+      return rc;
     armed_event = true;
   }
 
@@ -2927,24 +2408,22 @@ static long drm_ioctl_page_flip(void *arg) {
   return 0;
 }
 
-void virtio_gpu_poll(void) {
-  if (!g_drm.initialized)
+static void virtio_gpu_event_work(struct work *work) {
+  (void)work;
+  if (!g_drm.initialized || !g_virtio_drm_core)
     return;
 
-  bool signal_event = false;
-  uint64_t now = sched_clock();
-  spin_lock(&g_drm.event_lock);
-  if (g_drm.event_armed && now >= g_drm.event_deadline_ns) {
-    g_drm.event_armed = false;
-    g_drm.event_pending = true;
-    g_drm.event_sequence++;
-    signal_event = true;
-  }
-  spin_unlock(&g_drm.event_lock);
+  drm_core_event_tick(g_virtio_drm_core, sched_clock());
+}
 
-  /* Keep event_lock and the wait-queue lock non-nested. */
-  if (signal_event)
-    __wake_up(&g_drm.event_wq, POLLIN);
+void virtio_gpu_poll(void) {
+  if (!g_drm.initialized || !g_drm_event_wq)
+    return;
+
+  /* timer_poll_hook runs in hard-IRQ context; file_mutex may sleep. A single
+   * work item coalesces ticks while queued/running and performs the scan from
+   * a kthread where taking the mutex is legal. */
+  queue_work(g_drm_event_wq, &g_drm_event_work);
 }
 
 /* DRM_IOCTL_MODE_DIRTYFB */
@@ -2989,7 +2468,7 @@ static long drm_ioctl_file(xtask *proc, struct file *file, uint32_t cmd,
   case DRM_IOCTL_MODE_DIRTYFB:
   case DRM_IOCTL_MODE_SETPROPERTY:
   case DRM_IOCTL_MODE_OBJ_SETPROPERTY:
-    if (!df->is_master)
+    if (!drm_core_file_is_master(file))
       return -EACCES;
     break;
   default:
@@ -3021,11 +2500,11 @@ static long drm_ioctl_file(xtask *proc, struct file *file, uint32_t cmd,
   case DRM_IOCTL_GET_CAP:
     return drm_ioctl_get_cap(arg);
   case DRM_IOCTL_SET_CLIENT_CAP:
-    return drm_ioctl_set_client_cap(arg);
+    return -ENOTTY; /* handled by drm_core's common ioctl table */
   case DRM_IOCTL_SET_MASTER:
-    return drm_ioctl_set_master(df);
+    return -ENOTTY;
   case DRM_IOCTL_DROP_MASTER:
-    return drm_ioctl_drop_master(df);
+    return -ENOTTY;
   case DRM_IOCTL_MODE_GETRESOURCES:
     return drm_ioctl_getresources(arg);
   case DRM_IOCTL_MODE_GETCRTC:
@@ -3053,7 +2532,7 @@ static long drm_ioctl_file(xtask *proc, struct file *file, uint32_t cmd,
   case DRM_IOCTL_MODE_RMFB:
     return drm_ioctl_rmfb(arg);
   case DRM_IOCTL_MODE_PAGE_FLIP:
-    return drm_ioctl_page_flip(arg);
+    return drm_ioctl_page_flip(file, arg);
   case DRM_IOCTL_MODE_DIRTYFB:
     return drm_ioctl_dirtyfb(arg);
   case DRM_IOCTL_MODE_CURSOR:
@@ -3063,21 +2542,21 @@ static long drm_ioctl_file(xtask *proc, struct file *file, uint32_t cmd,
   case DRM_IOCTL_MODE_GETFB:
     return drm_ioctl_getfb(arg);
   case DRM_IOCTL_GET_MAGIC:
-    return drm_ioctl_get_magic(arg, df);
+    return -ENOTTY;
   case DRM_IOCTL_AUTH_MAGIC:
-    return drm_ioctl_auth_magic(arg, df);
+    return -ENOTTY;
   case DRM_IOCTL_GEM_CLOSE:
     return drm_ioctl_gem_close(arg, df);
   case DRM_IOCTL_MODE_GETPROPERTY:
-    return drm_ioctl_getproperty(arg);
+    return -ENOTTY;
   case DRM_IOCTL_MODE_SETPROPERTY:
-    return drm_ioctl_setproperty(arg);
+    return -ENOTTY;
   case DRM_IOCTL_MODE_OBJ_SETPROPERTY:
-    return drm_ioctl_obj_setproperty(arg);
+    return -ENOTTY;
   case DRM_IOCTL_MODE_GETPROPBLOB:
-    return drm_ioctl_getpropblob(arg);
+    return -ENOTTY;
   case DRM_IOCTL_MODE_OBJ_GETPROPERTIES:
-    return drm_ioctl_obj_getproperties(arg);
+    return -ENOTTY;
   case DRM_IOCTL_MODE_CREATE_LEASE:
     /* Empty leases are optional. wlroots falls back to reopening the node. */
     return -EOPNOTSUPP;
@@ -3439,10 +2918,6 @@ static int drm_close_file(xtask *proc, struct file *file) {
       bfc_free_page_data(vaddr, npages);
     }
 
-    if (f->is_master) {
-      g_drm.is_master = false;
-      drm_master_cleanup();
-    }
     g_drm_files[i] = NULL;
     file->private_data = NULL;
     int used_count = 0;
@@ -3460,14 +2935,6 @@ static int drm_close_file(xtask *proc, struct file *file) {
   return 0; /* ignore close on unknown fd */
 }
 
-/* forward declarations for ops callbacks defined further below */
-static ssize_t drm_read(xtask *proc, int fd, void *buf, size_t count);
-
-static wait_queue_head *drm_wait_queue_file(struct file *file) {
-  (void)file;
-  return &g_drm.event_wq;
-}
-
 struct dev_ops drm_dev_ops = {
     .driver_pid = 0,
     .is_block = false,
@@ -3475,9 +2942,6 @@ struct dev_ops drm_dev_ops = {
     .close_file = drm_close_file,
     .ioctl_file = drm_ioctl_file,
     .mmap = drm_mmap_handler,
-    .read = drm_read,
-    .poll = drm_poll,
-    .wait_queue_file = drm_wait_queue_file,
 };
 
 /* Render node ops: kernel device, shares ioctl/mmap/close with card0,
@@ -3542,10 +3006,6 @@ static ssize_t drm_show_pci_uevent(char *buf, size_t len, void *priv) {
   return snprintf(buf, len, "PCI_SLOT_NAME=0000:%02x:%02x.%u\n", pdev->bus,
                   pdev->dev, pdev->func);
 }
-static ssize_t drm_show_driver(char *buf, size_t len, void *priv) {
-  (void)priv;
-  return snprintf(buf, len, "virtio_gpu\n");
-}
 static ssize_t drm_show_enabled(char *buf, size_t len, void *priv) {
   (void)priv;
   return snprintf(buf, len, "%d\n", g_drm.initialized ? 1 : 0);
@@ -3563,15 +3023,6 @@ static ssize_t drm_show_num_scanouts(char *buf, size_t len, void *priv) {
   return snprintf(buf, len, "%u\n", g_virtio_gpu.config.num_scanouts);
 }
 
-static ssize_t drm_attr_dev_show(char *buf, size_t len, void *priv) {
-  (void)priv;
-  /* DRM_MAJOR=226, minor=0 */
-  return snprintf(buf, len, "226:0\n");
-}
-
-static const struct sysfs_attr drm_attr_dev = {
-    .name = "dev", .show = drm_attr_dev_show, .priv = NULL};
-
 static const struct sysfs_attr drm_attr_vendor = {
     .name = "vendor", .show = drm_show_vendor, .priv = NULL};
 static const struct sysfs_attr drm_attr_device = {
@@ -3588,8 +3039,6 @@ static const struct sysfs_attr drm_attr_subsystem_device = {
     .priv = NULL};
 static const struct sysfs_attr drm_attr_pci_uevent = {
     .name = "uevent", .show = drm_show_pci_uevent, .priv = NULL};
-static const struct sysfs_attr drm_attr_driver = {
-    .name = "driver", .show = drm_show_driver, .priv = NULL};
 static const struct sysfs_attr drm_attr_enabled = {
     .name = "enabled", .show = drm_show_enabled, .priv = NULL};
 static const struct sysfs_attr drm_attr_mode = {
@@ -3601,66 +3050,60 @@ static const struct sysfs_attr drm_attr_connector_status = {
 static const struct sysfs_attr drm_attr_num_scanouts = {
     .name = "num_scanouts", .show = drm_show_num_scanouts, .priv = NULL};
 
+static bool drm_dev_alloc(void) {
+  if (g_virtio_drm_core)
+    return true;
+  const struct drm_core_config config = {
+      .driver_name = "virtio_gpu",
+      .subsystem_target = "/sys/bus/virtio",
+      .primary_ops = &drm_dev_ops,
+      .render_ops = &drm_render_ops,
+      .driver_private = &g_virtio_gpu,
+      .master_drop = drm_master_drop,
+  };
+  g_virtio_drm_core = drm_core_device_alloc(&config);
+  if (!g_virtio_drm_core) {
+    printk(LOG_ERROR, "drm: failed to allocate virtio DRM device\n");
+    return false;
+  }
+  return true;
+}
+
 void drm_dev_register(void) {
-  int rc = devtmpfs_create("dri/card0", &drm_dev_ops, NULL);
-  if (rc < 0) {
-    printk(LOG_ERROR, "drm: failed to create /dev/dri/card0: %d\n", rc);
+  if (!drm_dev_alloc())
+    return;
+  int rc = drm_core_device_register(g_virtio_drm_core,
+                                    DRM_NODE_PRIMARY | DRM_NODE_RENDER);
+  if (rc) {
+    printk(LOG_ERROR, "drm: failed to register virtio DRM device: %d\n", rc);
+    drm_core_device_put(g_virtio_drm_core);
+    g_virtio_drm_core = NULL;
     return;
   }
-  __strncpy(drm_dev_ops.subsystem, "drm", 7);
-  __strncpy(drm_dev_ops.devtype, "card", 7);
-  drm_dev_ops.minor = 0;
 
-  int rc2 = devtmpfs_create("dri/renderD128", &drm_render_ops, NULL);
-  if (rc2 < 0) {
-    printk(LOG_ERROR, "drm: failed to create /dev/dri/renderD128: %d\n", rc2);
-  } else {
-    __strncpy(drm_render_ops.subsystem, "drm", 7);
-    __strncpy(drm_render_ops.devtype, "renderD128", 7);
-    drm_render_ops.minor = 128;
-  }
-
-  struct sysfs_node *cls = sysfs_class_dir("drm");
-  struct sysfs_node *card0 = sysfs_create_dir(cls, "card0");
+  struct sysfs_node *card0 =
+      drm_core_class_node(g_virtio_drm_core, DRM_NODE_PRIMARY);
   if (card0) {
     sysfs_create_file(card0, "vendor", &drm_attr_vendor);
     sysfs_create_file(card0, "device", &drm_attr_device);
     sysfs_create_file(card0, "class", &drm_attr_class);
-    sysfs_create_file(card0, "driver", &drm_attr_driver);
     sysfs_create_file(card0, "enabled", &drm_attr_enabled);
     sysfs_create_file(card0, "mode", &drm_attr_mode);
     sysfs_create_file(card0, "connector_status", &drm_attr_connector_status);
     sysfs_create_file(card0, "num_scanouts", &drm_attr_num_scanouts);
-    sysfs_create_file(card0, "dev", &drm_attr_dev);
-    drm_dev_ops.sysfs_dir = card0;
   }
 
-  struct sysfs_node *rnode = sysfs_create_dir(cls, "renderD128");
+  struct sysfs_node *rnode =
+      drm_core_class_node(g_virtio_drm_core, DRM_NODE_RENDER);
   if (rnode) {
     sysfs_create_file(rnode, "vendor", &drm_attr_vendor);
     sysfs_create_file(rnode, "device", &drm_attr_device);
     sysfs_create_file(rnode, "class", &drm_attr_class);
-    sysfs_create_file(rnode, "driver", &drm_attr_driver);
-    sysfs_create_file(rnode, "dev", &drm_attr_dev);
-    drm_render_ops.sysfs_dir = rnode;
   }
   struct sysfs_node *card_devchar =
-      sysfs_devchar_register(226, 0, "dri/card0", "/sys/bus/virtio");
-  if (!card_devchar)
-    printk(LOG_ERROR, "drm: failed to register /sys/dev/char/226:0\n");
-  struct sysfs_node *render_devchar = NULL;
-  if (rc2 >= 0) {
-    render_devchar =
-        sysfs_devchar_register(226, 128, "dri/renderD128", "/sys/bus/virtio");
-    if (!render_devchar)
-      printk(LOG_ERROR, "drm: failed to register /sys/dev/char/226:128\n");
-  }
-  if (card_devchar && render_devchar) {
-    sysfs_devchar_add_device_child(card_devchar, "drm", "card0");
-    sysfs_devchar_add_device_child(card_devchar, "drm", "renderD128");
-    sysfs_devchar_add_device_child(render_devchar, "drm", "card0");
-    sysfs_devchar_add_device_child(render_devchar, "drm", "renderD128");
-  }
+      drm_core_devchar_node(g_virtio_drm_core, DRM_NODE_PRIMARY);
+  struct sysfs_node *render_devchar =
+      drm_core_devchar_node(g_virtio_drm_core, DRM_NODE_RENDER);
   if (card_devchar) {
     sysfs_devchar_add_device_file(card_devchar, "vendor", &drm_attr_vendor);
     sysfs_devchar_add_device_file(card_devchar, "device", &drm_attr_device);
@@ -3682,7 +3125,8 @@ void drm_dev_register(void) {
     sysfs_devchar_add_device_file(render_devchar, "uevent",
                                   &drm_attr_pci_uevent);
   }
-  printk(LOG_INFO, "drm: registered /dev/dri/card0\n");
+  printk(LOG_INFO, "drm: registered virtio DRM nodes at slot %d\n",
+         drm_core_device_slot(g_virtio_drm_core));
 }
 
 /* ===== DRM mmap handler =====
@@ -3769,58 +3213,6 @@ drm_mmap_handler(xtask *proc, uint64_t size, uint64_t offset) {
   proc->mm->mmap_brk = vaddr + npages * PAGE_SIZE;
 
   return vaddr;
-}
-
-/* ===== DRM poll handler =====
-   Returns POLLIN when a page flip event is pending. */
-__poll drm_poll(xtask *proc, int events) {
-  (void)proc;
-  (void)events;
-  spin_lock(&g_drm.event_lock);
-  __poll revents = g_drm.event_pending ? POLLIN : 0;
-  spin_unlock(&g_drm.event_lock);
-  return revents;
-}
-
-/* ===== DRM read handler (deliver page flip event) ===== */
-static ssize_t drm_read(xtask *proc, int fd, void *buf, size_t count) {
-  (void)proc;
-  (void)fd;
-  spin_lock(&g_drm.event_lock);
-  if (!g_drm.event_pending) {
-    spin_unlock(&g_drm.event_lock);
-    /* A level-triggered epoll entry can be stale after userspace drains the
-     * preceding flip. Treat that read as an empty batch, not a fatal error. */
-    return 0;
-  }
-  if (count < sizeof(struct drm_event_vblank)) {
-    spin_unlock(&g_drm.event_lock);
-    return -EINVAL;
-  }
-  struct drm_event_vblank ev;
-  __memset(&ev, 0, sizeof(ev));
-  ev.base.type = DRM_EVENT_FLIP_COMPLETE;
-  ev.base.length = sizeof(ev);
-  ev.user_data = g_drm.event_user_data;
-  ev.sequence = g_drm.event_sequence;
-  uint64_t now = sched_clock();
-  ev.tv_sec = (uint32_t)(now / 1000000000ULL);
-  ev.tv_usec = (uint32_t)((now % 1000000000ULL) / 1000ULL);
-  ev.crtc_id = DRM_CRTC_ID;
-  g_drm.event_pending = false;
-  g_drm.event_deadline_ns = 0;
-  spin_unlock(&g_drm.event_lock);
-
-  if (drm_flip_event_log_count < 3) {
-    drm_flip_event_log_count++;
-    printk(LOG_DEBUG, "drm: flip-complete event #%u delivered seq=%u\n",
-           drm_flip_event_log_count, ev.sequence);
-  }
-
-  size_t cr = copy_to_user(buf, &ev, sizeof(ev));
-  if (cr != 0)
-    return -EFAULT;
-  return (ssize_t)sizeof(ev);
 }
 
 /* Pre-query all capsets via GET_CAPSET_INFO + GET_CAPSET and cache them in
@@ -3964,10 +3356,21 @@ void virtio_gpu_init(void) {
   /* Initialize DRM device state */
   __memset(&g_drm, 0, sizeof(g_drm));
   g_drm.initialized = true;
+  if (!drm_dev_alloc())
+    return;
+  g_drm.crtc_id =
+      drm_core_object_create(g_virtio_drm_core, DRM_MODE_OBJECT_CRTC);
+  g_drm.connector_id =
+      drm_core_object_create(g_virtio_drm_core, DRM_MODE_OBJECT_CONNECTOR);
+  g_drm.encoder_id =
+      drm_core_object_create(g_virtio_drm_core, DRM_MODE_OBJECT_ENCODER);
+  g_drm.plane_id =
+      drm_core_object_create(g_virtio_drm_core, DRM_MODE_OBJECT_PLANE);
+  if (!g_drm.crtc_id || !g_drm.connector_id || !g_drm.encoder_id ||
+      !g_drm.plane_id)
+    return;
   g_drm.dumb_lock = SPINLOCK_INIT;
   g_drm.fb_lock = SPINLOCK_INIT;
-  g_drm.event_lock = SPINLOCK_INIT;
-  init_wait_queue_head(&g_drm.event_wq);
   g_drm.ctx_id_lock = SPINLOCK_INIT;
   g_drm.fence_lock = SPINLOCK_INIT;
   g_drm.virgl_lock = SPINLOCK_INIT;
@@ -3986,29 +3389,37 @@ void virtio_gpu_init(void) {
 
   /* ===== Property infrastructure initialization (Phase C) ===== */
   /* Create properties */
-  uint32_t p_src_x = drm_property_create_range("SRC_X", 0, 0xFFFFFFFF, true);
-  uint32_t p_src_y = drm_property_create_range("SRC_Y", 0, 0xFFFFFFFF, true);
-  uint32_t p_src_w = drm_property_create_range("SRC_W", 0, 0xFFFFFFFF, true);
-  uint32_t p_src_h = drm_property_create_range("SRC_H", 0, 0xFFFFFFFF, true);
-  uint32_t p_active = drm_property_create_range("ACTIVE", 0, 1, false);
+  uint32_t p_src_x = drm_core_property_create_range(g_virtio_drm_core, "SRC_X",
+                                                    0, 0xFFFFFFFF, true);
+  uint32_t p_src_y = drm_core_property_create_range(g_virtio_drm_core, "SRC_Y",
+                                                    0, 0xFFFFFFFF, true);
+  uint32_t p_src_w = drm_core_property_create_range(g_virtio_drm_core, "SRC_W",
+                                                    0, 0xFFFFFFFF, true);
+  uint32_t p_src_h = drm_core_property_create_range(g_virtio_drm_core, "SRC_H",
+                                                    0, 0xFFFFFFFF, true);
+  uint32_t p_active =
+      drm_core_property_create_range(g_virtio_drm_core, "ACTIVE", 0, 1, false);
 
   const uint64_t dpms_vals[4] = {0, 1, 2, 3};
   const char *dpms_names[4] = {"On", "Standby", "Suspend", "Off"};
-  uint32_t p_dpms =
-      drm_property_create_enum("DPMS", dpms_vals, dpms_names, 4, false);
+  uint32_t p_dpms = drm_core_property_create_enum(
+      g_virtio_drm_core, "DPMS", dpms_vals, dpms_names, 4, false);
 
-  uint32_t p_edid = drm_property_create_blob("EDID", true);
-  uint32_t p_in_formats = drm_property_create_blob("IN_FORMATS", true);
-  uint32_t p_crtc_id =
-      drm_property_create_object("CRTC_ID", DRM_MODE_OBJECT_CRTC, false);
-  uint32_t p_fb_id =
-      drm_property_create_object("FB_ID", DRM_MODE_OBJECT_FB, false);
-  uint32_t p_mode_id = drm_property_create_blob("MODE_ID", false);
+  uint32_t p_edid =
+      drm_core_property_create_blob(g_virtio_drm_core, "EDID", true);
+  uint32_t p_in_formats =
+      drm_core_property_create_blob(g_virtio_drm_core, "IN_FORMATS", true);
+  uint32_t p_crtc_id = drm_core_property_create_object(
+      g_virtio_drm_core, "CRTC_ID", DRM_MODE_OBJECT_CRTC, false);
+  uint32_t p_fb_id = drm_core_property_create_object(g_virtio_drm_core, "FB_ID",
+                                                     DRM_MODE_OBJECT_FB, false);
+  uint32_t p_mode_id =
+      drm_core_property_create_blob(g_virtio_drm_core, "MODE_ID", false);
   const uint64_t plane_type_vals[3] = {
       DRM_PLANE_TYPE_OVERLAY, DRM_PLANE_TYPE_PRIMARY, DRM_PLANE_TYPE_CURSOR};
   const char *plane_type_names[3] = {"Overlay", "Primary", "Cursor"};
-  uint32_t p_plane_type = drm_property_create_enum("type", plane_type_vals,
-                                                   plane_type_names, 3, true);
+  uint32_t p_plane_type = drm_core_property_create_enum(
+      g_virtio_drm_core, "type", plane_type_vals, plane_type_names, 3, true);
 
   /* Generate IN_FORMATS blob */
   struct drm_format_modifier_blob {
@@ -4057,8 +3468,10 @@ void virtio_gpu_init(void) {
              sizeof(struct drm_format_modifier));
   }
   uint32_t in_fmts_blob_id =
-      in_fmts_blob_data ? drm_blob_create(in_fmts_blob_data, in_fmts_blob_size)
-                        : 0;
+      in_fmts_blob_data
+          ? drm_core_blob_create(g_virtio_drm_core, in_fmts_blob_data,
+                                 in_fmts_blob_size)
+          : 0;
   if (in_fmts_blob_data)
     kfree(in_fmts_blob_data);
 
@@ -4068,33 +3481,53 @@ void virtio_gpu_init(void) {
                                 uint32_t height);
   drm_generate_edid(edid_data, sizeof(edid_data), g_drm.fb_width,
                     g_drm.fb_height);
-  uint32_t edid_blob_id = drm_blob_create(edid_data, 128);
+  uint32_t edid_blob_id =
+      drm_core_blob_create(g_virtio_drm_core, edid_data, 128);
 
   /* Bind properties to objects */
   /* Connector(2): DPMS + EDID */
-  drm_property_add_to_object(DRM_MODE_OBJECT_CONNECTOR, DRM_CONNECTOR_ID,
-                             p_dpms, DRM_MODE_DPMS_ON);
-  drm_property_add_to_object(DRM_MODE_OBJECT_CONNECTOR, DRM_CONNECTOR_ID,
-                             p_edid, edid_blob_id);
+  drm_core_object_add_property(g_virtio_drm_core, DRM_CONNECTOR_ID,
+                               DRM_MODE_OBJECT_CONNECTOR, p_dpms,
+                               DRM_MODE_DPMS_ON);
+  drm_core_object_add_property(g_virtio_drm_core, DRM_CONNECTOR_ID,
+                               DRM_MODE_OBJECT_CONNECTOR, p_edid, edid_blob_id);
 
   /* Plane(4): type + IN_FORMATS + CRTC_ID + FB_ID + SRC_X/Y/W/H */
-  drm_property_add_to_object(DRM_MODE_OBJECT_PLANE, DRM_PLANE_ID, p_plane_type,
-                             DRM_PLANE_TYPE_PRIMARY);
-  drm_property_add_to_object(DRM_MODE_OBJECT_PLANE, DRM_PLANE_ID, p_in_formats,
-                             in_fmts_blob_id);
-  drm_property_add_to_object(DRM_MODE_OBJECT_PLANE, DRM_PLANE_ID, p_crtc_id, 0);
-  drm_property_add_to_object(DRM_MODE_OBJECT_PLANE, DRM_PLANE_ID, p_fb_id, 0);
-  drm_property_add_to_object(DRM_MODE_OBJECT_PLANE, DRM_PLANE_ID, p_src_x, 0);
-  drm_property_add_to_object(DRM_MODE_OBJECT_PLANE, DRM_PLANE_ID, p_src_y, 0);
-  drm_property_add_to_object(DRM_MODE_OBJECT_PLANE, DRM_PLANE_ID, p_src_w, 0);
-  drm_property_add_to_object(DRM_MODE_OBJECT_PLANE, DRM_PLANE_ID, p_src_h, 0);
+  drm_core_object_add_property(g_virtio_drm_core, DRM_PLANE_ID,
+                               DRM_MODE_OBJECT_PLANE, p_plane_type,
+                               DRM_PLANE_TYPE_PRIMARY);
+  drm_core_object_add_property(g_virtio_drm_core, DRM_PLANE_ID,
+                               DRM_MODE_OBJECT_PLANE, p_in_formats,
+                               in_fmts_blob_id);
+  drm_core_object_add_property(g_virtio_drm_core, DRM_PLANE_ID,
+                               DRM_MODE_OBJECT_PLANE, p_crtc_id, 0);
+  drm_core_object_add_property(g_virtio_drm_core, DRM_PLANE_ID,
+                               DRM_MODE_OBJECT_PLANE, p_fb_id, 0);
+  drm_core_object_add_property(g_virtio_drm_core, DRM_PLANE_ID,
+                               DRM_MODE_OBJECT_PLANE, p_src_x, 0);
+  drm_core_object_add_property(g_virtio_drm_core, DRM_PLANE_ID,
+                               DRM_MODE_OBJECT_PLANE, p_src_y, 0);
+  drm_core_object_add_property(g_virtio_drm_core, DRM_PLANE_ID,
+                               DRM_MODE_OBJECT_PLANE, p_src_w, 0);
+  drm_core_object_add_property(g_virtio_drm_core, DRM_PLANE_ID,
+                               DRM_MODE_OBJECT_PLANE, p_src_h, 0);
 
   /* CRTC(1): ACTIVE + MODE_ID */
-  drm_property_add_to_object(DRM_MODE_OBJECT_CRTC, DRM_CRTC_ID, p_active, 0);
-  drm_property_add_to_object(DRM_MODE_OBJECT_CRTC, DRM_CRTC_ID, p_mode_id, 0);
+  drm_core_object_add_property(g_virtio_drm_core, DRM_CRTC_ID,
+                               DRM_MODE_OBJECT_CRTC, p_active, 0);
+  drm_core_object_add_property(g_virtio_drm_core, DRM_CRTC_ID,
+                               DRM_MODE_OBJECT_CRTC, p_mode_id, 0);
 
   /* Register /dev/dri/card0 */
   drm_dev_register();
+
+  init_work(&g_drm_event_work, virtio_gpu_event_work);
+  g_drm_event_wq = alloc_ordered_workqueue("virtio-gpu-event", NULL, NULL);
+  if (!g_drm_event_wq) {
+    printk(LOG_ERROR, "virtio_gpu: failed to create event workqueue\n");
+    g_drm.initialized = false;
+    return;
+  }
 
   printk(LOG_INFO, "virtio_gpu: init done\n");
 }

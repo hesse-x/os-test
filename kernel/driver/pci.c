@@ -13,7 +13,10 @@
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/mem/alloc.h"
 #include "kernel/xcore/mem/kasan.h"
+#include "kernel/xcore/mutex.h"
+#include "kernel/xcore/trap.h"
 #include "utils/macro.h"
+#include "xos/page.h"
 #include <stdbool.h>
 #include <stddef.h>
 #include <xos/errno.h>
@@ -26,8 +29,41 @@ void __iomem *ecam_vbase = NULL;
 uint8_t ecam_start_bus = 0;
 uint8_t ecam_end_bus = 0;
 
-// MSI-X vector allocation: simple counter starting at 64
-static int next_msix_vector = 64;
+#define PCI_VECTOR_FIRST 64
+#define PCI_VECTOR_COUNT 32
+static uint32_t pci_vector_bitmap;
+static mutex pci_resource_mutex;
+static struct pci_resource_stats pci_stats;
+static int pci_alloc_vectors(int count);
+static void pci_free_vectors(int base, int count);
+
+#define PCI_MAX_DRIVERS 16
+static const struct pci_driver *pci_drivers[PCI_MAX_DRIVERS];
+static size_t pci_driver_count;
+static mutex pci_driver_mutex;
+#ifdef TEST
+static enum pci_fault_point pci_fault_once;
+#endif
+
+static bool pci_fault(enum pci_fault_point point) {
+#ifdef TEST
+  if (pci_fault_once == point) {
+    pci_fault_once = PCI_FAULT_NONE;
+    return true;
+  }
+#else
+  (void)point;
+#endif
+  return false;
+}
+
+void pci_test_fail_once(enum pci_fault_point point) {
+#ifdef TEST
+  pci_fault_once = point;
+#else
+  (void)point;
+#endif
+}
 
 // ===================== ECAM MMIO mapping =====================
 
@@ -189,6 +225,7 @@ pci_scan_function(uint8_t bus, uint8_t dev, uint8_t func) {
   d->vendor_id = vendor;
   d->device_id = device;
   d->class_code = class_code;
+  d->class_id = (rev_class >> 8) & 0xffffff;
   d->header_type = header_type & 0x7F;
   d->msix_cap_offset = 0;
   d->msi_cap_offset = 0;
@@ -198,7 +235,27 @@ pci_scan_function(uint8_t bus, uint8_t dev, uint8_t func) {
   d->msix_pba_offset = 0;
   d->msix_vector_base = -1;
   d->msix_num_vectors = 0;
+  d->irq_mode = PCI_IRQ_NONE;
+  d->irq_registered_mask = 0;
   d->enabled = false;
+  d->dma_mask = UINT32_MAX;
+  d->bind_state = PCI_BIND_UNBOUND;
+  d->driver = NULL;
+  d->driver_private = NULL;
+  for (int i = 0; i < 6; i++) {
+    d->bar[i].vaddr = NULL;
+    d->bar[i].map_slot = -1;
+    d->bar[i].map_page = NULL;
+    d->bar[i].map_write_combining = false;
+  }
+  if ((header_type & 0x7F) == PCI_HEADER_TYPE_NORMAL) {
+    uint32_t subsystem = pci_read_config(bus, dev, func, 0x2C);
+    d->subsystem_vendor_id = subsystem & 0xffff;
+    d->subsystem_device_id = subsystem >> 16;
+  } else {
+    d->subsystem_vendor_id = 0;
+    d->subsystem_device_id = 0;
+  }
 
   // Walk PCI capability chain (Type 0 header only)
   if (d->header_type == PCI_HEADER_TYPE_NORMAL) {
@@ -266,95 +323,170 @@ pci_scan_bus(uint8_t bus) {
 
 // ===================== BAR MMIO mapping =====================
 
-__attribute__((no_sanitize("kernel-address"))) static void
-pci_map_bar_mmio(pci_device *d, int wc_bar_idx) {
-  int max_bars = (d->header_type == PCI_HEADER_TYPE_BRIDGE) ? 2 : 6;
-  for (int i = 0; i < max_bars; i++) {
-    if (d->bar[i].size == 0)
-      continue;
-    if (d->bar[i].type == 1)
-      continue; // I/O BAR, no mapping needed
+__attribute__((no_sanitize("kernel-address"))) void __iomem *
+pci_iomap(pci_device *d, int bar_idx, bool write_combining) {
+  if (!d || bar_idx < 0 || bar_idx >= 6 || d->bar[bar_idx].size == 0 ||
+      d->bar[bar_idx].type == 1)
+    return NULL;
 
-    uint64_t phys = d->bar[i].phys;
-    uint64_t size = d->bar[i].size;
-
-    // Find free PDPT_hh slot
-    int pdpt_idx = -1;
-    for (int j = 511; j >= 0; j--) {
-      if (pdpt_hh[j] == 0) {
-        pdpt_idx = j;
-        break;
-      }
-    }
-    if (pdpt_idx < 0) {
-      printk(LOG_ERROR, "pci: no free PDPT_hh slot for BAR\n");
-      continue;
-    }
-
-    uint64_t region_start = phys & ~0x1FFFFFULL;
-    uint64_t region_end = ALIGN_UP(phys + size, 0x200000);
-    size_t num_2mb = (region_end - region_start) / 0x200000;
-
-    // Allocate PD
-    struct page *pd_page = bfc_alloc_page(1);
-    if (!pd_page)
-      continue;
-    uint64_t *pd = (__force uint64_t *)phys_to_virt(
-        (__force phys_addr_t)page_to_phys(pd_page));
-    for (int j = 0; j < 512; j++)
-      pd[j] = 0;
-
-    // Fill with 2MB huge pages: WC for specified BAR, UC for others
-    uint64_t cache_flags = (i == wc_bar_idx) ? PTE_WC : PTE_UC;
-    for (size_t n = 0; n < num_2mb; n++) {
-      pd[n] = (region_start + n * 0x200000) | PTE_PRESENT | PTE_RW | PTE_PS |
-              cache_flags;
-    }
-
-    pdpt_hh[pdpt_idx] =
-        (__force uint64_t)page_to_phys(pd_page) | PTE_PRESENT | PTE_RW;
-
-    uint64_t vma =
-        (0xFFFFULL << 48) | (511ULL << 39) | ((uint64_t)pdpt_idx << 30);
-    d->bar[i].vaddr = (void __iomem __force *)(vma + (phys - region_start));
-    device_vma_base = vma + num_2mb * 0x200000;
-    flush_tlb();
+  mutex_lock(&pci_resource_mutex);
+  pci_bar *bar = &d->bar[bar_idx];
+  if (bar->vaddr) {
+    void __iomem *vaddr =
+        bar->map_write_combining == write_combining ? bar->vaddr : NULL;
+    mutex_unlock(&pci_resource_mutex);
+    return vaddr;
   }
+
+  if (bar->phys > UINT64_MAX - bar->size) {
+    mutex_unlock(&pci_resource_mutex);
+    return NULL;
+  }
+  uint64_t region_start = bar->phys & ~0x1fffffULL;
+  uint64_t region_end = ALIGN_UP(bar->phys + bar->size, 0x200000);
+  size_t num_2mb = (region_end - region_start) / 0x200000;
+  if (region_end < region_start || num_2mb == 0 || num_2mb > 512) {
+    mutex_unlock(&pci_resource_mutex);
+    return NULL;
+  }
+
+  int pdpt_idx = -1;
+  if (pci_fault(PCI_FAULT_BAR_SLOT)) {
+    mutex_unlock(&pci_resource_mutex);
+    return NULL;
+  }
+  for (int i = 511; i >= 0; i--) {
+    if (pdpt_hh[i] == 0) {
+      pdpt_idx = i;
+      break;
+    }
+  }
+  if (pdpt_idx < 0) {
+    mutex_unlock(&pci_resource_mutex);
+    return NULL;
+  }
+
+  struct page *pd_page =
+      pci_fault(PCI_FAULT_BAR_PAGE) ? NULL : bfc_alloc_page(1);
+  if (!pd_page) {
+    mutex_unlock(&pci_resource_mutex);
+    return NULL;
+  }
+  uint64_t *pd = (__force uint64_t *)phys_to_virt(
+      (__force phys_addr_t)page_to_phys(pd_page));
+  __memset(pd, 0, PAGE_SIZE);
+  uint64_t cache_flags = write_combining ? PTE_WC : PTE_UC;
+  for (size_t i = 0; i < num_2mb; i++)
+    pd[i] = (region_start + i * 0x200000) | PTE_PRESENT | PTE_RW | PTE_PS |
+            cache_flags;
+
+  if (pci_fault(PCI_FAULT_BAR_PUBLISH)) {
+    bfc_free_page(pd_page, 1);
+    mutex_unlock(&pci_resource_mutex);
+    return NULL;
+  }
+
+  pdpt_hh[pdpt_idx] =
+      (__force uint64_t)page_to_phys(pd_page) | PTE_PRESENT | PTE_RW;
+  uint64_t vma =
+      (0xffffULL << 48) | (511ULL << 39) | ((uint64_t)pdpt_idx << 30);
+  bar->vaddr = (void __iomem __force *)(vma + (bar->phys - region_start));
+  bar->map_slot = pdpt_idx;
+  bar->map_page = pd_page;
+  bar->map_write_combining = write_combining;
+  pci_stats.mapped_bars++;
+  device_vma_base = vma + num_2mb * 0x200000;
+  flush_tlb();
+  void __iomem *result = bar->vaddr;
+  mutex_unlock(&pci_resource_mutex);
+  return result;
+}
+
+__attribute__((no_sanitize("kernel-address"))) void pci_iounmap(pci_device *d,
+                                                                int bar_idx) {
+  if (!d || bar_idx < 0 || bar_idx >= 6)
+    return;
+  mutex_lock(&pci_resource_mutex);
+  pci_bar *bar = &d->bar[bar_idx];
+  if (bar->vaddr && bar->map_slot >= 0 && bar->map_page) {
+    pdpt_hh[bar->map_slot] = 0;
+    flush_tlb();
+    bfc_free_page(bar->map_page, 1);
+    bar->vaddr = NULL;
+    bar->map_slot = -1;
+    bar->map_page = NULL;
+    bar->map_write_combining = false;
+    ASSERT(pci_stats.mapped_bars > 0);
+    pci_stats.mapped_bars--;
+  }
+  mutex_unlock(&pci_resource_mutex);
 }
 
 // ===================== Device enablement =====================
 
 __attribute__((no_sanitize("kernel-address"))) int
-pci_enable_device(pci_device *d) {
-  if (d->enabled)
-    return 0;
+pci_enable_device_bars(pci_device *d, uint32_t bar_mask, uint32_t wc_mask) {
+  if (!d || (bar_mask & ~0x3fu) || (wc_mask & ~bar_mask))
+    return -EINVAL;
+  uint32_t newly_mapped = 0;
+  int max_bars = d->header_type == PCI_HEADER_TYPE_BRIDGE ? 2 : 6;
+  for (int i = 0; i < max_bars; i++) {
+    if (!(bar_mask & (1u << i)) || d->bar[i].size == 0 || d->bar[i].type == 1)
+      continue;
+    bool want_wc = (wc_mask & (1u << i)) != 0;
+    if (d->bar[i].vaddr && d->bar[i].map_write_combining != want_wc) {
+      for (int j = 0; j < max_bars; j++)
+        if (newly_mapped & (1u << j))
+          pci_iounmap(d, j);
+      return -EBUSY;
+    }
+    if (d->bar[i].vaddr)
+      continue;
+    if (!pci_iomap(d, i, want_wc)) {
+      for (int j = 0; j < max_bars; j++)
+        if (newly_mapped & (1u << j))
+          pci_iounmap(d, j);
+      return -ENOMEM;
+    }
+    newly_mapped |= 1u << i;
+  }
 
-  // 1. Map MMIO BARs
-  pci_map_bar_mmio(d, -1); // all BARs UC
-
-  // 2. Enable Bus Master + Memory Space
   uint32_t cmd = pci_read_config(d->bus, d->dev, d->func, 0x04);
   cmd |= (1 << 1) | (1 << 2); // Bus Master + Memory Space
   pci_write_config(d->bus, d->dev, d->func, 0x04, cmd);
-
   d->enabled = true;
   return 0;
 }
 
 __attribute__((no_sanitize("kernel-address"))) int
+pci_enable_device(pci_device *d) {
+  return pci_enable_device_bars(d, 0x3f, 0);
+}
+
+__attribute__((no_sanitize("kernel-address"))) int
 pci_enable_device_wc(pci_device *d, int wc_bar_idx) {
-  if (d->enabled)
-    return 0;
+  if (wc_bar_idx < 0 || wc_bar_idx >= 6)
+    return -EINVAL;
+  return pci_enable_device_bars(d, 0x3f, 1u << wc_bar_idx);
+}
 
-  // 1. Map MMIO BARs (specified BAR uses WC, others UC)
-  pci_map_bar_mmio(d, wc_bar_idx);
-
-  // 2. Enable Bus Master + Memory Space
+__attribute__((no_sanitize("kernel-address"))) void
+pci_disable_device(pci_device *d) {
+  if (!d)
+    return;
+  pci_disable_interrupts(d);
   uint32_t cmd = pci_read_config(d->bus, d->dev, d->func, 0x04);
-  cmd |= (1 << 1) | (1 << 2); // Bus Master + Memory Space
+  cmd &= ~((1u << 1) | (1u << 2));
   pci_write_config(d->bus, d->dev, d->func, 0x04, cmd);
+  for (int i = 0; i < 6; i++)
+    pci_iounmap(d, i);
+  d->enabled = false;
+}
 
-  d->enabled = true;
+int pci_set_dma_mask(pci_device *d, uint8_t address_bits) {
+  if (!d || (address_bits != 32 && address_bits != 64))
+    return -EINVAL;
+  d->dma_mask = address_bits == 64 ? UINT64_MAX : (uint64_t)UINT32_MAX;
   return 0;
 }
 
@@ -377,6 +509,272 @@ pci_find_device_by_id(uint16_t vendor, uint16_t device) {
       return &pci_devices[i];
   }
   return NULL;
+}
+
+static bool pci_id_is_end(const struct pci_device_id *id) {
+  return id->vendor == 0 && id->device == 0 && id->subsystem_vendor == 0 &&
+         id->subsystem_device == 0 && id->class_id == 0 && id->class_mask == 0;
+}
+
+const struct pci_device_id *pci_match_id(const struct pci_device_id *ids,
+                                         const pci_device *dev) {
+  if (!ids || !dev)
+    return NULL;
+  for (const struct pci_device_id *id = ids; !pci_id_is_end(id); id++) {
+    if (id->vendor != PCI_ANY_ID && id->vendor != dev->vendor_id)
+      continue;
+    if (id->device != PCI_ANY_ID && id->device != dev->device_id)
+      continue;
+    if (id->subsystem_vendor != PCI_ANY_ID &&
+        id->subsystem_vendor != dev->subsystem_vendor_id)
+      continue;
+    if (id->subsystem_device != PCI_ANY_ID &&
+        id->subsystem_device != dev->subsystem_device_id)
+      continue;
+    if ((id->class_id & id->class_mask) != (dev->class_id & id->class_mask))
+      continue;
+    return id;
+  }
+  return NULL;
+}
+
+static int pci_bind_locked(pci_device *dev, const struct pci_driver *driver) {
+  if (dev->bind_state != PCI_BIND_UNBOUND)
+    return -EBUSY;
+  const struct pci_device_id *id = pci_match_id(driver->id_table, dev);
+  if (!id)
+    return -ENODEV;
+
+  dev->bind_state = PCI_BIND_PROBING;
+  dev->driver = driver;
+  dev->driver_private = NULL;
+  int rc = driver->probe(dev, id);
+  if (rc) {
+    dev->driver_private = NULL;
+    dev->driver = NULL;
+    dev->bind_state = PCI_BIND_UNBOUND;
+    return rc;
+  }
+  dev->bind_state = PCI_BIND_BOUND;
+  mutex_lock(&pci_resource_mutex);
+  pci_stats.bound_devices++;
+  mutex_unlock(&pci_resource_mutex);
+  return 0;
+}
+
+int pci_register_driver(const struct pci_driver *driver) {
+  if (!driver || !driver->name || !driver->id_table || !driver->probe)
+    return -EINVAL;
+
+  mutex_lock(&pci_driver_mutex);
+  for (size_t i = 0; i < pci_driver_count; i++) {
+    if (pci_drivers[i] == driver) {
+      mutex_unlock(&pci_driver_mutex);
+      return -EEXIST;
+    }
+  }
+  if (pci_driver_count == PCI_MAX_DRIVERS) {
+    mutex_unlock(&pci_driver_mutex);
+    return -ENOSPC;
+  }
+  if (pci_fault(PCI_FAULT_DRIVER_REGISTER)) {
+    mutex_unlock(&pci_driver_mutex);
+    return -ENOMEM;
+  }
+  pci_drivers[pci_driver_count++] = driver;
+  for (int i = 0; i < pci_device_count; i++) {
+    if (pci_devices[i].bind_state == PCI_BIND_UNBOUND)
+      (void)pci_bind_locked(&pci_devices[i], driver);
+  }
+  mutex_unlock(&pci_driver_mutex);
+  return 0;
+}
+
+void pci_unregister_driver(const struct pci_driver *driver) {
+  if (!driver)
+    return;
+  mutex_lock(&pci_driver_mutex);
+  size_t slot = pci_driver_count;
+  for (size_t i = 0; i < pci_driver_count; i++) {
+    if (pci_drivers[i] == driver) {
+      slot = i;
+      break;
+    }
+  }
+  if (slot == pci_driver_count) {
+    mutex_unlock(&pci_driver_mutex);
+    return;
+  }
+
+  for (int i = 0; i < pci_device_count; i++) {
+    pci_device *dev = &pci_devices[i];
+    if (dev->driver != driver || dev->bind_state != PCI_BIND_BOUND)
+      continue;
+    dev->bind_state = PCI_BIND_REMOVING;
+    if (driver->remove)
+      driver->remove(dev);
+    mutex_lock(&pci_resource_mutex);
+    ASSERT(pci_stats.bound_devices > 0);
+    pci_stats.bound_devices--;
+    mutex_unlock(&pci_resource_mutex);
+    dev->driver_private = NULL;
+    dev->driver = NULL;
+    dev->bind_state = PCI_BIND_UNBOUND;
+  }
+  for (size_t i = slot + 1; i < pci_driver_count; i++)
+    pci_drivers[i - 1] = pci_drivers[i];
+  pci_drivers[--pci_driver_count] = NULL;
+  mutex_unlock(&pci_driver_mutex);
+}
+
+void pci_set_driver_private(pci_device *dev, void *private_data) {
+  if (dev)
+    dev->driver_private = private_data;
+}
+
+void *pci_get_driver_private(const pci_device *dev) {
+  return dev ? dev->driver_private : NULL;
+}
+
+#ifdef TEST
+static int pci_test_probe_count;
+static int pci_test_remove_count;
+static bool pci_test_fail_probe;
+static int pci_test_cookie;
+
+static void pci_test_irq(trapframe *frame) { (void)frame; }
+
+static int pci_test_probe(pci_device *dev, const struct pci_device_id *id) {
+  BUG_ON(!dev || !id || dev->bind_state != PCI_BIND_PROBING);
+  pci_test_probe_count++;
+  pci_set_driver_private(dev, &pci_test_cookie);
+  return pci_test_fail_probe ? -EIO : 0;
+}
+
+static void pci_test_remove(pci_device *dev) {
+  BUG_ON(!dev || dev->bind_state != PCI_BIND_REMOVING);
+  BUG_ON(pci_get_driver_private(dev) != &pci_test_cookie);
+  pci_test_remove_count++;
+}
+
+static const struct pci_device_id pci_test_ids[] = {
+    {
+        .vendor = 0xfefe,
+        .device = 0x0001,
+        .subsystem_vendor = PCI_ANY_ID,
+        .subsystem_device = PCI_ANY_ID,
+    },
+    {0},
+};
+
+static const struct pci_driver pci_test_driver = {
+    .name = "pci-lifecycle-test",
+    .id_table = pci_test_ids,
+    .probe = pci_test_probe,
+    .remove = pci_test_remove,
+};
+#endif
+
+void pci_lifecycle_selftest(void) {
+#ifdef TEST
+  struct pci_resource_stats baseline;
+  pci_get_resource_stats(&baseline);
+  size_t baseline_free_pages = bfc_free_page_nums();
+  BUG_ON(pci_device_count >= MAX_PCI_DEV);
+  pci_device *fake = &pci_devices[pci_device_count++];
+  __memset(fake, 0, sizeof(*fake));
+  fake->vendor_id = 0xfefe;
+  fake->device_id = 0x0001;
+  fake->class_code = PCI_CLASS_DISPLAY;
+  fake->class_id = (uint32_t)PCI_CLASS_DISPLAY << 8;
+  fake->bind_state = PCI_BIND_UNBOUND;
+  for (int i = 0; i < 6; i++)
+    fake->bar[i].map_slot = -1;
+
+  pci_device wrong_id = *fake;
+  wrong_id.device_id = 0x0002;
+  BUG_ON(pci_match_id(pci_test_ids, &wrong_id) != NULL);
+
+  pci_test_fail_once(PCI_FAULT_DRIVER_REGISTER);
+  BUG_ON(pci_register_driver(&pci_test_driver) != -ENOMEM);
+  BUG_ON(fake->bind_state != PCI_BIND_UNBOUND || fake->driver != NULL);
+
+  pci_test_probe_count = 0;
+  pci_test_remove_count = 0;
+  pci_test_fail_probe = true;
+  BUG_ON(pci_register_driver(&pci_test_driver) != 0);
+  BUG_ON(fake->bind_state != PCI_BIND_UNBOUND || fake->driver != NULL ||
+         pci_get_driver_private(fake) != NULL);
+  pci_unregister_driver(&pci_test_driver);
+
+  pci_test_fail_probe = false;
+  for (int i = 0; i < 1000; i++) {
+    BUG_ON(pci_register_driver(&pci_test_driver) != 0);
+    BUG_ON(fake->bind_state != PCI_BIND_BOUND ||
+           fake->driver != &pci_test_driver ||
+           pci_get_driver_private(fake) != &pci_test_cookie);
+    pci_unregister_driver(&pci_test_driver);
+    BUG_ON(fake->bind_state != PCI_BIND_UNBOUND || fake->driver != NULL ||
+           pci_get_driver_private(fake) != NULL);
+  }
+  BUG_ON(pci_test_probe_count != 1001 || pci_test_remove_count != 1000);
+  for (int i = 0; i < 1000; i++) {
+    int vector = pci_alloc_vectors(1);
+    BUG_ON(vector < PCI_VECTOR_FIRST);
+    pci_free_vectors(vector, 1);
+  }
+  pci_test_fail_once(PCI_FAULT_VECTOR_ALLOC);
+  BUG_ON(pci_alloc_vectors(1) != -ENOMEM);
+
+  int irq_vector = pci_alloc_vectors(1);
+  BUG_ON(irq_vector < PCI_VECTOR_FIRST);
+  fake->irq_mode = PCI_IRQ_MSI;
+  fake->msix_vector_base = irq_vector;
+  fake->msix_num_vectors = 1;
+  pci_test_fail_once(PCI_FAULT_IRQ_REGISTER);
+  BUG_ON(pci_request_irq(fake, 0, pci_test_irq) != -ENOMEM);
+  BUG_ON(fake->irq_registered_mask != 0 || irq_has_handler(irq_vector));
+  BUG_ON(pci_request_irq(fake, 0, pci_test_irq) != 0);
+  BUG_ON(!(fake->irq_registered_mask & 1u) || !irq_has_handler(irq_vector));
+  pci_free_irq(fake, 0);
+  BUG_ON(fake->irq_registered_mask != 0 || irq_has_handler(irq_vector));
+  fake->irq_mode = PCI_IRQ_NONE;
+  fake->msix_vector_base = -1;
+  fake->msix_num_vectors = 0;
+  pci_free_vectors(irq_vector, 1);
+
+  fake->bar[0].phys = 0x100000;
+  fake->bar[0].size = PAGE_SIZE;
+  const enum pci_fault_point bar_faults[] = {
+      PCI_FAULT_BAR_SLOT,
+      PCI_FAULT_BAR_PAGE,
+      PCI_FAULT_BAR_PUBLISH,
+  };
+  for (size_t i = 0; i < sizeof(bar_faults) / sizeof(bar_faults[0]); i++) {
+    pci_test_fail_once(bar_faults[i]);
+    BUG_ON(pci_iomap(fake, 0, false) != NULL);
+    BUG_ON(fake->bar[0].vaddr || fake->bar[0].map_slot != -1 ||
+           fake->bar[0].map_page);
+    BUG_ON(bfc_free_page_nums() != baseline_free_pages);
+  }
+  for (int i = 0; i < 1000; i++) {
+    BUG_ON(!pci_iomap(fake, 0, false));
+    BUG_ON(fake->bar[0].map_slot < 0 || !fake->bar[0].map_page);
+    pci_iounmap(fake, 0);
+    BUG_ON(fake->bar[0].vaddr || fake->bar[0].map_slot != -1 ||
+           fake->bar[0].map_page);
+  }
+  struct pci_resource_stats after;
+  pci_get_resource_stats(&after);
+  BUG_ON(after.mapped_bars != baseline.mapped_bars ||
+         after.allocated_vectors != baseline.allocated_vectors ||
+         after.registered_irqs != baseline.registered_irqs ||
+         after.bound_devices != baseline.bound_devices);
+  BUG_ON(bfc_free_page_nums() != baseline_free_pages);
+  __memset(fake, 0, sizeof(*fake));
+  pci_device_count--;
+  printk(LOG_INFO, "pci lifecycle selftest: PASS (1000 bind/unbind cycles)\n");
+#endif
 }
 
 // ===================== Syscall: sys_pci_dev_info =====================
@@ -424,12 +822,47 @@ int64_t sys_pci_dev_info(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
 
 // ===================== MSI =====================
 
+static int pci_alloc_vectors(int count) {
+  if (count <= 0 || count > PCI_VECTOR_COUNT)
+    return -EINVAL;
+  mutex_lock(&pci_resource_mutex);
+  if (pci_fault(PCI_FAULT_VECTOR_ALLOC)) {
+    mutex_unlock(&pci_resource_mutex);
+    return -ENOMEM;
+  }
+  for (int start = 0; start <= PCI_VECTOR_COUNT - count; start++) {
+    uint32_t mask = count == 32 ? UINT32_MAX : ((1u << count) - 1u) << start;
+    if (!(pci_vector_bitmap & mask)) {
+      pci_vector_bitmap |= mask;
+      pci_stats.allocated_vectors += count;
+      mutex_unlock(&pci_resource_mutex);
+      return PCI_VECTOR_FIRST + start;
+    }
+  }
+  mutex_unlock(&pci_resource_mutex);
+  return -ENOMEM;
+}
+
+static void pci_free_vectors(int base, int count) {
+  if (base < PCI_VECTOR_FIRST || count <= 0 ||
+      base + count > PCI_VECTOR_FIRST + PCI_VECTOR_COUNT)
+    return;
+  int start = base - PCI_VECTOR_FIRST;
+  uint32_t mask = count == 32 ? UINT32_MAX : ((1u << count) - 1u) << start;
+  mutex_lock(&pci_resource_mutex);
+  ASSERT((pci_vector_bitmap & mask) == mask);
+  ASSERT(pci_stats.allocated_vectors >= (uint32_t)count);
+  pci_vector_bitmap &= ~mask;
+  pci_stats.allocated_vectors -= count;
+  mutex_unlock(&pci_resource_mutex);
+}
+
 __attribute__((no_sanitize("kernel-address"))) int
 pci_enable_msi(pci_device *dev) {
+  if (!dev || dev->irq_mode != PCI_IRQ_NONE)
+    return -EBUSY;
   if (dev->msi_cap_offset == 0)
     return -ENOSYS;
-  if (next_msix_vector > 95)
-    return -ENOMEM; // cap at vec 95 (priority class 5)
 
   // Read Message Control (upper 16 bits of DWORD at cap_offset)
   uint32_t cap_dword =
@@ -437,10 +870,12 @@ pci_enable_msi(pci_device *dev) {
   uint16_t msg_ctrl = (cap_dword >> 16) & 0xFFFF;
   bool is_64bit = (msg_ctrl & (1 << 7)) != 0; // 64-bit Address Capable
 
-  // Allocate one vector
-  int vector = next_msix_vector++;
+  int vector = pci_alloc_vectors(1);
+  if (vector < 0)
+    return vector;
   dev->msix_vector_base = vector; // reuse field for MSI vector base
   dev->msix_num_vectors = 1;
+  dev->irq_mode = PCI_IRQ_MSI;
 
   uint32_t bsp_apic_id = (uint32_t)(lapic_read(LAPIC_ID) >> 24);
 
@@ -481,10 +916,12 @@ pci_enable_msi(pci_device *dev) {
 
 __attribute__((no_sanitize("kernel-address"))) int
 pci_enable_msix(pci_device *dev, int num_vectors) {
+  if (!dev || dev->irq_mode != PCI_IRQ_NONE)
+    return -EBUSY;
   if (dev->msix_cap_offset == 0)
     return -ENOSYS;
-  if (num_vectors <= 0 || next_msix_vector + num_vectors > 96)
-    return -ENOMEM;
+  if (num_vectors <= 0)
+    return -EINVAL;
 
   // Read Message Control to get table size (bits 10:2 of 16-bit Message Control
   // = N-1) Message Control is at cap_offset+2, upper 16 bits of DWORD at
@@ -492,21 +929,26 @@ pci_enable_msix(pci_device *dev, int num_vectors) {
   uint32_t cap_dword =
       pci_read_config(dev->bus, dev->dev, dev->func, dev->msix_cap_offset);
   uint16_t msg_ctrl = (cap_dword >> 16) & 0xFFFF;
-  int table_size = ((msg_ctrl >> 2) & 0x7FF) + 1;
+  int table_size = (msg_ctrl & 0x7FF) + 1;
   if (num_vectors > table_size)
     num_vectors = table_size;
-
-  // Allocate vectors
-  int base = next_msix_vector;
-  next_msix_vector += num_vectors;
-  dev->msix_vector_base = base;
-  dev->msix_num_vectors = num_vectors;
 
   // Get MSI-X Table address (BAR vaddr + offset)
   // BAR should already be mapped by pci_enable_device
   void __iomem *bar_vaddr = dev->bar[dev->msix_table_bar].vaddr;
   if (!bar_vaddr)
     return -EFAULT;
+  uint64_t table_bytes = (uint64_t)num_vectors * 16;
+  if (dev->msix_table_offset > dev->bar[dev->msix_table_bar].size ||
+      table_bytes > dev->bar[dev->msix_table_bar].size - dev->msix_table_offset)
+    return -EINVAL;
+
+  int base = pci_alloc_vectors(num_vectors);
+  if (base < 0)
+    return base;
+  dev->msix_vector_base = base;
+  dev->msix_num_vectors = num_vectors;
+  dev->irq_mode = PCI_IRQ_MSIX;
 
   volatile uint32_t __iomem *table =
       (volatile uint32_t __iomem *)((uint8_t __iomem *)bar_vaddr +
@@ -566,8 +1008,23 @@ pci_enable_msix(pci_device *dev, int num_vectors) {
 }
 
 __attribute__((no_sanitize("kernel-address"))) void
+pci_msix_mask_entry(pci_device *dev, int entry) {
+  if (!dev || dev->irq_mode != PCI_IRQ_MSIX || entry < 0 ||
+      entry >= dev->msix_num_vectors)
+    return;
+  void __iomem *bar_vaddr = dev->bar[dev->msix_table_bar].vaddr;
+  if (!bar_vaddr)
+    return;
+  volatile uint32_t __iomem *table =
+      (volatile uint32_t __iomem *)((uint8_t __iomem *)bar_vaddr +
+                                    dev->msix_table_offset);
+  *(volatile uint32_t __force *)&table[entry * 4 + 3] |= 1;
+}
+
+__attribute__((no_sanitize("kernel-address"))) void
 pci_msix_unmask_entry(pci_device *dev, int entry) {
-  if (dev->msix_cap_offset == 0 || entry >= dev->msix_num_vectors)
+  if (!dev || dev->irq_mode != PCI_IRQ_MSIX || entry < 0 ||
+      entry >= dev->msix_num_vectors)
     return;
   void __iomem *bar_vaddr = dev->bar[dev->msix_table_bar].vaddr;
   volatile uint32_t __iomem *table =
@@ -576,9 +1033,93 @@ pci_msix_unmask_entry(pci_device *dev, int entry) {
   *(volatile uint32_t __force *)&table[entry * 4 + 3] &= ~1; // Clear Mask bit
 }
 
+int pci_request_irq(pci_device *dev, int entry, void (*handler)(trapframe *)) {
+  if (!dev || !handler || dev->irq_mode == PCI_IRQ_NONE || entry < 0 ||
+      entry >= dev->msix_num_vectors || entry >= 32)
+    return -EINVAL;
+  int vector = dev->msix_vector_base + entry;
+  mutex_lock(&pci_resource_mutex);
+  uint32_t mask = 1u << entry;
+  if ((dev->irq_registered_mask & mask) || irq_has_handler(vector)) {
+    mutex_unlock(&pci_resource_mutex);
+    return -EBUSY;
+  }
+  if (pci_fault(PCI_FAULT_IRQ_REGISTER)) {
+    mutex_unlock(&pci_resource_mutex);
+    return -ENOMEM;
+  }
+  irq_register(vector, handler);
+  dev->irq_registered_mask |= mask;
+  pci_stats.registered_irqs++;
+  mutex_unlock(&pci_resource_mutex);
+  return 0;
+}
+
+void pci_free_irq(pci_device *dev, int entry) {
+  if (!dev || entry < 0 || entry >= 32)
+    return;
+  mutex_lock(&pci_resource_mutex);
+  uint32_t mask = 1u << entry;
+  if (dev->irq_registered_mask & mask) {
+    irq_unregister(dev->msix_vector_base + entry);
+    dev->irq_registered_mask &= ~mask;
+    ASSERT(pci_stats.registered_irqs > 0);
+    pci_stats.registered_irqs--;
+  }
+  mutex_unlock(&pci_resource_mutex);
+}
+
+__attribute__((no_sanitize("kernel-address"))) void
+pci_disable_interrupts(pci_device *dev) {
+  if (!dev || dev->irq_mode == PCI_IRQ_NONE)
+    return;
+
+  if (dev->irq_mode == PCI_IRQ_MSIX) {
+    uint32_t cap =
+        pci_read_config(dev->bus, dev->dev, dev->func, dev->msix_cap_offset);
+    uint16_t ctrl = cap >> 16;
+    ctrl |= 1u << 14;
+    ctrl &= ~(1u << 15);
+    pci_write_config(dev->bus, dev->dev, dev->func, dev->msix_cap_offset,
+                     (cap & 0xffff) | ((uint32_t)ctrl << 16));
+    for (int i = 0; i < dev->msix_num_vectors; i++)
+      pci_msix_mask_entry(dev, i);
+  } else {
+    uint32_t cap =
+        pci_read_config(dev->bus, dev->dev, dev->func, dev->msi_cap_offset);
+    uint16_t ctrl = cap >> 16;
+    ctrl &= ~1u;
+    pci_write_config(dev->bus, dev->dev, dev->func, dev->msi_cap_offset,
+                     (cap & 0xffff) | ((uint32_t)ctrl << 16));
+  }
+
+  for (int i = 0; i < dev->msix_num_vectors; i++) {
+    if (dev->irq_registered_mask & (1u << i))
+      pci_free_irq(dev, i);
+    else
+      irq_unregister(dev->msix_vector_base + i);
+  }
+  pci_free_vectors(dev->msix_vector_base, dev->msix_num_vectors);
+  dev->msix_vector_base = -1;
+  dev->msix_num_vectors = 0;
+  dev->irq_mode = PCI_IRQ_NONE;
+}
+
+void pci_get_resource_stats(struct pci_resource_stats *stats) {
+  if (!stats)
+    return;
+  mutex_lock(&pci_resource_mutex);
+  *stats = pci_stats;
+  mutex_unlock(&pci_resource_mutex);
+}
+
 // ===================== pci_init =====================
 
 __attribute__((no_sanitize("kernel-address"))) void pci_init() {
+  mutex_init(&pci_driver_mutex);
+  mutex_init(&pci_resource_mutex);
+  pci_vector_bitmap = 0;
+  __memset(&pci_stats, 0, sizeof(pci_stats));
   if (g_mcfg.ecam_base == 0)
     return;
 

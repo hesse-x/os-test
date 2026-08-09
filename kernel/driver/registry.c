@@ -51,7 +51,12 @@ void driver_pci_match(void) {
       }
     }
 
-    // Match by class code
+    // An explicit vendor/device match is authoritative. Do not silently bind a
+    // different device by class when that exact ID is absent.
+    if (drv->pci_vendor != 0 || drv->pci_device != 0)
+      continue;
+
+    // Match by class code only for drivers that explicitly request it.
     if (drv->pci_class != 0) {
       uint16_t class_subclass = (drv->pci_class >> 8) & 0xFFFF;
       uint8_t prog_if = drv->pci_class & 0xFF;
