@@ -19,7 +19,7 @@ def record(payload, sequence, ident, kind, aux, value=0):
                        value)
 
 
-def make_raw(minor=3, counters=True, duplicate=False, omit_end=False,
+def make_raw(minor=4, counters=True, duplicate=False, omit_end=False,
              counter_ident=1):
     boot, end, frequency = 1000, 100000, 1000000
     records = []
@@ -65,15 +65,20 @@ class PerfReportRawTest(unittest.TestCase):
             path.write_bytes(data)
             return PERF.parse_raw(path)
 
-    def test_valid_abi_13_counters(self):
+    def test_valid_abi_14_counters(self):
         snapshot = self.parse(make_raw())
-        self.assertEqual(snapshot["raw_minor"], 3)
+        self.assertEqual(snapshot["raw_minor"], 4)
         self.assertEqual(len(snapshot["counter_snapshots"]), 6)
         self.assertEqual(snapshot["counter_snapshots"][-1]["name"], "final")
 
     def test_old_abi_12_remains_supported(self):
         snapshot = self.parse(make_raw(minor=2, counters=False))
         self.assertEqual(snapshot["counter_snapshots"], [])
+
+    def test_old_abi_13_counters_remain_supported(self):
+        snapshot = self.parse(make_raw(minor=3))
+        self.assertEqual(snapshot["raw_minor"], 3)
+        self.assertEqual(len(snapshot["counter_snapshots"]), 6)
 
     def test_unknown_counter_is_preserved(self):
         snapshot = self.parse(make_raw(counter_ident=60000))
@@ -128,6 +133,27 @@ class PerfReportRawTest(unittest.TestCase):
         snapshot = self.parse(make_raw(counter_ident=72))
         counters, _, _, _ = PERF.analyze_counters(snapshot)
         self.assertTrue(counters["counter_overflow"])
+
+    def test_extended_wait_counter_names_do_not_overlap(self):
+        self.assertEqual(PERF.counter_name(186), "wake.valid_completion")
+        self.assertEqual(PERF.counter_name(187), "wake.noop_completion")
+        self.assertEqual(PERF.counter_name(188), "wake.valid_kthread")
+        self.assertEqual(PERF.counter_name(189), "wake.noop_kthread")
+
+    def test_clang_job_exec_markers(self):
+        snapshot = {
+            "boot_tsc": 1000, "end_tsc": 3000, "tsc_freq": 1000,
+            "events": [
+                {"timestamp": 1100, "type": PERF.TRACE_EXEC,
+                 "subtype": 2, "cpu": 0, "value": 42},
+                {"timestamp": 2100, "type": PERF.TRACE_EXEC,
+                 "subtype": 3, "cpu": 0, "value": 43},
+            ],
+        }
+        scheduling, _, _, _ = PERF.analyze_events(snapshot)
+        self.assertEqual(
+            [(row["pid"], row["program"]) for row in scheduling["execs"]],
+            [(42, "clang -cc1"), (43, "ld.lld")])
 
     def test_outstanding_is_a_gauge(self):
         snapshot = self.parse(make_raw(counter_ident=307))

@@ -17,9 +17,9 @@ set(CMAKE_C_FLAGS_INIT "${OS_COMMON_FLAGS}")
 set(CMAKE_CXX_FLAGS_INIT
     "${OS_COMMON_FLAGS} -stdlib=libc++ -nostdinc++ -I${OS_SYSROOT}/usr/include/c++/v1")
 set(CMAKE_EXE_LINKER_FLAGS_INIT
-    "--rtlib=compiler-rt -nodefaultlibs -Wl,--hash-style=gnu -Wl,--dynamic-linker,/lib/ld-musl-x86_64.so.1")
+    "--rtlib=compiler-rt -nodefaultlibs -Wl,--hash-style=gnu -Wl,-z,pack-relative-relocs -Wl,--dynamic-linker,/lib/ld-musl-x86_64.so.1")
 set(CMAKE_SHARED_LINKER_FLAGS_INIT
-    "--rtlib=compiler-rt -nodefaultlibs -Wl,--hash-style=gnu")
+    "--rtlib=compiler-rt -nodefaultlibs -Wl,--hash-style=gnu -Wl,-z,pack-relative-relocs")
 set(CMAKE_MODULE_LINKER_FLAGS_INIT "${CMAKE_SHARED_LINKER_FLAGS_INIT}")
 
 # CMake appends these after object files, preserving static-library resolution.

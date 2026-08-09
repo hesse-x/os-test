@@ -9,6 +9,21 @@
 add_user_dyn_elf(test_runner C SOURCES test_runner.c LINK_LIBS c
     DEFS TEST)
 
+# Keep the link benchmark independent from clang_compile so it can be selected
+# directly with --perf=clang_link.
+if(TEST)
+    set(CLANG_SMOKE_LINK_INPUT ${CMAKE_BINARY_DIR}/clang_smoke.o)
+    add_custom_command(OUTPUT ${CLANG_SMOKE_LINK_INPUT}
+        COMMAND ${CMAKE_C_COMPILER} ${USER_COMPILE_FLAGS} ${USER_BUILD_FLAGS}
+                -c ${CMAKE_SOURCE_DIR}/testdata/clang_smoke.c
+                -o ${CLANG_SMOKE_LINK_INPUT}
+        DEPENDS ${CMAKE_SOURCE_DIR}/testdata/clang_smoke.c
+        COMMENT "Compiling clang_smoke link benchmark input")
+    add_custom_target(clang_smoke_link_input ALL
+        DEPENDS ${CLANG_SMOKE_LINK_INPUT})
+    os_image_path(clang_smoke_link_input clang_smoke.o clang_smoke.o PARTITION 2)
+endif()
+
 # EGL/GLES2 end-to-end smoke. Mesa is built and staged by build.sh after the
 # main CMake ninja, so this target deliberately stays out of ALL and is built
 # on demand once build/libEGL.so and build/libGLESv2.so exist.

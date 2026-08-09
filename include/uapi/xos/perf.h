@@ -11,7 +11,7 @@
 
 #define XOS_PERF_ABI_VERSION 1U
 #define XOS_PERF_RAW_MAJOR 1U
-#define XOS_PERF_RAW_MINOR 3U
+#define XOS_PERF_RAW_MINOR 4U
 #define XOS_PERF_MAX_READ (128U * 1024U)
 #define XOS_PERF_FILE_HEADER_SIZE 88U
 #define XOS_PERF_EARLY_RECORD_SIZE 24U
@@ -96,6 +96,14 @@ enum xos_perf_trace_type {
   XOS_PERF_TRACE_IRQ_MAX = 10,
   /* value=I/O cookie, subtype=IRQ vector for an in-handler completion. */
   XOS_PERF_TRACE_IRQ_CAUSE = 11,
+  /* value=PID, subtype=xos_perf_exec_kind. */
+  XOS_PERF_TRACE_EXEC = 12,
+};
+
+enum xos_perf_exec_kind {
+  XOS_PERF_EXEC_CLANG_DRIVER = 1,
+  XOS_PERF_EXEC_CLANG_CC1 = 2,
+  XOS_PERF_EXEC_LD_LLD = 3,
 };
 
 enum xos_perf_ipc_stage {

@@ -20,10 +20,11 @@ TRACE_SCHED_SWITCH, TRACE_TASK_BLOCK, TRACE_TASK_WAKE = 1, 2, 3
 TRACE_IRQ_BEGIN, TRACE_IRQ_END, TRACE_IPC, TRACE_IO = 4, 5, 6, 7
 TRACE_IRQ_COUNT, TRACE_IRQ_TOTAL, TRACE_IRQ_MAX = 8, 9, 10
 TRACE_IRQ_CAUSE = 11
+TRACE_EXEC = 12
 IRQ_SUMMARY_TYPES = {TRACE_IRQ_COUNT, TRACE_IRQ_TOTAL, TRACE_IRQ_MAX}
 TIMED_TRACE_TYPES = {TRACE_SCHED_SWITCH, TRACE_TASK_BLOCK, TRACE_TASK_WAKE,
                      TRACE_IRQ_BEGIN, TRACE_IRQ_END, TRACE_IPC, TRACE_IO,
-                     TRACE_IRQ_CAUSE}
+                     TRACE_IRQ_CAUSE, TRACE_EXEC}
 SOURCE_NAMES = {1: "lapic_timer", 2: "pmu_nmi"}
 IPC_STAGES = {1: "send", 2: "receive", 3: "reply", 4: "wake",
               5: "enqueue", 6: "dequeue"}
@@ -66,7 +67,9 @@ MARK_NAMES = {1: "gui_start", 2: "compositor_ready",
               3: "terminal_xdg_ready", 4: "terminal_first_buffer",
               5: "shell_ready", 6: "final"}
 WAIT_NAMES = ("none", "recv", "req_reply", "child", "msg_reply", "poll",
-              "futex", "vfork", "pause", "sleep", "block_io", "mutex")
+              "futex", "vfork", "pause", "sleep", "block_io", "mutex",
+              "completion", "kthread")
+EXEC_NAMES = {1: "clang", 2: "clang -cc1", 3: "ld.lld"}
 
 
 def counter_name(ident):
@@ -80,6 +83,10 @@ def counter_name(ident):
         return "wake.cross_cpu_ipi"
     if ident == 185:
         return "wake.spurious_cancels"
+    if 186 <= ident < 190:
+        event = 12 + (ident - 186) // 2
+        outcome = "valid" if (ident - 186) % 2 == 0 else "noop"
+        return f"wake.{outcome}_{WAIT_NAMES[event]}"
     if 200 <= ident < 232:
         return f"ahci.queue_wait_hist_{ident - 200}"
     if 232 <= ident < 264:
@@ -200,7 +207,7 @@ def parse_raw(path):
     if len(data) < HEADER_SIZE + FOOTER_SIZE or data[:8] != b"XOSPERF\0":
         raise PerfFormatError("invalid or truncated raw header")
     major, minor = u16(data, 8), u16(data, 10)
-    if major != 1 or minor not in (0, 1, 2, 3):
+    if major != 1 or minor not in (0, 1, 2, 3, 4):
         raise PerfFormatError(f"unsupported raw ABI version {major}.{minor}")
     if data[12] != 1 or data[13] != 64 or u16(data, 14) != HEADER_SIZE:
         raise PerfFormatError("unsupported endian, pointer width, or header size")
@@ -248,6 +255,7 @@ def parse_raw(path):
         elif kind == 6:
             trace_type = ident & 0xff
             if (minor < 2 or trace_type not in TIMED_TRACE_TYPES | IRQ_SUMMARY_TYPES or
+                    (trace_type == TRACE_EXEC and minor < 4) or
                     (trace_type in TIMED_TRACE_TYPES and
                      (first < boot_tsc or first > end_tsc))):
                 raise PerfFormatError(f"invalid trace event at raw offset {raw_offset}")
@@ -410,6 +418,7 @@ def analyze_events(snapshot):
                                        defaultdict(list))
     wake_latencies = []
     irq_open, irq_rows, causal = defaultdict(list), [], defaultdict(list)
+    exec_rows = []
     irq_summaries = defaultdict(dict)
     trace = []
     for event in snapshot["events"]:
@@ -462,6 +471,13 @@ def analyze_events(snapshot):
                                            "vector": subtype,
                                            "timestamp": event["timestamp"],
                                            "cpu": event["cpu"]})
+        elif kind == TRACE_EXEC:
+            exec_rows.append({"pid": signed32(value),
+                              "program": EXEC_NAMES.get(
+                                  subtype, f"exec_kind_{subtype}"),
+                              "timestamp": event["timestamp"],
+                              "time_ms": (event["timestamp"] -
+                                          snapshot["boot_tsc"]) * ms})
 
     cpu_rows, task_ticks = [], defaultdict(int)
     for cpu, rows in sorted(switches.items()):
@@ -524,7 +540,8 @@ def analyze_events(snapshot):
                                 "complete": start_stage in names and
                                             bool(names & terminal_stages),
                                 "stages": transaction})
-    return {"cpus": cpu_rows, "top_tasks": tasks, "wake_latency": wake_summary}, irqs, causal_rows, trace
+    return {"cpus": cpu_rows, "top_tasks": tasks,
+            "wake_latency": wake_summary, "execs": exec_rows}, irqs, causal_rows, trace
 
 
 def percentile(values, percent):
@@ -868,6 +885,11 @@ def write_outputs(snapshot, phases, tests, errors, trace, hotspots, chains,
                      f"p95={wake['p95_ms']:.3f}ms max={wake['max_ms']:.3f}ms")
     else:
         lines.append("  wake latency: INVALID")
+    lines.extend(["", "Clang job exec markers:"])
+    lines.extend(f"  {x['time_ms']:10.3f} ms  pid={x['pid']:<5} {x['program']}"
+                 for x in scheduling["execs"])
+    if not scheduling["execs"]:
+        lines.append("  (none)")
     if phase_deltas:
         lines.extend(["", "GUI milestone deltas:"])
         for delta in phase_deltas:

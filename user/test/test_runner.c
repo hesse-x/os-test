@@ -23,14 +23,25 @@ struct test_entry {
   const char *path;
 };
 
-static char *const clang_smoke_argv[] = {"/usr/bin/clang", "/clang_smoke.c",
-                                         "-o", "/tmp/clang", NULL};
+static char *const clang_smoke_compile_argv[] = {
+    "/usr/bin/clang", "-c", "/clang_smoke.c", "-o", "/tmp/clang_smoke.o", NULL};
+static char *const clang_smoke_link_argv[] = {
+    "/usr/bin/clang", "/clang_smoke.o", "-o", "/tmp/clang", NULL};
 static char *const clang_output_argv[] = {"/tmp/clang", NULL};
 
-static int clang_smoke_output_is_elf(void) {
+static int reset_child_signal_state(void) {
+  for (int sig = 1; sig < NSIG; sig++)
+    signal(sig, SIG_DFL);
+
+  sigset_t empty_mask;
+  sigemptyset(&empty_mask);
+  return sigprocmask(SIG_SETMASK, &empty_mask, NULL);
+}
+
+static int file_is_elf(const char *path) {
   static const unsigned char elf_magic[] = {0x7f, 'E', 'L', 'F'};
   unsigned char magic[sizeof(elf_magic)];
-  FILE *file = fopen("/tmp/clang", "rb");
+  FILE *file = fopen(path, "rb");
   if (!file)
     return 0;
   size_t read = fread(magic, 1, sizeof(magic), file);
@@ -159,7 +170,8 @@ static struct test_entry tests[] = {
     {"accept_no_timeout", "/test/test_accept_no_timeout.elf"},
     {"pty", "/test/pty.elf"},
     {"terminal_sgr", "/test/test_terminal_sgr.elf"},
-    {"clang_smoke", "/usr/bin/clang"},
+    {"clang_compile", "/usr/bin/clang"},
+    {"clang_link", "/usr/bin/clang"},
 };
 
 #define NUM_TESTS (sizeof(tests) / sizeof(tests[0]))
@@ -172,9 +184,26 @@ static int perf_excludes_long_timeout_test(const char *name) {
 #endif
 
 int main(int argc, char **argv, char **envp) {
-  (void)argc;
-  (void)argv;
   (void)envp;
+  if (argc > 2) {
+    fprintf(stderr, "Usage: %s [test_name]\n", argv[0]);
+    return 2;
+  }
+
+  size_t selected_index = NUM_TESTS;
+  if (argc == 2) {
+    for (size_t i = 0; i < NUM_TESTS; i++) {
+      if (strcmp(tests[i].name, argv[1]) == 0) {
+        selected_index = i;
+        break;
+      }
+    }
+    if (selected_index == NUM_TESTS) {
+      fprintf(stderr, "[FAIL] unknown test: %s\n", argv[1]);
+      return 2;
+    }
+  }
+
   printf("=== Test Runner ===\n");
 
   // Child search path for the dynamic loader: /lib (libc.so / ld-musl) plus
@@ -191,6 +220,9 @@ int main(int argc, char **argv, char **envp) {
   int skip_count = 0;
 
   for (size_t i = 0; i < NUM_TESTS; i++) {
+    if (argc == 2 && i != selected_index)
+      continue;
+
     const char *name = tests[i].name;
     const char *path = tests[i].path;
 
@@ -219,31 +251,37 @@ int main(int argc, char **argv, char **envp) {
       // SIGTSTP/SIGTTIN/SIGTTOU) and SIG_IGN persists across execve, so tests
       // would inherit them — breaking default-action checks (SIGQUIT core
       // dump, SIGTSTP stop). Hand every test a clean default disposition set.
-      for (int sig = 1; sig < NSIG; sig++)
-        signal(sig, SIG_DFL);
-
       // Disposition cleanup may temporarily block signals (notably SIGABRT in
       // musl's sigaction path). Do not let that implementation detail leak
       // through execve: signal masks persist across exec by POSIX definition.
-      sigset_t empty_mask;
-      sigemptyset(&empty_mask);
-      if (sigprocmask(SIG_SETMASK, &empty_mask, NULL) < 0)
+      if (reset_child_signal_state() < 0)
         _exit(126);
 
-      if (strcmp(name, "clang_smoke") == 0) {
+      if (strcmp(name, "clang_compile") == 0 ||
+          strcmp(name, "clang_link") == 0) {
         if (mkdir("/tmp", 0777) < 0 && errno != EEXIST) {
           fprintf(stderr, "[SETUP-FAIL] mkdir /tmp: errno=%d (%s)\n", errno,
                   strerror(errno));
           _exit(126);
         }
-        // Keep the fixed-name smoke test repeatable. Its short basename also
-        // keeps LLD's temporary output distinct on the current FAT backend.
-        if (unlink("/tmp/clang") < 0 && errno != ENOENT) {
-          fprintf(stderr, "[SETUP-FAIL] unlink /tmp/clang: errno=%d (%s)\n",
-                  errno, strerror(errno));
-          _exit(126);
+        if (strcmp(name, "clang_compile") == 0) {
+          if (unlink("/tmp/clang_smoke.o") < 0 && errno != ENOENT) {
+            fprintf(stderr,
+                    "[SETUP-FAIL] unlink /tmp/clang_smoke.o: errno=%d (%s)\n",
+                    errno, strerror(errno));
+            _exit(126);
+          }
+          execv(path, clang_smoke_compile_argv);
+        } else {
+          // The link input is shipped in the image, so clang_link is
+          // standalone.
+          if (unlink("/tmp/clang") < 0 && errno != ENOENT) {
+            fprintf(stderr, "[SETUP-FAIL] unlink /tmp/clang: errno=%d (%s)\n",
+                    errno, strerror(errno));
+            _exit(126);
+          }
+          execv(path, clang_smoke_link_argv);
         }
-        execv(path, clang_smoke_argv);
       } else {
         execve(path, NULL, child_env);
       }
@@ -265,13 +303,23 @@ int main(int argc, char **argv, char **envp) {
     int status;
     waitpid(pid, &status, 0);
 
-    if (status == 0 && strcmp(name, "clang_smoke") == 0) {
-      if (!clang_smoke_output_is_elf()) {
-        fprintf(stderr, "[FAIL] clang_smoke produced a non-ELF /tmp/clang\n");
+    if (status == 0 && strcmp(name, "clang_compile") == 0) {
+      if (!file_is_elf("/tmp/clang_smoke.o")) {
+        fprintf(stderr,
+                "[FAIL] clang_compile produced a non-ELF /tmp/clang_smoke.o\n");
+        status = 1;
+      }
+    }
+
+    if (status == 0 && strcmp(name, "clang_link") == 0) {
+      if (!file_is_elf("/tmp/clang")) {
+        fprintf(stderr, "[FAIL] clang_link produced a non-ELF /tmp/clang\n");
         status = 1;
       } else {
         pid_t output_pid = fork();
         if (output_pid == 0) {
+          if (reset_child_signal_state() < 0)
+            _exit(126);
           execve("/tmp/clang", clang_output_argv, child_env);
           _exit(127);
         }

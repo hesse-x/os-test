@@ -50,7 +50,11 @@ fi
 mkdir -p "$result_dir"
 if ! mcopy -i "$part_image" ::var/perf/perf.raw "$result_dir/perf.raw" 2>/dev/null; then
     echo "perf-extract: final perf.raw missing, trying recoverable .tmp" >&2
-    mcopy -i "$part_image" ::var/perf/perf.raw.tmp "$result_dir/perf.raw"
+    if ! mcopy -i "$part_image" ::var/perf/PERF.TMP \
+            "$result_dir/perf.raw" 2>/dev/null; then
+        # Compatibility with images created before temporary names became 8.3.
+        mcopy -i "$part_image" ::var/perf/perf.raw.tmp "$result_dir/perf.raw"
+    fi
 fi
 if ! mcopy -i "$part_image" ::var/perf/metadata.json \
         "$result_dir/metadata.json" 2>/dev/null; then

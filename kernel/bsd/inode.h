@@ -49,8 +49,16 @@ struct super_operations {
   void (*put_super)(struct super_block *sb);
 };
 
+struct address_space_read_stats {
+  uint32_t io_commands;
+  uint32_t io_sectors;
+  uint32_t fragment_splits;
+};
+
 struct address_space_operations {
   int (*readpage)(struct inode *inode, uint64_t page_index, void *page);
+  int (*readpages)(struct inode *inode, uint64_t first_page, void **pages,
+                   size_t nr_pages, struct address_space_read_stats *stats);
   int (*writepages)(struct inode *inode, struct cache_page **pages,
                     size_t nr_pages);
 };

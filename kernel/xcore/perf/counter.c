@@ -17,6 +17,7 @@
 #include "kernel/xcore/perf/event.h"
 #include "kernel/xcore/sched.h"
 #include "kernel/xcore/spinlock.h"
+#include "kernel/xcore/xtask.h"
 
 #define COUNTER_SNAPSHOT_MAX 6U
 #define COUNTER_VALUE_MAX 1024U
@@ -25,7 +26,7 @@
 #define COUNTER_FAT_MAX 17U
 #define COUNTER_READAHEAD_MAX 64U
 #define COUNTER_AHCI_MAX 467U
-#define COUNTER_SCHED_MAX 26U
+#define COUNTER_SCHED_MAX 30U
 #define COUNTER_EVENT_MAX 16U
 #define COUNTER_INTERNAL_MAX 3U
 
@@ -34,6 +35,8 @@ _Static_assert(COUNTER_BLOCK_MAX + COUNTER_FAT_MAX + COUNTER_READAHEAD_MAX +
                        COUNTER_EVENT_MAX + COUNTER_INTERNAL_MAX <=
                    COUNTER_VALUE_MAX,
                "counter snapshot design exceeds capacity");
+_Static_assert(COUNTER_SCHED_MAX >= SCHED_WAIT_EVENT_COUNT * 2U + 2U,
+               "scheduler counter reservation is too small");
 
 enum counter_id {
   C_EVENT_CPU_BASE = 128,
@@ -41,7 +44,20 @@ enum counter_id {
   C_WAKE_NOOP_BASE = 172,
   C_WAKE_CROSS_CPU_IPI = 184,
   C_WAKE_SPURIOUS_CANCELS = 185,
+  C_WAKE_EXTENDED_BASE = 186,
 };
+
+static uint16_t wake_counter_id(bool valid, unsigned event) {
+  if (event < WAIT_COMPLETION)
+    return (valid ? C_WAKE_VALID_BASE : C_WAKE_NOOP_BASE) + event;
+  return C_WAKE_EXTENDED_BASE +
+         (uint16_t)((event - WAIT_COMPLETION) * 2U + (valid ? 0U : 1U));
+}
+
+_Static_assert(C_WAKE_EXTENDED_BASE +
+                       (SCHED_WAIT_EVENT_COUNT - WAIT_COMPLETION) * 2U <=
+                   200U,
+               "extended wake counters overlap AHCI counters");
 
 struct counter_value {
   uint16_t id;
@@ -132,8 +148,8 @@ static void collect(struct counter_snapshot *snapshot, uint16_t mark_id) {
   struct sched_wake_stats wake;
   sched_get_wake_stats(&wake);
   for (unsigned event = 0; event < SCHED_WAIT_EVENT_COUNT; event++) {
-    add(snapshot, C_WAKE_VALID_BASE + event, wake.valid[event]);
-    add(snapshot, C_WAKE_NOOP_BASE + event, wake.noop[event]);
+    add(snapshot, wake_counter_id(true, event), wake.valid[event]);
+    add(snapshot, wake_counter_id(false, event), wake.noop[event]);
   }
   add(snapshot, C_WAKE_CROSS_CPU_IPI, wake.cross_cpu_ipi);
   add(snapshot, C_WAKE_SPURIOUS_CANCELS, wake.spurious_cancels);

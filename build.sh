@@ -11,6 +11,7 @@ CMAKE_EXTRA=""
 # Compiler: default clang, --gcc to switch. Both toolchains are supported.
 OS_COMPILER=clang
 RA_MAX_PAGES=16
+PERF_TEST_NAME=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -28,6 +29,22 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --perf)
+            PERF_TEST_NAME=""
+            CMAKE_EXTRA="$CMAKE_EXTRA -DPERF=1 -DTEST=1"
+            BUILD_PERF=1
+            BUILD_TEST=1
+            shift
+            ;;
+        --perf=*)
+            PERF_TEST_NAME="${1#--perf=}"
+            if [ -z "$PERF_TEST_NAME" ]; then
+                echo "ERROR: --perf= requires a test name" >&2
+                exit 1
+            fi
+            if [[ ! "$PERF_TEST_NAME" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]*$ ]]; then
+                echo "ERROR: invalid PERF test name: $PERF_TEST_NAME" >&2
+                exit 1
+            fi
             CMAKE_EXTRA="$CMAKE_EXTRA -DPERF=1 -DTEST=1"
             BUILD_PERF=1
             BUILD_TEST=1
@@ -57,7 +74,7 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         *)
-            echo "Usage: $0 [-d] [--test] [--sanitizer] [--perf] [--ra-pages off|4|8|16] [--gcc] [--clang]"
+            echo "Usage: $0 [-d] [--test] [--sanitizer] [--perf[=test_name]] [--ra-pages off|4|8|16] [--gcc] [--clang]"
             exit 1
             ;;
     esac
@@ -73,6 +90,8 @@ fi
 if ! echo "$CMAKE_EXTRA" | grep -q "PERF="; then
     CMAKE_EXTRA="$CMAKE_EXTRA -DPERF=0"
 fi
+# Always set the selector so a cached --perf=<name> does not affect --perf.
+CMAKE_EXTRA="$CMAKE_EXTRA -DPERF_TEST_NAME=$PERF_TEST_NAME"
 
 MESA_DRIVER=virgl
 

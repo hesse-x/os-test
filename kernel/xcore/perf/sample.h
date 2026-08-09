@@ -19,6 +19,7 @@ const uint8_t *perf_sample_data(unsigned bank);
 uint64_t perf_sample_lost(void);
 uint64_t perf_sample_hits(unsigned bank);
 uint64_t perf_sample_truncated(void);
+void perf_sample_reset(void);
 void perf_sample_stop(void);
 #else
 static inline void perf_record_callchain(unsigned cpu, const uint64_t *frames,

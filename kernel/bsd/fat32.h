@@ -75,6 +75,8 @@ uint32_t fat32_walk_chain_cached(struct inode *ip, uint64_t cluster_index,
                                  enum fat32_walk_source source);
 void fat32_get_stats(struct fat32_stats *out);
 void fat32_account_mapped_sector(enum fat32_walk_source source);
+void fat32_account_mapped_sectors(enum fat32_walk_source source,
+                                  uint32_t count);
 
 /* File operations */
 int fat32_read(struct inode *ip, uint64_t offset, void *buf, size_t count);

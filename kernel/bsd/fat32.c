@@ -48,6 +48,8 @@ static uint32_t total_data_clusters;
 static struct block_partition *fat32_part;
 static struct super_block fat32_sb;
 
+static int fat32_sync_fs(struct super_block *sb, bool wait);
+
 #define FAT_I(ip) ((struct fat32_inode_info *)(ip)->i_private)
 
 static void fat32_evict_inode(struct inode *ip) {
@@ -58,6 +60,7 @@ static void fat32_evict_inode(struct inode *ip) {
 }
 
 static const struct super_operations fat32_sops = {
+    .sync_fs = fat32_sync_fs,
     .evict_inode = fat32_evict_inode,
 };
 
@@ -68,11 +71,87 @@ static void fat32_invalidate_pages(struct inode *ip) {
 }
 static uint32_t spf32;
 static uint32_t next_free_hint = 2;
+static uint32_t fsinfo_sector;
+static uint32_t fsinfo_backup_sector;
+static uint32_t fsinfo_free_clusters = UINT32_MAX;
+static bool fsinfo_valid;
+static bool fsinfo_dirty;
 
 // Global FAT lock: protects FAT modifications (free cluster scan + FAT entry
 // writes). Long-term metadata serialization is independent of the AHCI queue.
 static mutex fat_lock;
 static mutex fat_cache_fill_lock;
+
+#define FAT32_FSINFO_LEAD_SIG 0x41615252U
+#define FAT32_FSINFO_STRUCT_SIG 0x61417272U
+#define FAT32_FSINFO_TRAIL_SIG 0xAA550000U
+
+static uint32_t fat32_load_u32(const uint8_t *p) {
+  return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) |
+         ((uint32_t)p[3] << 24);
+}
+
+static void fat32_store_u32(uint8_t *p, uint32_t value) {
+  p[0] = (uint8_t)value;
+  p[1] = (uint8_t)(value >> 8);
+  p[2] = (uint8_t)(value >> 16);
+  p[3] = (uint8_t)(value >> 24);
+}
+
+static bool fat32_fsinfo_signatures_valid(const uint8_t sector[512]) {
+  return fat32_load_u32(sector) == FAT32_FSINFO_LEAD_SIG &&
+         fat32_load_u32(sector + 484) == FAT32_FSINFO_STRUCT_SIG &&
+         fat32_load_u32(sector + 508) == FAT32_FSINFO_TRAIL_SIG;
+}
+
+static void fat32_account_fat_transition(uint32_t old_value,
+                                         uint32_t new_value) {
+  if (!fsinfo_valid || fsinfo_free_clusters == UINT32_MAX)
+    return;
+  bool was_free = (old_value & 0x0FFFFFFF) == 0;
+  bool is_free = (new_value & 0x0FFFFFFF) == 0;
+  if (was_free == is_free)
+    return;
+  if (is_free) {
+    if (fsinfo_free_clusters < total_data_clusters)
+      fsinfo_free_clusters++;
+  } else if (fsinfo_free_clusters > 0) {
+    fsinfo_free_clusters--;
+  }
+  fsinfo_dirty = true;
+}
+
+// Caller holds fat_lock, which serializes the cached count with FAT updates.
+static int fat32_sync_fsinfo_locked(void) {
+  if (!fsinfo_valid || !fsinfo_dirty)
+    return 0;
+  uint8_t sector[512];
+  if (partition_read(fat32_part, fsinfo_sector, 1, sector) != 0)
+    return -EIO;
+  if (!fat32_fsinfo_signatures_valid(sector)) {
+    printk(LOG_WARN, "fat32: FSInfo signatures changed; refusing update\n");
+    fsinfo_valid = false;
+    return -EIO;
+  }
+  fat32_store_u32(sector + 488, fsinfo_free_clusters);
+  fat32_store_u32(sector + 492, next_free_hint);
+  if (partition_write(fat32_part, fsinfo_sector, 1, sector) != 0)
+    return -EIO;
+  if (fsinfo_backup_sector != UINT32_MAX &&
+      partition_write(fat32_part, fsinfo_backup_sector, 1, sector) != 0)
+    return -EIO;
+  fsinfo_dirty = false;
+  return 0;
+}
+
+static int fat32_sync_fs(struct super_block *sb, bool wait) {
+  (void)sb;
+  (void)wait;
+  mutex_lock(&fat_lock);
+  int rc = fat32_sync_fsinfo_locked();
+  mutex_unlock(&fat_lock);
+  return rc;
+}
 
 // ==================== FAT sector cache ====================
 // A cache miss fetches a whole aligned group. FAT chain walks are sequential,
@@ -238,6 +317,7 @@ static int fat32_write_fat_entry(uint32_t cluster, uint32_t value) {
   // Write FAT1.
   if (partition_write(fat32_part, fat_sector, 1, sector_buf) != 0)
     return -EIO;
+  fat32_account_fat_transition(old, nv);
   // Write FAT2.
   if (partition_write(fat32_part, fat_sector + spf32, 1, sector_buf) != 0)
     return -EIO;
@@ -353,9 +433,15 @@ void fat32_get_stats(struct fat32_stats *out) {
 }
 
 void fat32_account_mapped_sector(enum fat32_walk_source source) {
+  fat32_account_mapped_sectors(source, 1);
+}
+
+void fat32_account_mapped_sectors(enum fat32_walk_source source,
+                                  uint32_t count) {
   if (source != FAT32_WALK_DEMAND && source != FAT32_WALK_READAHEAD)
     source = FAT32_WALK_DEMAND;
-  __atomic_fetch_add(&fat_stats.mapped_sectors[source], 1, __ATOMIC_RELAXED);
+  __atomic_fetch_add(&fat_stats.mapped_sectors[source], count,
+                     __ATOMIC_RELAXED);
 }
 
 // ==================== Cluster allocation ====================
@@ -427,6 +513,8 @@ static int fat32_allocate_run(uint32_t wanted, uint32_t *first, uint32_t *last,
         uint32_t lba = fat_start_lba + abs_sector;
         if (partition_write(fat32_part, lba, 1, sec) != 0)
           return -EIO;
+        for (uint32_t j = 0; j < run; j++)
+          fat32_account_fat_transition(0, 0x0FFFFFFF);
         __atomic_fetch_add(&fat1_writes, 1, __ATOMIC_RELAXED);
         if (partition_write(fat32_part, lba + spf32, 1, sec) != 0)
           return -EIO;
@@ -441,6 +529,7 @@ static int fat32_allocate_run(uint32_t wanted, uint32_t *first, uint32_t *last,
         next_free_hint = c + run;
         if (next_free_hint >= total_data_clusters + 2)
           next_free_hint = 2;
+        fsinfo_dirty = fsinfo_valid;
         return 0;
       }
     }
@@ -517,9 +606,12 @@ static void fat32_free_chain(uint32_t start_cluster) {
   uint64_t remaining = cluster_limit - 2;
   while (c >= 2 && c < 0x0FFFFFF8 && remaining-- > 0) {
     uint32_t next = fat32_read_entry(c);
-    fat32_write_fat_entry(c, 0);
-    if (c < next_free_hint)
+    if (fat32_write_fat_entry(c, 0) != 0)
+      break;
+    if (c < next_free_hint) {
       next_free_hint = c;
+      fsinfo_dirty = fsinfo_valid;
+    }
     if (next >= 0x0FFFFFF8)
       break;
     c = next;
@@ -594,6 +686,13 @@ static void format_83_name(const char *user, int user_len, uint8_t out[11]) {
   for (int i = 0; i < 11; i++)
     out[i] = ' ';
   int i = 0, j = 0;
+  // A leading dot is only legal for the special entries above. Map names such
+  // as ".cache" to a stable, legal short alias that lookup canonicalizes too.
+  if (user[0] == '.') {
+    out[j++] = '_';
+    while (i < user_len && user[i] == '.')
+      i++;
+  }
   while (i < user_len && user[i] != '.' && j < 8) {
     char c = user[i];
     if (c >= 'a' && c <= 'z')
@@ -786,7 +885,7 @@ static ssize_t fat32_fop_write(struct xtask *proc, struct file *file,
 static int fat32_fop_fsync(struct file *file, bool datasync) {
   (void)file;
   (void)datasync;
-  return 0;
+  return fat32_sync_fs(&fat32_sb, true);
 }
 
 const struct file_operations fat32_file_fops = {
@@ -843,6 +942,112 @@ static int fat32_readpage(struct inode *ip, uint64_t page_index, void *page) {
   return 0;
 }
 
+static int fat32_readpages(struct inode *ip, uint64_t first_page, void **pages,
+                           size_t nr_pages,
+                           struct address_space_read_stats *stats) {
+  if (!ip || !pages || !nr_pages || nr_pages > PAGE_CACHE_RA_MAX_PAGES ||
+      first_page > UINT64_MAX / PAGE_SIZE)
+    return -EINVAL;
+  for (size_t i = 0; i < nr_pages; i++)
+    if (!pages[i])
+      return -EINVAL;
+
+  size_t staging_size = nr_pages * PAGE_SIZE;
+  uint8_t *staging = kmalloc(staging_size);
+  if (!staging)
+    return -ENOMEM;
+  __memset(staging, 0, staging_size);
+  if (stats)
+    __memset(stats, 0, sizeof(*stats));
+
+  uint64_t byte_offset = first_page * PAGE_SIZE;
+  uint64_t available = byte_offset < ip->size ? ip->size - byte_offset : 0;
+  if (available > staging_size)
+    available = staging_size;
+  uint32_t total_sectors = (uint32_t)((available + 511) / 512);
+  uint32_t logical_sector = 0;
+  uint32_t run_logical = 0;
+  uint32_t run_count = 0;
+  uint64_t run_disk = 0;
+  int rc = 0;
+
+  while (logical_sector < total_sectors) {
+    uint64_t file_sector = byte_offset / 512 + logical_sector;
+    if (!sectors_per_cluster) {
+      rc = -EIO;
+      break;
+    }
+    uint64_t cluster_index = file_sector / sectors_per_cluster;
+    if (cluster_index > UINT32_MAX) {
+      rc = -EFBIG;
+      break;
+    }
+    enum fat32_walk_source source = logical_sector < PAGE_SIZE / 512
+                                        ? FAT32_WALK_DEMAND
+                                        : FAT32_WALK_READAHEAD;
+    uint32_t cluster =
+        fat32_walk_chain_cached(ip, (uint32_t)cluster_index, source);
+    if (cluster < 2 || cluster >= 0x0FFFFFF8) {
+      rc = -EIO;
+      break;
+    }
+    uint32_t in_cluster = (uint32_t)(file_sector % sectors_per_cluster);
+    uint32_t extent = sectors_per_cluster - in_cluster;
+    if (extent > total_sectors - logical_sector)
+      extent = total_sectors - logical_sector;
+    uint64_t disk_sector = (uint64_t)data_start_lba +
+                           (uint64_t)(cluster - 2) * sectors_per_cluster +
+                           in_cluster;
+    if (disk_sector >= fat32_part->sector_count ||
+        extent > fat32_part->sector_count - disk_sector) {
+      rc = -EIO;
+      break;
+    }
+
+    if (run_count && disk_sector != run_disk + run_count) {
+      rc = partition_read(fat32_part, run_disk, run_count,
+                          staging + (size_t)run_logical * 512);
+      if (stats) {
+        stats->io_commands++;
+        stats->io_sectors += run_count;
+        stats->fragment_splits++;
+      }
+      if (rc)
+        break;
+      run_count = 0;
+    }
+    if (!run_count) {
+      run_disk = disk_sector;
+      run_logical = logical_sector;
+    }
+    run_count += extent;
+    uint32_t demand_sectors = 0;
+    if (logical_sector < PAGE_SIZE / 512) {
+      demand_sectors = PAGE_SIZE / 512 - logical_sector;
+      if (demand_sectors > extent)
+        demand_sectors = extent;
+      fat32_account_mapped_sectors(FAT32_WALK_DEMAND, demand_sectors);
+    }
+    if (extent > demand_sectors)
+      fat32_account_mapped_sectors(FAT32_WALK_READAHEAD,
+                                   extent - demand_sectors);
+    logical_sector += extent;
+  }
+  if (!rc && run_count) {
+    rc = partition_read(fat32_part, run_disk, run_count,
+                        staging + (size_t)run_logical * 512);
+    if (stats) {
+      stats->io_commands++;
+      stats->io_sectors += run_count;
+    }
+  }
+  if (!rc)
+    for (size_t i = 0; i < nr_pages; i++)
+      __memcpy(pages[i], staging + i * PAGE_SIZE, PAGE_SIZE);
+  kfree(staging);
+  return rc;
+}
+
 static int fat32_writepages(struct inode *ip, struct cache_page **pages,
                             size_t nr_pages) {
   if (!ip || !pages || !nr_pages)
@@ -892,6 +1097,7 @@ static int fat32_writepages(struct inode *ip, struct cache_page **pages,
 
 static const struct address_space_operations fat32_aops = {
     .readpage = fat32_readpage,
+    .readpages = fat32_readpages,
     .writepages = fat32_writepages,
 };
 
@@ -1134,8 +1340,11 @@ static int fat32_dir_mkdir(struct inode *dir, const char *name, int mode) {
   for (int i = 2; i < 11; i++)
     dd->name[i] = ' ';
   dd->attr = 0x10;
-  dd->fst_clus_hi = (FAT_I(dir)->start_cluster >> 16) & 0xFFFF;
-  dd->fst_clus_lo = FAT_I(dir)->start_cluster & 0xFFFF;
+  uint32_t parent_cluster = FAT_I(dir)->start_cluster;
+  if (parent_cluster == root_cluster)
+    parent_cluster = 0;
+  dd->fst_clus_hi = (parent_cluster >> 16) & 0xFFFF;
+  dd->fst_clus_lo = parent_cluster & 0xFFFF;
   uint32_t lba = data_start_lba + (new_cluster - 2) * sectors_per_cluster;
   partition_write(fat32_part, lba, sectors_per_cluster, db);
   kfree(db);
@@ -1614,7 +1823,8 @@ static const struct inode_operations fat32_file_iop = {
 // Root ino = root_cluster. Goes through fat32_iget to install fat32_dir_iop —
 // fixes the boot deadlock caused by the R1 stub missing i_op.
 static struct inode *fat32_mount_root(struct mount_entry *m) {
-  (void)m;
+  m->sb.s_op = &fat32_sops;
+  m->sb.part = fat32_part;
   return fat32_iget(root_cluster, INODE_DIR, 0, root_cluster, root_cluster, -1);
 }
 
@@ -2043,6 +2253,8 @@ int fat32_init(struct block_partition *part) {
   uint16_t bps = (uint16_t)bpb[11] | ((uint16_t)bpb[12] << 8);
   sectors_per_cluster = bpb[13];
   uint16_t reserved = (uint16_t)bpb[14] | ((uint16_t)bpb[15] << 8);
+  uint16_t bpb_fsinfo = (uint16_t)bpb[48] | ((uint16_t)bpb[49] << 8);
+  uint16_t backup_boot = (uint16_t)bpb[50] | ((uint16_t)bpb[51] << 8);
   spf32 = (uint32_t)bpb[36] | ((uint32_t)bpb[37] << 8) |
           ((uint32_t)bpb[38] << 16) | ((uint32_t)bpb[39] << 24);
   root_cluster = (uint32_t)bpb[44] | ((uint32_t)bpb[45] << 8) |
@@ -2069,6 +2281,33 @@ int fat32_init(struct block_partition *part) {
     total_data_clusters = 0;
   }
 
+  fsinfo_valid = false;
+  fsinfo_dirty = false;
+  fsinfo_free_clusters = UINT32_MAX;
+  fsinfo_sector = bpb_fsinfo;
+  fsinfo_backup_sector = UINT32_MAX;
+  next_free_hint = 2;
+  if (bpb_fsinfo != 0 && bpb_fsinfo != 0xFFFF && bpb_fsinfo < reserved) {
+    uint8_t fsinfo[512];
+    if (partition_read(part, fsinfo_sector, 1, fsinfo) == 0 &&
+        fat32_fsinfo_signatures_valid(fsinfo)) {
+      uint32_t free_clusters = fat32_load_u32(fsinfo + 488);
+      uint32_t next = fat32_load_u32(fsinfo + 492);
+      if (free_clusters == UINT32_MAX || free_clusters <= total_data_clusters) {
+        fsinfo_free_clusters = free_clusters;
+        fsinfo_valid = true;
+      }
+      if (next >= 2 && next < total_data_clusters + 2)
+        next_free_hint = next;
+      if (backup_boot != 0 && backup_boot != 0xFFFF &&
+          (uint32_t)backup_boot + bpb_fsinfo < reserved &&
+          (uint32_t)backup_boot + bpb_fsinfo != fsinfo_sector)
+        fsinfo_backup_sector = (uint32_t)backup_boot + bpb_fsinfo;
+    }
+  }
+  if (!fsinfo_valid)
+    printk(LOG_WARN, "fat32: valid FSInfo free-cluster summary unavailable\n");
+
   // Keep the beginning of the FAT resident. Warming the whole table only
   // evicts its useful prefix when the table is larger than the cache.
   uint32_t prewarm_sectors = spf32 < FAT_CACHE_PAGES ? spf32 : FAT_CACHE_PAGES;
@@ -2076,11 +2315,12 @@ int fat32_init(struct block_partition *part) {
     fat_cache_read(fat_start_lba + s);
   }
 
-  printk(
-      LOG_INFO,
-      "fat32_init: part=%u fat=%u data=%u root=%u spc=%u bpc=%u total_cl=%u\n",
-      part_start_lba, fat_start_lba, data_start_lba, root_cluster,
-      sectors_per_cluster, bytes_per_cluster, total_data_clusters);
+  printk(LOG_INFO,
+         "fat32_init: part=%u fat=%u data=%u root=%u spc=%u bpc=%u total_cl=%u "
+         "free=%u next=%u\n",
+         part_start_lba, fat_start_lba, data_start_lba, root_cluster,
+         sectors_per_cluster, bytes_per_cluster, total_data_clusters,
+         fsinfo_free_clusters, next_free_hint);
   return 0;
 }
 
@@ -2367,8 +2607,11 @@ int fat32_mkdir(const char *path) {
   for (int i = 2; i < 11; i++)
     dotdot->name[i] = ' ';
   dotdot->attr = 0x10;
-  dotdot->fst_clus_hi = (parent_cluster >> 16) & 0xFFFF;
-  dotdot->fst_clus_lo = parent_cluster & 0xFFFF;
+  uint32_t dotdot_cluster = parent_cluster;
+  if (dotdot_cluster == root_cluster)
+    dotdot_cluster = 0;
+  dotdot->fst_clus_hi = (dotdot_cluster >> 16) & 0xFFFF;
+  dotdot->fst_clus_lo = dotdot_cluster & 0xFFFF;
 
   // Write new directory cluster to disk.
   uint32_t lba = data_start_lba + (new_cluster - 2) * sectors_per_cluster;

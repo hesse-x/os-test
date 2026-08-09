@@ -19,13 +19,32 @@
 #include <xos/perf.h>
 #include <xos/syscall_nums.h>
 
+#include "perf_config.h"
+
 #define EXPORT_CHUNK (XOS_PERF_MAX_READ)
 #define CHECKPOINT_INTERVAL_SECONDS 60U
+#define PERF_RAW_FINAL "/var/perf/PERF.RAW"
+#define PERF_RAW_TEMP "/var/perf/PERF.TMP"
+#define PERF_METADATA_FINAL "/var/perf/METADATA.JSO"
+#define PERF_METADATA_TEMP "/var/perf/META.TMP"
 
 static uint8_t export_buffer[EXPORT_CHUNK];
 
 static long perf_call(long cmd, long arg1, long arg2, long arg3) {
-  return syscall(SYS_PERF, cmd, arg1, arg2, arg3, 0, 0);
+  register long r10 __asm__("r10") = arg3;
+  register long r8 __asm__("r8") = 0;
+  register long r9 __asm__("r9") = 0;
+  long result;
+  __asm__ volatile("syscall"
+                   : "=a"(result)
+                   : "a"((long)SYS_PERF), "D"(cmd), "S"(arg1), "d"(arg2),
+                     "r"(r10), "r"(r8), "r"(r9)
+                   : "rcx", "r11", "memory");
+  if ((unsigned long)result > (unsigned long)-4096) {
+    errno = (int)-result;
+    return -1;
+  }
+  return result;
 }
 
 static int write_all(int fd, const void *buffer, size_t length) {
@@ -48,9 +67,12 @@ static int write_all(int fd, const void *buffer, size_t length) {
 }
 
 static int export_raw(const struct xos_perf_info *info, int final) {
-  int fd = open("/var/perf/perf.raw.tmp", O_WRONLY | O_CREAT | O_TRUNC, 0644);
-  if (fd < 0)
+  const char *path = final ? PERF_RAW_FINAL : PERF_RAW_TEMP;
+  int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+  if (fd < 0) {
+    perror("perf: open raw snapshot");
     return -1;
+  }
 
   uint64_t offset = 0;
   while (offset < info->raw_size) {
@@ -59,16 +81,30 @@ static int export_raw(const struct xos_perf_info *info, int final) {
       request = (size_t)(info->raw_size - offset);
     long got = perf_call(XOS_PERF_READ, (long)export_buffer, (long)request,
                          (long)offset);
-    if (got <= 0 || (size_t)got > request ||
-        write_all(fd, export_buffer, (size_t)got) < 0) {
+    if (got <= 0 || (size_t)got > request) {
+      if (got > 0)
+        errno = EOVERFLOW;
+      perror("perf: read raw snapshot");
+      close(fd);
+      return -1;
+    }
+    if (write_all(fd, export_buffer, (size_t)got) < 0) {
+      perror("perf: write raw snapshot");
       close(fd);
       return -1;
     }
     offset += (uint64_t)got;
   }
-  if (fsync(fd) < 0 || close(fd) < 0)
+  if (fsync(fd) < 0) {
+    perror("perf: fsync raw snapshot");
+    close(fd);
     return -1;
-  return final ? rename("/var/perf/perf.raw.tmp", "/var/perf/perf.raw") : 0;
+  }
+  if (close(fd) < 0) {
+    perror("perf: close raw snapshot");
+    return -1;
+  }
+  return 0;
 }
 
 static int export_metadata(const struct xos_perf_info *info,
@@ -99,23 +135,47 @@ static int export_metadata(const struct xos_perf_info *info,
     return -1;
   }
 
-  const char *temporary =
-      final ? "/var/perf/metadata.json.tmp" : "/var/perf/meta.tmp";
-  int fd = open(temporary, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-  if (fd < 0)
+  const char *path = final ? PERF_METADATA_FINAL : PERF_METADATA_TEMP;
+  int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+  if (fd < 0) {
+    perror("perf: open metadata snapshot");
     return -1;
-  if (write_all(fd, json, (size_t)length) < 0 || fsync(fd) < 0 || close(fd) < 0)
+  }
+  if (write_all(fd, json, (size_t)length) < 0) {
+    perror("perf: write metadata snapshot");
+    close(fd);
     return -1;
-  return final ? rename(temporary, "/var/perf/metadata.json") : 0;
+  }
+  if (fsync(fd) < 0) {
+    perror("perf: fsync metadata snapshot");
+    close(fd);
+    return -1;
+  }
+  if (close(fd) < 0) {
+    perror("perf: close metadata snapshot");
+    return -1;
+  }
+  return 0;
 }
 
 static int persist_snapshot(int runner_status, int final) {
   struct xos_perf_info info;
   struct xos_perf_metadata metadata;
-  if (perf_call(XOS_PERF_GET_INFO, (long)&info, sizeof(info), 0) < 0 ||
-      perf_call(XOS_PERF_GET_METADATA, (long)&metadata, sizeof(metadata), 0) <
-          0 ||
-      info.raw_size == 0 || export_raw(&info, final) < 0 ||
+  if (perf_call(XOS_PERF_GET_INFO, (long)&info, sizeof(info), 0) < 0) {
+    perror("perf: snapshot GET_INFO");
+    return -1;
+  }
+  if (perf_call(XOS_PERF_GET_METADATA, (long)&metadata, sizeof(metadata), 0) <
+      0) {
+    perror("perf: snapshot GET_METADATA");
+    return -1;
+  }
+  if (info.raw_size == 0) {
+    errno = ENODATA;
+    perror("perf: empty snapshot");
+    return -1;
+  }
+  if (export_raw(&info, final) < 0 ||
       export_metadata(&info, &metadata, runner_status, final) < 0)
     return -1;
   sync();
@@ -128,6 +188,7 @@ static int persist_snapshot(int runner_status, int final) {
 
 int main(int argc, char **argv) {
   const char *target = argc > 1 ? argv[1] : "/test/test_runner.elf";
+  const char *test_name = PERF_TEST_NAME;
   struct xos_perf_info info;
   if (perf_call(XOS_PERF_GET_INFO, (long)&info, sizeof(info), 0) < 0) {
     perror("perf: GET_INFO");
@@ -139,25 +200,61 @@ int main(int argc, char **argv) {
     return 1;
   }
 
+  // Export the boot snapshot before starting the target so profiling I/O does
+  // not compete with the workload for the same FAT-backed block device.
+  if (perf_call(XOS_PERF_CHECKPOINT, 0, 0, 0) < 0) {
+    perror("perf: initial checkpoint");
+    return 1;
+  }
+  if (persist_snapshot(-1, 0) < 0) {
+    perror("perf: initial snapshot");
+    return 1;
+  }
+
+  int start_pipe[2];
+  if (pipe(start_pipe) < 0) {
+    perror("perf: start pipe");
+    return 1;
+  }
+
   pid_t runner = fork();
   if (runner == 0) {
+    close(start_pipe[1]);
+    uint8_t start_token;
+    ssize_t got;
+    do {
+      got = read(start_pipe[0], &start_token, sizeof(start_token));
+    } while (got < 0 && errno == EINTR);
+    close(start_pipe[0]);
+    if (got != (ssize_t)sizeof(start_token))
+      _exit(126);
+
     char *env[] = {"XOS_SKIP_AUTOTEST=1", NULL};
-    char *target_argv[] = {(char *)target, NULL};
+    char *target_argv[] = {(char *)target,
+                           test_name[0] ? (char *)test_name : NULL, NULL};
     execve(target, target_argv, env);
     _exit(127);
   }
   if (runner < 0) {
+    close(start_pipe[0]);
+    close(start_pipe[1]);
     perror("perf: fork runner");
     return 1;
   }
+  close(start_pipe[0]);
   if (perf_call(XOS_PERF_REGISTER_TARGET, runner, 0, 0) < 0) {
+    close(start_pipe[1]);
+    kill(runner, SIGKILL);
+    waitpid(runner, NULL, 0);
     perror("perf: REGISTER_TARGET");
     return 1;
   }
-
-  if (perf_call(XOS_PERF_CHECKPOINT, 0, 0, 0) == 0 &&
-      persist_snapshot(-1, 0) < 0) {
-    perror("perf: initial checkpoint");
+  uint8_t start_token = 1;
+  if (write_all(start_pipe[1], &start_token, sizeof(start_token)) < 0 ||
+      close(start_pipe[1]) < 0) {
+    kill(runner, SIGKILL);
+    waitpid(runner, NULL, 0);
+    perror("perf: start runner");
     return 1;
   }
 

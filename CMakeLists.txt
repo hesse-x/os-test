@@ -11,6 +11,14 @@ set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
 
 project(myos C CXX ASM)
 
+set(PERF_TEST_NAME "" CACHE STRING "Run only this test_runner test under PERF")
+if(PERF_TEST_NAME AND NOT PERF)
+    message(FATAL_ERROR "PERF_TEST_NAME requires PERF=1")
+endif()
+if(PERF_TEST_NAME AND NOT PERF_TEST_NAME MATCHES "^[A-Za-z0-9_][A-Za-z0-9_.-]*$")
+    message(FATAL_ERROR "PERF_TEST_NAME contains unsupported characters")
+endif()
+
 set(XOS_RA_MAX_PAGES "16" CACHE STRING "Maximum page-cache readahead window (0, 4, 8, or 16)")
 set_property(CACHE XOS_RA_MAX_PAGES PROPERTY STRINGS 0 4 8 16)
 if(NOT XOS_RA_MAX_PAGES MATCHES "^(0|4|8|16)$")

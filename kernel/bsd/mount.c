@@ -91,6 +91,37 @@ int mount_internal(struct fstype *fs, const char *target, void *fs_data,
   return 0;
 }
 
+int mount_sync_all(void) {
+  struct super_block *sync_list[MAX_MOUNTS];
+  int sync_count = 0;
+
+  spin_lock(&mount_lock);
+  for (int i = 0; i < MAX_MOUNTS; i++) {
+    if (!mount_table[i].in_use)
+      continue;
+    struct super_block *sb = &mount_table[i].sb;
+    if (!sb->s_op && mount_table[i].root)
+      sb = mount_table[i].root->i_sb;
+    if (!sb || !sb->s_op || !sb->s_op->sync_fs)
+      continue;
+    bool seen = false;
+    for (int j = 0; j < sync_count; j++)
+      if (sync_list[j] == sb)
+        seen = true;
+    if (!seen)
+      sync_list[sync_count++] = sb;
+  }
+  spin_unlock(&mount_lock);
+
+  int rc = 0;
+  for (int i = 0; i < sync_count; i++) {
+    int sync_rc = sync_list[i]->s_op->sync_fs(sync_list[i], true);
+    if (!rc && sync_rc)
+      rc = sync_rc;
+  }
+  return rc;
+}
+
 struct mount_entry *vfs_resolve(const char *path, char *relpath,
                                 size_t relcap) {
   spin_lock(&mount_lock);

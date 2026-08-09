@@ -97,6 +97,7 @@ struct mount_entry *vfs_resolve_user(const char __user *upath, char *relpath,
 struct mount_entry *mount_of_inode(struct inode *ip);
 int mount_internal(struct fstype *fs, const char *target, void *fs_data,
                    uint32_t flags);
+int mount_sync_all(void);
 bool dir_emit(struct dir_context *ctx, const char *name, int namlen,
               uint64_t offset, uint64_t ino, unsigned int d_type);
 int normalize_path(const char *in, char *out, size_t outcap);

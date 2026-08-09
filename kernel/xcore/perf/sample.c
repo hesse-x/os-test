@@ -13,6 +13,7 @@
 #include <xos/perf.h>
 
 #include "arch/x64/smp.h"
+#include "arch/x64/utils.h"
 
 #define PERF_CHAINS_PER_CPU 256U
 #define PERF_CHAIN_RECORDS_MAX                                                 \
@@ -163,6 +164,18 @@ uint64_t perf_sample_hits(unsigned bank) {
 
 uint64_t perf_sample_truncated(void) {
   return __atomic_load_n(&sample_truncated_count, __ATOMIC_RELAXED);
+}
+
+void perf_sample_reset(void) {
+  __atomic_store_n(&sample_accepting, false, __ATOMIC_RELEASE);
+  for (unsigned cpu = 0; cpu < MAX_CPUS; cpu++)
+    while (__atomic_load_n(&sample_active_writers[cpu], __ATOMIC_ACQUIRE))
+      __asm__ volatile("pause");
+
+  __memset(chain_slots, 0, sizeof(chain_slots));
+  sample_lost_count = 0;
+  sample_truncated_count = 0;
+  __atomic_store_n(&sample_accepting, true, __ATOMIC_RELEASE);
 }
 
 void perf_sample_stop(void) {

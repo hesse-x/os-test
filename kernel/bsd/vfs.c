@@ -1205,6 +1205,8 @@ int64_t sys_sync(int64_t unused1, int64_t unused2, int64_t unused3,
   (void)unused5;
   (void)unused6;
   int rc = page_cache_flush_all();
+  if (!rc)
+    rc = mount_sync_all();
   int flush_rc = block_flush(block_primary_device());
   return (int64_t)(rc ? rc : flush_rc);
 }

@@ -44,6 +44,7 @@
 #include "kernel/xcore/mem/slab.h"
 #include "kernel/xcore/mem/vma.h"
 #include "kernel/xcore/mm_types.h"
+#include "kernel/xcore/perf/event.h"
 #include "kernel/xcore/rcu.h"
 #include "kernel/xcore/sched.h"
 #include "kernel/xcore/sparse.h"
@@ -60,6 +61,7 @@
 #include <xos/errno.h>
 #include <xos/mman.h>
 #include <xos/page.h>
+#include <xos/perf.h>
 #include <xos/signal.h>
 #include <xos/socket.h>
 #include <xos/thread.h>
@@ -76,6 +78,33 @@ typedef struct file_io_close_req {
 
 // Forward declaration: defined in kernel/xcore/mem/copy_user.c
 long strncpy_from_user(char *dst, const char __user *src, long maxlen);
+
+#ifdef PERF
+static const char *exec_basename(const char *path) {
+  const char *base = path;
+  for (const char *cursor = path; cursor && *cursor; cursor++) {
+    if (*cursor == '/')
+      base = cursor + 1;
+  }
+  return base;
+}
+
+static uint8_t perf_exec_kind(const char *pathname, int argc,
+                              char (*argv)[256]) {
+  const char *name = exec_basename(pathname);
+  if (__strcmp(pathname, "/usr/bin/clang") == 0 ||
+      __strcmp(pathname, "/usr/bin/clang++") == 0) {
+    for (int i = 1; i < argc; i++) {
+      if (__strcmp(argv[i], "-cc1") == 0)
+        return XOS_PERF_EXEC_CLANG_CC1;
+    }
+    return XOS_PERF_EXEC_CLANG_DRIVER;
+  }
+  if (__strcmp(name, "ld.lld") == 0 || __strcmp(name, "lld") == 0)
+    return XOS_PERF_EXEC_LD_LLD;
+  return 0;
+}
+#endif
 
 // ===================== proc lifecycle =====================
 
@@ -1977,6 +2006,9 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
     procfs_pinfo_set(proc->pid, argv_strings[0], (char *const *)pinfo_argv,
                      NULL);
   }
+#ifdef PERF
+  perf_trace_exec(proc->pid, perf_exec_kind(pathname, argc, argv_strings));
+#endif
 #undef ARG_MAX
 
   kfree(argv_strings);

@@ -22,6 +22,13 @@ while IFS=$'\t' read -r artifact image_path partition; do
         continue
     fi
 
+    # Link benchmark inputs are shipped in the image but never execute as a
+    # process, so they have no runtime addresses to symbolize and need no ID.
+    elf_type="$(LC_ALL=C readelf -h "$source_file" | awk '/^[[:space:]]*Type:/ {print $2; exit}')"
+    if [ "$elf_type" = "REL" ]; then
+        continue
+    fi
+
     build_id="$(LC_ALL=C readelf -n "$source_file" | awk '/Build ID:/ {print $3; exit}')"
     if [ -z "$build_id" ]; then
         echo "perf-symbols: ELF lacks build ID: $artifact" >&2

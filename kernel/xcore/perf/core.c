@@ -164,8 +164,11 @@ static void capture_snapshot(uint32_t reason, bool complete) {
 }
 
 void perf_register_target(xtask *task) {
-  if (__atomic_load_n(&perf_state, __ATOMIC_ACQUIRE) == XOS_PERF_RUNNING)
+  if (__atomic_load_n(&perf_state, __ATOMIC_ACQUIRE) == XOS_PERF_RUNNING) {
+    perf_event_reset();
+    perf_sample_reset();
     perf_target = task;
+  }
 }
 
 int perf_freeze(uint32_t reason, bool complete) {

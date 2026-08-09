@@ -356,11 +356,32 @@ int page_cache_get_ra(struct inode *ip, uint64_t page_index,
   if (!allocated)
     return page_cache_get_ra(ip, page_index, 1, source, out);
 
+  void *page_data[RA_MAX_PAGES];
+  for (uint32_t i = 0; i < allocated; i++)
+    page_data[i] = pages[i]->data;
+  struct address_space_read_stats io_stats = {0};
+  bool batch = ip->i_aop->readpages != NULL;
+  int batch_rc = 0;
+  if (batch) {
+    batch_rc =
+        ip->i_aop->readpages(ip, page_index, page_data, allocated, &io_stats);
+    if (batch_rc == -ENOMEM || batch_rc == -EOPNOTSUPP) {
+      batch = false;
+      cache_stats.staging_fallbacks[source]++;
+      cache_stats.readahead_fallbacks++;
+    }
+  }
+  cache_stats.batch_io_commands[source] += io_stats.io_commands;
+  cache_stats.batch_io_sectors[source] += io_stats.io_sectors;
+  cache_stats.fragment_truncations[source] += io_stats.fragment_splits;
+  cache_stats.readahead_fragment_truncations += io_stats.fragment_splits;
+
   uint32_t admitted = 0;
   int demand_error = 0;
   for (uint32_t i = 0; i < allocated; i++) {
-    __memset(pages[i]->data, 0, PAGE_SIZE);
-    int rc = ip->i_aop->readpage(ip, pages[i]->page_index, pages[i]->data);
+    int rc =
+        batch ? batch_rc
+              : ip->i_aop->readpage(ip, pages[i]->page_index, pages[i]->data);
     spin_lock(&page_cache_lock);
     pages[i]->flags &= ~CACHE_PAGE_FILLING;
     if (rc) {
@@ -399,7 +420,6 @@ int page_cache_get_ra(struct inode *ip, uint64_t page_index,
   if (admitted > 1) {
     cache_stats.readahead_batches++;
     cache_stats.readahead_pages += admitted - 1;
-    cache_stats.batch_io_commands[source] += admitted;
   }
   *out = pages[0];
   return 0;
