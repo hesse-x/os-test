@@ -49,6 +49,8 @@ COUNTER_NAMES = {
     43: "fat.readahead_calls", 44: "fat.readahead_steps",
     45: "fat.readahead_head_restarts", 46: "fat.readahead_backtracks",
     47: "fat.readahead_invalid", 48: "fat.readahead_mapped_sectors",
+    49: "fat.map_bytes", 50: "fat.map_peak_bytes",
+    51: "fat.map_peak_inode_bytes",
     64: "readahead.batches", 65: "readahead.pages",
     66: "readahead.hits", 67: "readahead.waste",
     68: "readahead.fragment_truncations", 69: "readahead.fallbacks",

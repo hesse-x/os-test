@@ -59,6 +59,11 @@ collect_external_counters(const struct perf_counter_writer *writer) {
     writer->add(writer->context, base + 4, fat.walk_invalid[source]);
     writer->add(writer->context, base + 5, fat.mapped_sectors[source]);
   }
+  writer->add(writer->context, PERF_COUNTER_FAT_MAP_BYTES, fat.map_bytes);
+  writer->add(writer->context, PERF_COUNTER_FAT_MAP_PEAK_BYTES,
+              fat.map_peak_bytes);
+  writer->add(writer->context, PERF_COUNTER_FAT_MAP_PEAK_INODE_BYTES,
+              fat.map_peak_inode_bytes);
 
   struct page_cache_stats ra;
   page_cache_get_stats(&ra);

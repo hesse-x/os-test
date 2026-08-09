@@ -12,6 +12,7 @@
 
 #include "kernel/bsd/fops.h"
 #include "kernel/bsd/mount.h"
+#include "kernel/xcore/mutex.h"
 
 struct inode;
 struct block_partition;
@@ -33,6 +34,9 @@ struct fat32_stats {
   uint64_t walk_backtracks[2];
   uint64_t walk_invalid[2];
   uint64_t mapped_sectors[2];
+  uint64_t map_bytes;
+  uint64_t map_peak_bytes;
+  uint64_t map_peak_inode_bytes;
 };
 
 struct fat32_inode_info {
@@ -40,6 +44,10 @@ struct fat32_inode_info {
   uint32_t dir_start_cluster;
   int32_t dir_entry_index;
   uint64_t walk_cursor;
+  mutex map_lock;
+  uint32_t *cluster_map;
+  uint32_t cluster_map_count;
+  uint32_t cluster_map_capacity;
 };
 extern const struct file_operations fat32_file_fops;
 /* FAT32 directory entry (32 bytes) */
@@ -68,9 +76,9 @@ int fat32_init(struct block_partition *part);
 struct block_partition *fat32_partition(void);
 void fat32_dump_cache_stats(void);
 uint32_t fat32_walk_chain(uint32_t start_cluster, uint64_t page_index);
-/* Walk the chain to the cluster at cluster_index, resuming from ip->walk_cursor
- * when possible (forward-only). Advances the cursor; returns the cluster or an
- * EOF marker (<2 / >=0x0FFFFFF8). */
+/* Map a logical cluster through the inode's lazily populated cluster map.
+ * Allocation failure falls back to the forward cursor. Returns the cluster or
+ * an EOF marker (<2 / >=0x0FFFFFF8). */
 uint32_t fat32_walk_chain_cached(struct inode *ip, uint64_t cluster_index,
                                  enum fat32_walk_source source);
 void fat32_get_stats(struct fat32_stats *out);

@@ -52,9 +52,41 @@ static int fat32_sync_fs(struct super_block *sb, bool wait);
 
 #define FAT_I(ip) ((struct fat32_inode_info *)(ip)->i_private)
 
+static uint64_t fat_map_bytes;
+static uint64_t fat_map_peak_bytes;
+static uint64_t fat_map_peak_inode_bytes;
+
+static void fat32_atomic_max(uint64_t *value, uint64_t candidate) {
+  uint64_t old = __atomic_load_n(value, __ATOMIC_RELAXED);
+  while (old < candidate &&
+         !__atomic_compare_exchange_n(value, &old, candidate, false,
+                                      __ATOMIC_RELAXED, __ATOMIC_RELAXED))
+    ;
+}
+
+static void fat32_account_map_resize(uint32_t old_capacity,
+                                     uint32_t new_capacity) {
+  uint64_t old_bytes = (uint64_t)old_capacity * sizeof(uint32_t);
+  uint64_t new_bytes = (uint64_t)new_capacity * sizeof(uint32_t);
+  uint64_t total;
+  if (new_bytes >= old_bytes) {
+    total = __atomic_add_fetch(&fat_map_bytes, new_bytes - old_bytes,
+                               __ATOMIC_RELAXED);
+  } else {
+    total = __atomic_sub_fetch(&fat_map_bytes, old_bytes - new_bytes,
+                               __ATOMIC_RELAXED);
+  }
+  fat32_atomic_max(&fat_map_peak_bytes, total);
+  fat32_atomic_max(&fat_map_peak_inode_bytes, new_bytes);
+}
+
 static void fat32_evict_inode(struct inode *ip) {
   if (ip->i_private) {
-    kfree(ip->i_private);
+    struct fat32_inode_info *info = FAT_I(ip);
+    fat32_account_map_resize(info->cluster_map_capacity, 0);
+    if (info->cluster_map)
+      kfree(info->cluster_map);
+    kfree(info);
     ip->i_private = NULL;
   }
 }
@@ -65,8 +97,18 @@ static const struct super_operations fat32_sops = {
 };
 
 static void fat32_invalidate_pages(struct inode *ip) {
-  if (FAT_I(ip))
-    __atomic_store_n(&FAT_I(ip)->walk_cursor, 0, __ATOMIC_RELEASE);
+  struct fat32_inode_info *info = FAT_I(ip);
+  if (info) {
+    mutex_lock(&info->map_lock);
+    fat32_account_map_resize(info->cluster_map_capacity, 0);
+    if (info->cluster_map)
+      kfree(info->cluster_map);
+    info->cluster_map = NULL;
+    info->cluster_map_count = 0;
+    info->cluster_map_capacity = 0;
+    __atomic_store_n(&info->walk_cursor, 0, __ATOMIC_RELEASE);
+    mutex_unlock(&info->map_lock);
+  }
   page_cache_invalidate_inode(ip);
 }
 static uint32_t spf32;
@@ -354,24 +396,12 @@ uint32_t fat32_walk_chain(uint32_t start_cluster, uint64_t page_index) {
   return c;
 }
 
-// Walk the FAT chain to the cluster at cluster_index, resuming from the inode's
-// forward-only cursor when the target is at or beyond it. Sequential reads then
-// touch each FAT entry once total (O(n)) instead of restarting at the chain
-// head every page (O(n²)). Cursor packs (index<<32)|cluster; an out-of-range
-// cursor (holding an EOF marker or positioned after the target) falls back to a
-// head start, and chain mutations invalidate it through the page cache. The
-// packed pair is loaded and stored atomically so concurrent faults cannot tear
-// it. Letting the most recently completed walk publish its position also keeps
-// the cursor near the active mmap fault region instead of pinning it at the
-// highest index seen.
-uint32_t fat32_walk_chain_cached(struct inode *ip, uint64_t cluster_index,
-                                 enum fat32_walk_source source) {
-  if (source != FAT32_WALK_DEMAND && source != FAT32_WALK_READAHEAD) {
-    source = FAT32_WALK_DEMAND;
-    __atomic_fetch_add(&fat_stats.walk_invalid[source], 1, __ATOMIC_RELAXED);
-  }
-  __atomic_fetch_add(&fat_stats.walk_calls[source], 1, __ATOMIC_RELAXED);
-  uint64_t cur = __atomic_load_n(&FAT_I(ip)->walk_cursor, __ATOMIC_ACQUIRE);
+// Low-memory fallback. The packed cursor keeps reads correct when growing the
+// per-inode map fails, at the cost of repeating backward walks.
+static uint32_t fat32_walk_chain_cursor(struct fat32_inode_info *info,
+                                        uint64_t cluster_index,
+                                        enum fat32_walk_source source) {
+  uint64_t cur = __atomic_load_n(&info->walk_cursor, __ATOMIC_ACQUIRE);
   uint32_t cur_idx = (uint32_t)(cur >> 32);
   uint32_t c = (uint32_t)(cur & 0xFFFFFFFF);
   if (c < 2 || c >= 0x0FFFFFF8 || cur_idx > cluster_index) {
@@ -383,7 +413,7 @@ uint32_t fat32_walk_chain_cached(struct inode *ip, uint64_t cluster_index,
       __atomic_fetch_add(&fat_stats.walk_backtracks[source], 1,
                          __ATOMIC_RELAXED);
     cur_idx = 0;
-    c = FAT_I(ip)->start_cluster;
+    c = info->start_cluster;
   }
   while (cur_idx < cluster_index) {
     if (c < 2 || c >= 0x0FFFFFF8) {
@@ -402,9 +432,95 @@ uint32_t fat32_walk_chain_cached(struct inode *ip, uint64_t cluster_index,
   // Reached cluster_index. Publish only a valid data cluster; EOF markers
   // cannot be resumed from.
   if (c >= 2 && c < 0x0FFFFFF8)
-    __atomic_store_n(&FAT_I(ip)->walk_cursor,
+    __atomic_store_n(&info->walk_cursor,
                      ((uint64_t)cur_idx << 32) | (uint64_t)c, __ATOMIC_RELEASE);
   return c;
+}
+
+// Extend the per-inode logical-to-physical cluster map only as far as the
+// caller needs. map_lock serializes concurrent mmap faults, so every FAT link
+// incorporated into the map is scanned at most once between invalidations.
+uint32_t fat32_walk_chain_cached(struct inode *ip, uint64_t cluster_index,
+                                 enum fat32_walk_source source) {
+  if (source != FAT32_WALK_DEMAND && source != FAT32_WALK_READAHEAD) {
+    source = FAT32_WALK_DEMAND;
+    __atomic_fetch_add(&fat_stats.walk_invalid[source], 1, __ATOMIC_RELAXED);
+  }
+  __atomic_fetch_add(&fat_stats.walk_calls[source], 1, __ATOMIC_RELAXED);
+
+  struct fat32_inode_info *info = FAT_I(ip);
+  if (!info || cluster_index >= UINT32_MAX) {
+    __atomic_fetch_add(&fat_stats.walk_invalid[source], 1, __ATOMIC_RELAXED);
+    return info ? fat32_walk_chain_cursor(info, cluster_index, source)
+                : 0x0FFFFFF8;
+  }
+
+  mutex_lock(&info->map_lock);
+  if (cluster_index < info->cluster_map_count) {
+    uint32_t cluster = info->cluster_map[cluster_index];
+    mutex_unlock(&info->map_lock);
+    return cluster;
+  }
+
+  uint32_t needed = (uint32_t)cluster_index + 1;
+  if (needed > info->cluster_map_capacity) {
+    uint32_t capacity = info->cluster_map_capacity;
+    if (capacity == 0)
+      capacity = 256;
+    while (capacity < needed) {
+      if (capacity > UINT32_MAX / 2) {
+        capacity = needed;
+        break;
+      }
+      capacity *= 2;
+    }
+    if ((size_t)capacity > SIZE_MAX / sizeof(*info->cluster_map)) {
+      mutex_unlock(&info->map_lock);
+      return fat32_walk_chain_cursor(info, cluster_index, source);
+    }
+    uint32_t *new_map =
+        krealloc(info->cluster_map, (size_t)capacity * sizeof(*new_map));
+    if (!new_map) {
+      mutex_unlock(&info->map_lock);
+      return fat32_walk_chain_cursor(info, cluster_index, source);
+    }
+    uint32_t old_capacity = info->cluster_map_capacity;
+    info->cluster_map = new_map;
+    info->cluster_map_capacity = capacity;
+    fat32_account_map_resize(old_capacity, capacity);
+  }
+
+  if (info->cluster_map_count == 0) {
+    uint32_t start = info->start_cluster;
+    if (start < 2 || start >= 0x0FFFFFF8) {
+      __atomic_fetch_add(&fat_stats.walk_invalid[source], 1, __ATOMIC_RELAXED);
+      mutex_unlock(&info->map_lock);
+      return start;
+    }
+    info->cluster_map[0] = start;
+    info->cluster_map_count = 1;
+  }
+
+  while (info->cluster_map_count < needed) {
+    uint32_t current = info->cluster_map[info->cluster_map_count - 1];
+    uint32_t next = fat32_read_entry(current);
+    __atomic_fetch_add(&fat_stats.walk_steps[source], 1, __ATOMIC_RELAXED);
+    if (next < 2 || next >= 0x0FFFFFF8) {
+      __atomic_fetch_add(&fat_stats.walk_invalid[source], 1, __ATOMIC_RELAXED);
+      mutex_unlock(&info->map_lock);
+      return next;
+    }
+    info->cluster_map[info->cluster_map_count++] = next;
+  }
+
+  uint32_t cluster = info->cluster_map[cluster_index];
+  uint32_t cursor_index = info->cluster_map_count - 1;
+  uint32_t cursor_cluster = info->cluster_map[cursor_index];
+  __atomic_store_n(&info->walk_cursor,
+                   ((uint64_t)cursor_index << 32) | cursor_cluster,
+                   __ATOMIC_RELEASE);
+  mutex_unlock(&info->map_lock);
+  return cluster;
 }
 
 void fat32_get_stats(struct fat32_stats *out) {
@@ -432,6 +548,10 @@ void fat32_get_stats(struct fat32_stats *out) {
     out->mapped_sectors[i] =
         __atomic_load_n(&fat_stats.mapped_sectors[i], __ATOMIC_RELAXED);
   }
+  out->map_bytes = __atomic_load_n(&fat_map_bytes, __ATOMIC_RELAXED);
+  out->map_peak_bytes = __atomic_load_n(&fat_map_peak_bytes, __ATOMIC_RELAXED);
+  out->map_peak_inode_bytes =
+      __atomic_load_n(&fat_map_peak_inode_bytes, __ATOMIC_RELAXED);
 }
 
 void fat32_account_mapped_sector(enum fat32_walk_source source) {
@@ -833,6 +953,10 @@ static struct inode *fat32_iget(uint32_t ino, int type, uint64_t size,
     info->dir_start_cluster = dir_cluster;
     info->dir_entry_index = dir_idx;
     info->walk_cursor = 0;
+    mutex_init(&info->map_lock);
+    info->cluster_map = NULL;
+    info->cluster_map_count = 0;
+    info->cluster_map_capacity = 0;
     mutex_lock(&ip->i_lock);
     if (!ip->i_private)
       ip->i_private = info;
