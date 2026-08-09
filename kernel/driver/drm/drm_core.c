@@ -21,6 +21,7 @@
 #include "kernel/bsd/poll_types.h"
 #include "kernel/bsd/sysfs.h"
 #include "kernel/driver/bsd_types.h"
+#include "kernel/driver/drm/drm_fence.h"
 #include "kernel/xcore/atomic.h"
 #include "kernel/xcore/list.h"
 #include "kernel/xcore/log.h"
@@ -41,14 +42,18 @@
 #define DRM_CORE_MAX_PROPERTY_ENUMS 16
 #define DRM_CORE_MAX_BLOBS 32
 #define DRM_CORE_MAX_HANDLES 256
+#define DRM_CORE_MAX_SYNCOBJS 256
 #define DRM_CORE_MMAP_OFFSET_START 0x100000ULL
 
 int bsd_drm_prime_fd_install(xtask *proc, struct drm_prime_object *object,
                              bool cloexec);
 struct file *bsd_drm_prime_fd_get(xtask *proc, int fd);
+struct file *bsd_sync_file_fd_get(xtask *proc, int fd);
 
 struct drm_gem_object {
   refcount_t refcount;
+  spinlock reservation_lock;
+  struct drm_fence *exclusive_fence;
   struct drm_core_device *dev;
   uint64_t size;
   uint64_t mmap_offset;
@@ -61,6 +66,11 @@ struct drm_gem_object {
 struct drm_core_handle {
   uint32_t handle;
   struct drm_gem_object *object;
+};
+
+struct drm_core_syncobj {
+  uint32_t handle;
+  struct drm_fence *fence;
 };
 
 enum drm_core_property_type {
@@ -160,6 +170,8 @@ struct drm_core_file {
   wait_queue_head event_wq;
   struct drm_core_handle *handles;
   uint32_t next_handle;
+  struct drm_core_syncobj syncobjs[DRM_CORE_MAX_SYNCOBJS];
+  uint32_t next_syncobj_handle;
 };
 
 static mutex drm_registry_mutex;
@@ -365,6 +377,8 @@ static int drm_minor_close_file(xtask *proc, struct file *file) {
     for (size_t i = 0; i < DRM_CORE_MAX_HANDLES; i++) {
       df->handles[i].handle = 0;
     }
+    for (size_t i = 0; i < DRM_CORE_MAX_SYNCOBJS; i++)
+      df->syncobjs[i].handle = 0;
   }
   mutex_unlock(&minor->dev->file_mutex);
   if (dropped_master && minor->dev->master_drop)
@@ -375,6 +389,11 @@ static int drm_minor_close_file(xtask *proc, struct file *file) {
       df->handles[i].object = NULL;
       if (object)
         drm_gem_object_put(object);
+    }
+    for (size_t i = 0; i < DRM_CORE_MAX_SYNCOBJS; i++) {
+      struct drm_fence *fence = df->syncobjs[i].fence;
+      df->syncobjs[i].fence = NULL;
+      drm_fence_put(fence);
     }
     drm_core_device_put(df->dev);
     kfree(df->handles);
@@ -584,6 +603,134 @@ static long drm_core_kms_ioctl(struct drm_core_file *df, uint32_t cmd,
   }
 }
 
+static struct drm_core_syncobj *
+drm_syncobj_find_locked(struct drm_core_file *df, uint32_t handle) {
+  if (!handle)
+    return NULL;
+  for (size_t i = 0; i < DRM_CORE_MAX_SYNCOBJS; i++)
+    if (df->syncobjs[i].handle == handle)
+      return &df->syncobjs[i];
+  return NULL;
+}
+
+static int drm_syncobj_create(struct drm_core_file *df, bool signaled,
+                              uint32_t *handle) {
+  struct drm_fence *fence = drm_fence_create(signaled);
+  if (!fence)
+    return -ENOMEM;
+  mutex_lock(&df->dev->file_mutex);
+  struct drm_core_syncobj *entry = NULL;
+  for (size_t i = 0; i < DRM_CORE_MAX_SYNCOBJS; i++)
+    if (!df->syncobjs[i].handle) {
+      entry = &df->syncobjs[i];
+      break;
+    }
+  if (!entry) {
+    mutex_unlock(&df->dev->file_mutex);
+    drm_fence_put(fence);
+    return -ENOSPC;
+  }
+  uint32_t candidate = df->next_syncobj_handle;
+  if (!candidate)
+    candidate = 1;
+  while (drm_syncobj_find_locked(df, candidate))
+    if (++candidate == 0) {
+      mutex_unlock(&df->dev->file_mutex);
+      drm_fence_put(fence);
+      return -ENOSPC;
+    }
+  entry->handle = candidate;
+  entry->fence = fence;
+  df->next_syncobj_handle = candidate + 1;
+  *handle = candidate;
+  mutex_unlock(&df->dev->file_mutex);
+  return 0;
+}
+
+static int drm_syncobj_collect(struct drm_core_file *df, uint64_t user_handles,
+                               uint32_t count, struct drm_fence ***fences_out) {
+  if (!user_handles || !count || count > DRM_CORE_MAX_SYNCOBJS)
+    return -EINVAL;
+  uint32_t *handles = kmalloc(count * sizeof(*handles));
+  struct drm_fence **fences = kmalloc(count * sizeof(*fences));
+  if (!handles || !fences) {
+    kfree(handles);
+    kfree(fences);
+    return -ENOMEM;
+  }
+  __memset(fences, 0, count * sizeof(*fences));
+  if (copy_from_user(handles, (void *)(uintptr_t)user_handles,
+                     count * sizeof(*handles))) {
+    kfree(handles);
+    kfree(fences);
+    return -EFAULT;
+  }
+  int rc = 0;
+  mutex_lock(&df->dev->file_mutex);
+  for (uint32_t i = 0; i < count; i++) {
+    struct drm_core_syncobj *entry = drm_syncobj_find_locked(df, handles[i]);
+    if (!entry) {
+      rc = -ENOENT;
+      break;
+    }
+    fences[i] = entry->fence;
+    drm_fence_get(fences[i]);
+  }
+  mutex_unlock(&df->dev->file_mutex);
+  kfree(handles);
+  if (rc) {
+    for (uint32_t i = 0; i < count; i++)
+      drm_fence_put(fences[i]);
+    kfree(fences);
+    return rc;
+  }
+  *fences_out = fences;
+  return 0;
+}
+
+static void drm_syncobj_put_fences(struct drm_fence **fences, uint32_t count) {
+  for (uint32_t i = 0; i < count; i++)
+    drm_fence_put(fences[i]);
+  kfree(fences);
+}
+
+static int drm_syncobj_wait_fences(struct drm_fence **fences, uint32_t count,
+                                   bool wait_all, int64_t timeout_ns,
+                                   uint32_t *first_signaled) {
+  uint64_t deadline = timeout_ns < 0 ? UINT64_MAX : (uint64_t)timeout_ns;
+  if (wait_all) {
+    for (uint32_t i = 0; i < count; i++) {
+      uint64_t now = sched_clock();
+      uint64_t remaining = deadline == UINT64_MAX
+                               ? UINT64_MAX
+                               : (deadline > now ? deadline - now : 0);
+      int rc = drm_fence_wait(fences[i], remaining);
+      if (rc)
+        return rc;
+    }
+    *first_signaled = 0;
+    return 0;
+  }
+
+  for (;;) {
+    for (uint32_t i = 0; i < count; i++) {
+      if (drm_fence_is_signaled(fences[i])) {
+        *first_signaled = i;
+        return 0;
+      }
+    }
+    uint64_t now = sched_clock();
+    if (deadline != UINT64_MAX && now >= deadline)
+      return -ETIMEDOUT;
+    uint64_t slice = 1000000ULL;
+    if (deadline != UINT64_MAX && deadline - now < slice)
+      slice = deadline - now;
+    int rc = drm_fence_wait(fences[0], slice);
+    if (rc && rc != -ETIMEDOUT)
+      return rc;
+  }
+}
+
 static long drm_core_common_ioctl(xtask *proc, struct file *file,
                                   struct drm_core_file *df, uint32_t cmd,
                                   void *arg, bool *handled) {
@@ -727,6 +874,197 @@ static long drm_core_common_ioctl(xtask *proc, struct file *file,
       return rc == -EINVAL ? -EXDEV : rc;
     prime->handle = handle;
     return 0;
+  }
+  case DRM_IOCTL_GET_CAP: {
+    struct drm_get_cap *cap = arg;
+    if (!cap)
+      return -EFAULT;
+    if (cap->capability == DRM_CAP_SYNCOBJ) {
+      cap->value = 1;
+      return 0;
+    }
+    if (cap->capability == DRM_CAP_SYNCOBJ_TIMELINE) {
+      cap->value = 0;
+      return 0;
+    }
+    *handled = false;
+    return 0;
+  }
+  case DRM_IOCTL_SYNCOBJ_CREATE: {
+    struct drm_syncobj_create *request = arg;
+    if (!request)
+      return -EFAULT;
+    if (request->flags & ~DRM_SYNCOBJ_CREATE_SIGNALED)
+      return -EINVAL;
+    return drm_syncobj_create(
+        df, (request->flags & DRM_SYNCOBJ_CREATE_SIGNALED) != 0,
+        &request->handle);
+  }
+  case DRM_IOCTL_SYNCOBJ_DESTROY: {
+    struct drm_syncobj_destroy *request = arg;
+    if (!request)
+      return -EFAULT;
+    if (request->pad)
+      return -EINVAL;
+    mutex_lock(&df->dev->file_mutex);
+    struct drm_core_syncobj *entry =
+        drm_syncobj_find_locked(df, request->handle);
+    struct drm_fence *fence = entry ? entry->fence : NULL;
+    if (entry)
+      __memset(entry, 0, sizeof(*entry));
+    mutex_unlock(&df->dev->file_mutex);
+    if (!entry)
+      return -ENOENT;
+    drm_fence_put(fence);
+    return 0;
+  }
+  case DRM_IOCTL_SYNCOBJ_HANDLE_TO_FD: {
+    struct drm_syncobj_handle *request = arg;
+    if (!request || !proc)
+      return -EFAULT;
+    if (request->flags != DRM_SYNCOBJ_HANDLE_TO_FD_FLAGS_EXPORT_SYNC_FILE ||
+        request->pad || request->point)
+      return -EINVAL;
+    mutex_lock(&df->dev->file_mutex);
+    struct drm_core_syncobj *entry =
+        drm_syncobj_find_locked(df, request->handle);
+    struct drm_fence *fence = entry ? entry->fence : NULL;
+    drm_fence_get(fence);
+    mutex_unlock(&df->dev->file_mutex);
+    if (!fence)
+      return -ENOENT;
+    int fd = drm_fence_install_sync_file(fence, proc);
+    drm_fence_put(fence);
+    if (fd < 0)
+      return fd;
+    request->fd = fd;
+    return 0;
+  }
+  case DRM_IOCTL_SYNCOBJ_FD_TO_HANDLE: {
+    struct drm_syncobj_handle *request = arg;
+    if (!request || !proc)
+      return -EFAULT;
+    if (request->flags != DRM_SYNCOBJ_FD_TO_HANDLE_FLAGS_IMPORT_SYNC_FILE ||
+        request->pad || request->point)
+      return -EINVAL;
+    struct file *sync_file = bsd_sync_file_fd_get(proc, request->fd);
+    if (!sync_file)
+      return -EBADF;
+    struct drm_fence *imported = sync_file->sync_file_fence;
+    drm_fence_get(imported);
+    file_put(sync_file);
+    uint32_t handle = 0;
+    int rc = drm_syncobj_create(df, false, &handle);
+    if (rc) {
+      drm_fence_put(imported);
+      return rc;
+    }
+    mutex_lock(&df->dev->file_mutex);
+    struct drm_core_syncobj *entry = drm_syncobj_find_locked(df, handle);
+    struct drm_fence *placeholder = entry->fence;
+    entry->fence = imported;
+    mutex_unlock(&df->dev->file_mutex);
+    drm_fence_put(placeholder);
+    request->handle = handle;
+    return 0;
+  }
+  case DRM_IOCTL_SYNCOBJ_SIGNAL:
+  case DRM_IOCTL_SYNCOBJ_RESET: {
+    struct drm_syncobj_array *request = arg;
+    if (!request)
+      return -EFAULT;
+    if (request->pad)
+      return -EINVAL;
+    struct drm_fence **fences = NULL;
+    int rc = drm_syncobj_collect(df, request->handles, request->count_handles,
+                                 &fences);
+    if (rc)
+      return rc;
+    if (cmd == DRM_IOCTL_SYNCOBJ_SIGNAL) {
+      for (uint32_t i = 0; i < request->count_handles; i++)
+        drm_fence_signal(fences[i]);
+      drm_syncobj_put_fences(fences, request->count_handles);
+      return 0;
+    }
+
+    struct drm_fence **replacements =
+        kmalloc(request->count_handles * sizeof(*replacements));
+    if (!replacements) {
+      drm_syncobj_put_fences(fences, request->count_handles);
+      return -ENOMEM;
+    }
+    __memset(replacements, 0, request->count_handles * sizeof(*replacements));
+    for (uint32_t i = 0; i < request->count_handles; i++) {
+      replacements[i] = drm_fence_create(false);
+      if (!replacements[i]) {
+        for (uint32_t j = 0; j < i; j++)
+          drm_fence_put(replacements[j]);
+        kfree(replacements);
+        drm_syncobj_put_fences(fences, request->count_handles);
+        return -ENOMEM;
+      }
+    }
+    uint32_t *handles = kmalloc(request->count_handles * sizeof(*handles));
+    if (!handles || copy_from_user(handles, (void *)(uintptr_t)request->handles,
+                                   request->count_handles * sizeof(*handles))) {
+      for (uint32_t i = 0; i < request->count_handles; i++)
+        drm_fence_put(replacements[i]);
+      kfree(handles);
+      kfree(replacements);
+      drm_syncobj_put_fences(fences, request->count_handles);
+      return handles ? -EFAULT : -ENOMEM;
+    }
+    mutex_lock(&df->dev->file_mutex);
+    for (uint32_t i = 0; i < request->count_handles; i++) {
+      if (!drm_syncobj_find_locked(df, handles[i])) {
+        rc = -ENOENT;
+        break;
+      }
+    }
+    if (rc) {
+      mutex_unlock(&df->dev->file_mutex);
+      for (uint32_t i = 0; i < request->count_handles; i++)
+        drm_fence_put(replacements[i]);
+      kfree(handles);
+      kfree(replacements);
+      drm_syncobj_put_fences(fences, request->count_handles);
+      return rc;
+    }
+    for (uint32_t i = 0; i < request->count_handles; i++) {
+      struct drm_core_syncobj *entry = drm_syncobj_find_locked(df, handles[i]);
+      struct drm_fence *old = entry->fence;
+      entry->fence = replacements[i];
+      replacements[i] = old;
+    }
+    mutex_unlock(&df->dev->file_mutex);
+    for (uint32_t i = 0; i < request->count_handles; i++)
+      drm_fence_put(replacements[i]);
+    kfree(handles);
+    kfree(replacements);
+    drm_syncobj_put_fences(fences, request->count_handles);
+    return 0;
+  }
+  case DRM_IOCTL_SYNCOBJ_WAIT: {
+    struct drm_syncobj_wait *request = arg;
+    if (!request)
+      return -EFAULT;
+    uint32_t allowed = DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL |
+                       DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT |
+                       DRM_SYNCOBJ_WAIT_FLAGS_WAIT_AVAILABLE |
+                       DRM_SYNCOBJ_WAIT_FLAGS_WAIT_DEADLINE;
+    if ((request->flags & ~allowed) || request->pad)
+      return -EINVAL;
+    struct drm_fence **fences = NULL;
+    int rc = drm_syncobj_collect(df, request->handles, request->count_handles,
+                                 &fences);
+    if (rc)
+      return rc;
+    rc = drm_syncobj_wait_fences(
+        fences, request->count_handles,
+        (request->flags & DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL) != 0,
+        request->timeout_nsec, &request->first_signaled);
+    drm_syncobj_put_fences(fences, request->count_handles);
+    return rc == -ETIMEDOUT ? -ETIME : rc;
   }
   default:
     *handled = false;
@@ -1159,6 +1497,7 @@ drm_gem_object_create(struct drm_core_device *dev, uint64_t size,
     return NULL;
   __memset(object, 0, sizeof(*object));
   refcount_set(&object->refcount, 1);
+  object->reservation_lock = (spinlock)SPINLOCK_INIT;
   object->dev = dev;
   object->size = size;
   object->pages = pages;
@@ -1188,6 +1527,7 @@ void drm_gem_object_get(struct drm_gem_object *object) {
 void drm_gem_object_put(struct drm_gem_object *object) {
   if (!object || !refcount_dec_and_test(&object->refcount))
     return;
+  drm_fence_put(object->exclusive_fence);
   if (object->ops && object->ops->release)
     object->ops->release(object);
   kfree(object->pages);
@@ -1208,6 +1548,32 @@ void *drm_gem_object_private(struct drm_gem_object *object) {
 
 uint64_t drm_gem_object_size(const struct drm_gem_object *object) {
   return object ? object->size : 0;
+}
+
+void drm_gem_reservation_set_exclusive(struct drm_gem_object *object,
+                                       struct drm_fence *fence) {
+  if (!object)
+    return;
+  if (fence)
+    drm_fence_get(fence);
+  uint64_t flags;
+  spin_lock_irqsave(&object->reservation_lock, &flags);
+  struct drm_fence *old = object->exclusive_fence;
+  object->exclusive_fence = fence;
+  spin_unlock_irqrestore(&object->reservation_lock, flags);
+  drm_fence_put(old);
+}
+
+struct drm_fence *
+drm_gem_reservation_get_exclusive(struct drm_gem_object *object) {
+  if (!object)
+    return NULL;
+  uint64_t flags;
+  spin_lock_irqsave(&object->reservation_lock, &flags);
+  struct drm_fence *fence = object->exclusive_fence;
+  drm_fence_get(fence);
+  spin_unlock_irqrestore(&object->reservation_lock, flags);
+  return fence;
 }
 
 int drm_core_gem_handle_create(struct file *file, struct drm_gem_object *object,

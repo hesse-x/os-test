@@ -14,7 +14,7 @@
 #include "kernel/bsd/pty.h"     // struct pty (wq field)
 #include "kernel/bsd/socket.h"  // struct unix_sock (wq field)
 #include "kernel/bsd/types.h"
-#include "kernel/driver/drm_internal.h" // drm_fence wait queue layout
+#include "kernel/driver/drm/drm_fence.h"
 #include "kernel/xcore/mem/slab.h"
 #include "kernel/xcore/wait_queue.h"
 

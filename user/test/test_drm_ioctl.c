@@ -10,6 +10,7 @@
 #include "drm/drm_fourcc.h"
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
@@ -432,6 +433,83 @@ void test_drm_prime_object_lifetime_and_cross_device(void) {
   close(foreign);
 }
 
+// 11. Binary syncobjs are file-scoped, waitable, and keep fences alive through
+// sync_file descriptors independently of their DRM fd.
+void test_drm_binary_syncobj_and_sync_file(void) {
+  int fd = open("/dev/dri/card0", O_RDWR);
+  int foreign = open("/dev/dri/card1", O_RDWR);
+  if (fd < 0 || foreign < 0) {
+    if (fd >= 0)
+      close(fd);
+    if (foreign >= 0)
+      close(foreign);
+    TEST_IGNORE_MESSAGE("virtio + mock DRM devices not available");
+    return;
+  }
+
+  struct drm_get_cap cap = {.capability = DRM_CAP_SYNCOBJ};
+  TEST_ASSERT_EQUAL_INT(0, ioctl(fd, DRM_IOCTL_GET_CAP, &cap));
+  TEST_ASSERT_EQUAL_UINT64(1, cap.value);
+  cap.capability = DRM_CAP_SYNCOBJ_TIMELINE;
+  TEST_ASSERT_EQUAL_INT(0, ioctl(fd, DRM_IOCTL_GET_CAP, &cap));
+  TEST_ASSERT_EQUAL_UINT64(0, cap.value);
+
+  struct drm_syncobj_create local = {0};
+  struct drm_syncobj_create other = {0};
+  TEST_ASSERT_EQUAL_INT(0, ioctl(fd, DRM_IOCTL_SYNCOBJ_CREATE, &local));
+  TEST_ASSERT_EQUAL_INT(0, ioctl(foreign, DRM_IOCTL_SYNCOBJ_CREATE, &other));
+  TEST_ASSERT_EQUAL_UINT32(local.handle, other.handle);
+
+  uint32_t local_handle = local.handle;
+  struct drm_syncobj_wait wait = {.handles = (uintptr_t)&local_handle,
+                                  .timeout_nsec = 0,
+                                  .count_handles = 1};
+  TEST_ASSERT_EQUAL_INT(-1, ioctl(fd, DRM_IOCTL_SYNCOBJ_WAIT, &wait));
+  TEST_ASSERT_EQUAL_INT(ETIME, errno);
+
+  struct drm_syncobj_array array = {.handles = (uintptr_t)&local_handle,
+                                    .count_handles = 1};
+  TEST_ASSERT_EQUAL_INT(0, ioctl(fd, DRM_IOCTL_SYNCOBJ_SIGNAL, &array));
+  TEST_ASSERT_EQUAL_INT(0, ioctl(fd, DRM_IOCTL_SYNCOBJ_WAIT, &wait));
+
+  uint32_t foreign_handle = other.handle;
+  struct drm_syncobj_wait foreign_wait = {.handles = (uintptr_t)&foreign_handle,
+                                          .timeout_nsec = 0,
+                                          .count_handles = 1};
+  TEST_ASSERT_EQUAL_INT(-1,
+                        ioctl(foreign, DRM_IOCTL_SYNCOBJ_WAIT, &foreign_wait));
+  TEST_ASSERT_EQUAL_INT(ETIME, errno);
+
+  struct drm_syncobj_handle export = {
+      .handle = local.handle,
+      .flags = DRM_SYNCOBJ_HANDLE_TO_FD_FLAGS_EXPORT_SYNC_FILE};
+  TEST_ASSERT_EQUAL_INT(0, ioctl(fd, DRM_IOCTL_SYNCOBJ_HANDLE_TO_FD, &export));
+  TEST_ASSERT_GREATER_OR_EQUAL_INT(0, export.fd);
+
+  struct drm_syncobj_handle import = {
+      .flags = DRM_SYNCOBJ_FD_TO_HANDLE_FLAGS_IMPORT_SYNC_FILE,
+      .fd = export.fd};
+  TEST_ASSERT_EQUAL_INT(0, ioctl(fd, DRM_IOCTL_SYNCOBJ_FD_TO_HANDLE, &import));
+  uint32_t imported_handle = import.handle;
+  wait.handles = (uintptr_t)&imported_handle;
+  TEST_ASSERT_EQUAL_INT(0, ioctl(fd, DRM_IOCTL_SYNCOBJ_WAIT, &wait));
+
+  struct drm_syncobj_destroy destroy = {.handle = local.handle};
+  TEST_ASSERT_EQUAL_INT(0, ioctl(fd, DRM_IOCTL_SYNCOBJ_DESTROY, &destroy));
+  destroy.handle = import.handle;
+  TEST_ASSERT_EQUAL_INT(0, ioctl(fd, DRM_IOCTL_SYNCOBJ_DESTROY, &destroy));
+  close(fd);
+
+  struct pollfd pfd = {.fd = export.fd, .events = POLLIN};
+  TEST_ASSERT_EQUAL_INT(1, poll(&pfd, 1, 0));
+  TEST_ASSERT_BITS(POLLIN, POLLIN, pfd.revents);
+  close(export.fd);
+
+  destroy.handle = other.handle;
+  TEST_ASSERT_EQUAL_INT(0, ioctl(foreign, DRM_IOCTL_SYNCOBJ_DESTROY, &destroy));
+  close(foreign);
+}
+
 int main(int argc, char **argv, char **envp) {
   (void)argc;
   (void)argv;
@@ -447,5 +525,6 @@ int main(int argc, char **argv, char **envp) {
   RUN_TEST(test_drm_core_device_isolation);
   RUN_TEST(test_drm_gem_vma_lifetime_and_authorization);
   RUN_TEST(test_drm_prime_object_lifetime_and_cross_device);
+  RUN_TEST(test_drm_binary_syncobj_and_sync_file);
   return UNITY_END();
 }

@@ -459,6 +459,21 @@ int bsd_sync_file_fd_install(xtask *proc, struct drm_fence *fence) {
   return fd;
 }
 
+struct file *bsd_sync_file_fd_get(xtask *proc, int fd) {
+  if (!proc || fd < 0 || fd >= MAX_FD)
+    return NULL;
+  files *fl = proc->proc->files;
+  spin_lock(&fl->fd_lock);
+  struct file *f = fd_lookup(fl, fd);
+  if (!f || f->type != FD_SYNC_FILE || !f->sync_file_fence) {
+    spin_unlock(&fl->fd_lock);
+    return NULL;
+  }
+  file_get(f);
+  spin_unlock(&fl->fd_lock);
+  return f;
+}
+
 int bsd_drm_prime_fd_install(xtask *proc, struct drm_prime_object *object,
                              bool cloexec) {
   if (!proc || !object)

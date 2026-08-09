@@ -22,9 +22,9 @@
 #include "kernel/driver/bsd_types.h"
 #include "kernel/driver/driver.h"
 #include "kernel/driver/drm/drm_core.h"
+#include "kernel/driver/drm/drm_fence.h"
 #include "kernel/driver/drm_internal.h"
 #include "kernel/driver/pci.h"
-#include "kernel/xcore/atomic.h"
 #include "kernel/xcore/list.h"
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/mem/alloc.h"
@@ -36,7 +36,6 @@
 #include "kernel/xcore/sched.h"
 #include "kernel/xcore/sparse.h"
 #include "kernel/xcore/trap.h"
-#include "kernel/xcore/wait_queue.h"
 #include "kernel/xcore/workqueue.h"
 #include "kernel/xcore/xtask.h"
 #include "utils/macro.h"
@@ -89,12 +88,6 @@ static void virtio_gpu_cmd_callback(void *ctx, uint32_t len) {
   (void)len;
 }
 
-/* Bridge fence wait-queue notifications to the scheduler. */
-static void virtio_gpu_wake_cb(wait_queue_t *wq, unsigned long flags) {
-  (void)flags;
-  wake_wq_target((xtask *)wq->data);
-}
-
 /* Forward declarations */
 static void virtio_gpu_isr(trapframe *tf);
 static int virtio_gpu_send_cmd(struct virtio_gpu_device *vgpu, void *cmd_buf,
@@ -103,18 +96,13 @@ extern void drm_dev_register(void);
 static bool drm_dev_alloc(void);
 extern dev_driver virtio_gpu_driver;
 
-/* BSD-layer KPI for sync_file fd install/lookup (plan2). Declared here as
- * extern — not via kernel/bsd/proc.h — so the driver stays off the bsd include
- * boundary (only devtmpfs/sysfs/poll_types are allowed). drm_fence is opaque to
- * the BSD layer; the pointer is just handed across. */
-int bsd_sync_file_fd_install(xtask *proc, struct drm_fence *fence);
-
 /* plan2 forward declarations: these are defined later in the file but used by
  * the ISR (drm_fence_find/signal) and the EXECBUFFER ioctl (drm_file_current)
  * which precede their definitions. */
 static struct drm_fence *drm_fence_find(uint32_t ctx_id, uint8_t ring_idx,
                                         uint64_t fence_id);
-static void drm_fence_signal(struct drm_fence *fence);
+static void virtio_drm_fence_signal(struct drm_fence *fence, uint32_t ctx_id,
+                                    uint8_t ring_idx, uint64_t fence_id);
 
 /* ===== 2.B: ctrlq initialization ===== */
 
@@ -205,7 +193,8 @@ static void virtio_gpu_isr(trapframe *tf) {
         if (p->hdr.flags & VIRTIO_GPU_FLAG_FENCE) {
           struct drm_fence *f =
               drm_fence_find(p->hdr.ctx_id, p->hdr.ring_idx, p->hdr.fence_id);
-          drm_fence_signal(f);
+          virtio_drm_fence_signal(f, p->hdr.ctx_id, p->hdr.ring_idx,
+                                  p->hdr.fence_id);
           drm_fence_put(f); /* drop the in-flight submission reference */
         }
         if (p->waiter)
@@ -687,178 +676,74 @@ static const struct drm_gem_object_ops drm_virgl_gem_ops = {
 
 /* ===== Fence (plan2) ===== */
 
-/* Find or allocate a fence slot. Returns fence with refcount=1, or NULL if
- * table full. Caller (process context) owns the initial ref. */
-static struct drm_fence *drm_fence_create(uint32_t ctx_id, uint8_t ring_idx,
-                                          uint64_t fence_id) {
+/* Register a common DRM fence in virtio's completion lookup table. */
+static struct drm_fence *
+virtio_drm_fence_create(uint32_t ctx_id, uint8_t ring_idx, uint64_t fence_id) {
+  struct drm_fence *fence = drm_fence_create(false);
+  if (!fence)
+    return NULL;
   uint64_t flags;
   spin_lock_irqsave(&g_drm.fence_lock, &flags);
   for (int i = 0; i < MAX_FENCES; i++) {
-    if (!g_drm.fences[i].ctx_id) {
-      struct drm_fence *f = &g_drm.fences[i];
-      f->ctx_id = ctx_id;
-      f->ring_idx = ring_idx;
-      f->fence_id = fence_id;
-      f->signaled = false;
-      f->objects = NULL;
-      f->object_count = 0;
-      refcount_set(&f->refcount, 1);
-      f->lock = SPINLOCK_INIT;
-      init_wait_queue_head(&f->wq);
+    struct drm_backend_fence_slot *slot = &g_drm.fences[i];
+    if (!slot->fence) {
+      slot->ctx_id = ctx_id;
+      slot->ring_idx = ring_idx;
+      slot->fence_id = fence_id;
+      slot->fence = fence;
       spin_unlock_irqrestore(&g_drm.fence_lock, flags);
-      return f;
+      return fence;
     }
   }
   spin_unlock_irqrestore(&g_drm.fence_lock, flags);
+  drm_fence_put(fence);
   return NULL;
 }
 
+/* Completion consumes the table's in-flight reference. */
 static struct drm_fence *drm_fence_find(uint32_t ctx_id, uint8_t ring_idx,
                                         uint64_t fence_id) {
   uint64_t flags;
   spin_lock_irqsave(&g_drm.fence_lock, &flags);
   for (int i = 0; i < MAX_FENCES; i++) {
-    if (g_drm.fences[i].ctx_id == ctx_id &&
-        g_drm.fences[i].ring_idx == ring_idx &&
-        g_drm.fences[i].fence_id == fence_id) {
+    struct drm_backend_fence_slot *slot = &g_drm.fences[i];
+    if (slot->fence && slot->ctx_id == ctx_id && slot->ring_idx == ring_idx &&
+        slot->fence_id == fence_id) {
+      struct drm_fence *fence = slot->fence;
+      __memset(slot, 0, sizeof(*slot));
       spin_unlock_irqrestore(&g_drm.fence_lock, flags);
-      return &g_drm.fences[i];
+      return fence;
     }
   }
   spin_unlock_irqrestore(&g_drm.fence_lock, flags);
   return NULL;
 }
 
-/* Drop a ref; when refcount hits 0, reclaim the slot. This is also called by
- * the virtio-gpu ISR when an in-flight submission completes, so fence_lock
- * must always be acquired with IRQs disabled. */
-void drm_fence_put(struct drm_fence *fence) {
-  if (!fence)
-    return;
-  /* Reclaim under fence_lock so the table-scanned free check is atomic. */
+static void virtio_drm_fence_remove(struct drm_fence *fence) {
   uint64_t flags;
   spin_lock_irqsave(&g_drm.fence_lock, &flags);
-  if (!refcount_dec_and_test(&fence->refcount)) {
-    spin_unlock_irqrestore(&g_drm.fence_lock, flags);
-    return;
-  }
-  struct drm_gem_object **objects = fence->objects;
-  uint32_t object_count = fence->object_count;
-  fence->objects = NULL;
-  fence->object_count = 0;
-  fence->ctx_id = 0; /* mark slot free */
-  spin_unlock_irqrestore(&g_drm.fence_lock, flags);
-  for (uint32_t i = 0; i < object_count; i++)
-    drm_gem_object_put(objects[i]);
-  kfree(objects);
-}
-
-/* Read-only signaled probe for sync_file poll (BSD file_poll.c). */
-bool drm_fence_is_signaled(struct drm_fence *fence) {
-  if (!fence)
-    return false;
-  uint64_t flags;
-  spin_lock_irqsave(&fence->lock, &flags);
-  bool s = fence->signaled;
-  spin_unlock_irqrestore(&fence->lock, flags);
-  return s;
-}
-
-/* ISR: mark fence signaled and wake waiters. Runs in interrupt context — MUST
- * use irqsave. Does NOT free the fence (refcount may be held by a sync_file
- * fd); only marks signaled. */
-static void drm_fence_signal(struct drm_fence *fence) {
-  if (!fence)
-    return;
-  uint64_t flags;
-  spin_lock_irqsave(&fence->lock, &flags);
-  if (fence->signaled) {
-    spin_unlock_irqrestore(&fence->lock, flags);
-    return;
-  }
-  fence->signaled = true;
-  struct drm_gem_object **objects = fence->objects;
-  uint32_t object_count = fence->object_count;
-  fence->objects = NULL;
-  fence->object_count = 0;
-  spin_unlock_irqrestore(&fence->lock, flags);
-
-  for (uint32_t i = 0; i < object_count; i++)
-    drm_gem_object_put(objects[i]);
-  kfree(objects);
-
-  spin_lock_irqsave(&g_drm.fence_lock, &flags);
-  if (fence->ctx_id > 0 && fence->ctx_id <= MAX_CTX_IDS &&
-      fence->ring_idx < MAX_CTX_RINGS) {
-    uint64_t *completed =
-        &g_drm.completed_fence_ids[fence->ctx_id - 1][fence->ring_idx];
-    if (*completed < fence->fence_id)
-      *completed = fence->fence_id;
-  }
-  spin_unlock_irqrestore(&g_drm.fence_lock, flags);
-  __wake_up(&fence->wq, 0);
-}
-
-/* Block on fence->wq until signaled or timeout_ns elapses. timeout_ns==0 →
- * wait forever. Returns 0 on signal, -ETIME on timeout. Currently unused by
- * the EXECBUFFER path (which polls the sync_file fd); retained as the fence
- * wait primitive for future in-kernel waits (plan2 2A-3 / acceptance #7). */
-static __attribute__((unused)) int drm_fence_wait(struct drm_fence *fence,
-                                                  uint64_t timeout_ns) {
-  if (!fence)
-    return -EINVAL;
-  wait_queue_t wait;
-  wait.func = virtio_gpu_wake_cb; /* reuse: data=current_task, wake_wq_target */
-  wait.data = current_task;
-  wait.exclusive = 0;
-  list_init(&wait.node);
-  add_wait_queue(&fence->wq, &wait);
-
-  uint64_t deadline = (timeout_ns != 0) ? sched_clock() + timeout_ns : 0;
-  int ret = 0;
-  for (;;) {
-    current_task->state = BLOCKED;
-    if (fence->signaled)
-      break;
-    if (timeout_ns != 0 && sched_clock() >= deadline) {
-      ret = -ETIME;
+  for (int i = 0; i < MAX_FENCES; i++) {
+    if (g_drm.fences[i].fence == fence) {
+      __memset(&g_drm.fences[i], 0, sizeof(g_drm.fences[i]));
       break;
     }
-    schedule();
   }
-  // prepare_to_wait: the loop marks BLOCKED at the top. If a concurrent
-  // fence ISR woke us (state=READY + run_node pushed) between marking BLOCKED
-  // and the signaled/reached check, breaking out without schedule() leaves a
-  // dangling run_node — a steal would later ASSERT(state==READY) on a RUNNING
-  // task. Cancel any such spurious wake; RUNNING is unconditional because the
-  // first-iteration break path never ran schedule() (state still BLOCKED).
-  current_task->state = RUNNING;
-  sched_cancel_spurious_wake(current_task);
-  remove_wait_queue(&fence->wq, &wait);
-  return ret;
+  spin_unlock_irqrestore(&g_drm.fence_lock, flags);
 }
 
-/* Install a sync_file fd bound to a fence. Takes a ref on the fence (released
- * when the fd is closed via file_put's switch case for FD_SYNC_FILE). poll(fd)
- * returns POLLIN once fence->signaled. Modeled on eventfd/timerfd fd install.
- *
- * fd-table install is delegated to the BSD KPI bsd_sync_file_fd_install so the
- * driver never touches struct file / fd table layout directly (driver↔bsd
- * include boundary). We still own the fence refcount: take a ref here, hand it
- * to the fd, drop it back if install fails. */
-static int drm_fence_install_sync_file(struct drm_fence *fence, xtask *proc) {
+static void virtio_drm_fence_signal(struct drm_fence *fence, uint32_t ctx_id,
+                                    uint8_t ring_idx, uint64_t fence_id) {
   if (!fence)
-    return -EINVAL;
-  /* Take a ref for the fd while excluding the completion ISR. */
+    return;
   uint64_t flags;
   spin_lock_irqsave(&g_drm.fence_lock, &flags);
-  refcount_inc(&fence->refcount);
+  if (ctx_id > 0 && ctx_id <= MAX_CTX_IDS && ring_idx < MAX_CTX_RINGS) {
+    uint64_t *completed = &g_drm.completed_fence_ids[ctx_id - 1][ring_idx];
+    if (*completed < fence_id)
+      *completed = fence_id;
+  }
   spin_unlock_irqrestore(&g_drm.fence_lock, flags);
-
-  int fd = bsd_sync_file_fd_install(proc, fence);
-  if (fd < 0)
-    drm_fence_put(fence); /* reclaim the ref the fd won't be holding */
-  return fd;
+  drm_fence_signal(fence);
 }
 
 static int drm_alloc_fb_id(void) {
@@ -1261,10 +1146,6 @@ static long drm_ioctl_virtgpu_map(void *arg, struct file *file) {
   return drm_core_gem_mmap_offset(file, map->handle, &map->offset);
 }
 
-/* Forward declaration for the plan2 sync_file fd install helper, used by
- * EXECBUFFER's FENCE_FD_OUT but defined later in the file. */
-static int drm_fence_install_sync_file(struct drm_fence *fence, xtask *proc);
-
 /* Make a host resource visible to a virgl context before SUBMIT_3D refers to
  * it. Mesa supplies the required GEM handles in EXECBUFFER.bo_handles. */
 static int drm_virgl_attach_resource(uint32_t handle, uint32_t ctx_id) {
@@ -1423,11 +1304,11 @@ static long drm_ioctl_virtgpu_3d_wait(void *arg, struct drm_file *df,
       return 0;
     }
     for (int i = 0; i < MAX_FENCES; i++) {
-      if (g_drm.fences[i].ctx_id == ctx_id &&
-          g_drm.fences[i].ring_idx == ring_idx &&
-          g_drm.fences[i].fence_id == fence_id) {
-        fence = &g_drm.fences[i];
-        refcount_inc(&fence->refcount);
+      struct drm_backend_fence_slot *slot = &g_drm.fences[i];
+      if (slot->fence && slot->ctx_id == ctx_id && slot->ring_idx == ring_idx &&
+          slot->fence_id == fence_id) {
+        fence = slot->fence;
+        drm_fence_get(fence);
         break;
       }
     }
@@ -1539,26 +1420,29 @@ static long drm_ioctl_virtgpu_execbuffer(void *arg, struct drm_file *df,
 
   /* Create fence BEFORE submit so the ISR can find it on completion. */
   struct drm_fence *fence =
-      drm_fence_create(df->ctx_id, eb->ring_idx, fence_id);
+      virtio_drm_fence_create(df->ctx_id, eb->ring_idx, fence_id);
   if (!fence) {
     kfree(submit_buf);
     rc = -ENOMEM;
     goto err_free_handles;
   }
 
-  spin_lock(&fence->lock);
-  fence->objects = bo_objects;
-  fence->object_count = eb->num_bo_handles;
-  spin_unlock(&fence->lock);
+  for (uint32_t i = 0; i < eb->num_bo_handles; i++)
+    drm_gem_reservation_set_exclusive(bo_objects[i], fence);
+
+  rc = drm_fence_hold_objects(fence, bo_objects, eb->num_bo_handles);
+  if (rc) {
+    virtio_drm_fence_remove(fence);
+    drm_fence_put(fence);
+    kfree(submit_buf);
+    goto err_free_handles;
+  }
   bo_objects = NULL;
 
   /* Reserve a reference for the async completion before publishing the
    * descriptor. The creator's reference remains live until out-fence setup is
    * finished, even if the host completes immediately on another CPU. */
-  uint64_t fence_flags;
-  spin_lock_irqsave(&g_drm.fence_lock, &fence_flags);
-  refcount_inc(&fence->refcount);
-  spin_unlock_irqrestore(&g_drm.fence_lock, fence_flags);
+  drm_fence_get(fence);
 
   /* Submit async: send_cmd_3d_async copies submit_buf/resp into heap nodes
    * it owns, so freeing submit_buf here is safe. */
@@ -1569,6 +1453,8 @@ static long drm_ioctl_virtgpu_execbuffer(void *arg, struct drm_file *df,
                                     fence_id, eb->ring_idx, df->ctx_id);
   kfree(submit_buf);
   if (rc) {
+    virtio_drm_fence_remove(fence);
+    drm_fence_signal(fence);
     drm_fence_put(fence); /* unused async-completion reference */
     drm_fence_put(fence);
     goto err_free_handles;

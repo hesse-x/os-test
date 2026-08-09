@@ -61,17 +61,11 @@ struct drm_cursor {
 #define MAX_FENCES 256
 #define MAX_CTX_RINGS 64
 
-/* Fence: one per submitted EXECBUFFER with FENCE_FD_OUT (sync_file). */
-struct drm_fence {
-  uint32_t ctx_id; /* 0 = free slot */
+struct drm_backend_fence_slot {
+  uint32_t ctx_id;
   uint8_t ring_idx;
   uint64_t fence_id;
-  bool signaled;
-  refcount_t refcount; /* see 2A-3 / 2D-1: sync_file fd holds a ref */
-  spinlock lock;       /* irqsave: signal runs in ISR, add runs in process */
-  wait_queue_head wq;  /* tasks waiting for signal */
-  struct drm_gem_object **objects;
-  uint32_t object_count;
+  struct drm_fence *fence;
 };
 
 /* virgl legacy (v1) resource: kernel-allocated guest backing attached to a
@@ -201,7 +195,7 @@ struct drm_device {
   spinlock virgl_lock;
 
   /* fence table (plan2). slot free iff ctx_id==0. */
-  struct drm_fence fences[MAX_FENCES];
+  struct drm_backend_fence_slot fences[MAX_FENCES];
   uint64_t completed_fence_ids[MAX_CTX_IDS][MAX_CTX_RINGS];
   spinlock fence_lock; /* protects slot alloc/find across the table */
 

@@ -929,15 +929,22 @@ static int fat32_readpage(struct inode *ip, uint64_t page_index, void *page) {
   if (available > PAGE_SIZE)
     available = PAGE_SIZE;
   uint32_t sectors = (uint32_t)((available + 511) / 512);
+  uint64_t disk_sectors[PAGE_SIZE / 512];
   for (uint32_t i = 0; i < sectors; i++) {
-    uint64_t disk_sector;
-    int rc = fat32_map_file_sector(ip, byte_offset / 512 + i, &disk_sector);
+    int rc = fat32_map_file_sector(ip, byte_offset / 512 + i, &disk_sectors[i]);
     if (rc)
       return rc;
-    rc = partition_read(fat32_part, disk_sector, 1,
-                        (uint8_t *)page + (size_t)i * 512);
+  }
+
+  for (uint32_t i = 0; i < sectors;) {
+    uint32_t run = 1;
+    while (i + run < sectors && disk_sectors[i + run] == disk_sectors[i] + run)
+      run++;
+    int rc = partition_read(fat32_part, disk_sectors[i], run,
+                            (uint8_t *)page + (size_t)i * 512);
     if (rc)
       return rc;
+    i += run;
   }
   return 0;
 }

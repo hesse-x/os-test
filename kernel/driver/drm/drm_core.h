@@ -27,6 +27,7 @@ enum drm_core_state {
 };
 
 struct drm_core_device;
+struct drm_fence;
 struct drm_gem_object;
 
 struct drm_prime_object {
@@ -70,6 +71,10 @@ void drm_gem_object_put(struct drm_gem_object *object);
 void drm_prime_object_put(struct drm_prime_object *object);
 void *drm_gem_object_private(struct drm_gem_object *object);
 uint64_t drm_gem_object_size(const struct drm_gem_object *object);
+void drm_gem_reservation_set_exclusive(struct drm_gem_object *object,
+                                       struct drm_fence *fence);
+struct drm_fence *
+drm_gem_reservation_get_exclusive(struct drm_gem_object *object);
 int drm_core_gem_handle_create(struct file *file, struct drm_gem_object *object,
                                uint32_t preferred_handle, uint32_t *handle);
 struct drm_gem_object *drm_core_gem_object_lookup(struct file *file,
