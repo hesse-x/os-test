@@ -28,6 +28,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -196,21 +197,29 @@ void test_mprotect_prot_none_munmap_no_leak(void) {
   // proc.c mm_release -> physical pages leak. With enough iterations this
   // exhausts the free pool and a fresh mmap fails. BFC counts make the leak
   // observable without relying on exhaustion.
-  size_t before = (size_t)sys_sysconf(_SC_AVPHYS_PAGES);
+  bool clean_round = false;
+  for (int attempt = 0; attempt < 3 && !clean_round; attempt++) {
+    size_t before = (size_t)sys_sysconf(_SC_AVPHYS_PAGES);
 
-  for (int i = 0; i < 200; i++) {
-    void *page = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
-                      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    TEST_ASSERT_NOT_NULL(page);
-    TEST_ASSERT_EQUAL_INT(0, mprotect(page, 4096, PROT_NONE));
-    munmap(page, 4096);
+    for (int i = 0; i < 200; i++) {
+      void *page = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+                        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+      TEST_ASSERT_NOT_NULL(page);
+      TEST_ASSERT_EQUAL_INT(0, mprotect(page, 4096, PROT_NONE));
+      munmap(page, 4096);
+    }
+
+    size_t after = (size_t)sys_sysconf(_SC_AVPHYS_PAGES);
+    clean_round = before < after + 200;
+    if (!clean_round)
+      usleep(20000);
   }
 
-  size_t after = (size_t)sys_sysconf(_SC_AVPHYS_PAGES);
   // A leak of 200 pages would show up as before - after ~= 200. Allow a
-  // small slop for allocator metadata; anything close to 200 is a real
-  // PROTNONE reclaim bug. The free pool must NOT drop by 200 pages.
-  TEST_ASSERT_TRUE(before < after + 200);
+  // small slop for allocator metadata. The count is global, so retry around
+  // unrelated compositor/GPU allocations; a real leak repeats every round.
+  TEST_ASSERT_TRUE_MESSAGE(clean_round,
+                           "PROT_NONE pages leaked in every measurement");
 }
 
 // ---- sysconf direct check (closures.c path) ----

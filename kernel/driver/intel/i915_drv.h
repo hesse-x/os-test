@@ -74,6 +74,8 @@ typedef int (*i915_test_mmio_read_fn)(struct i915_device *i915, uint32_t offset,
                                       uint32_t *value);
 typedef int (*i915_test_mmio_write_fn)(struct i915_device *i915,
                                        uint32_t offset, uint32_t value);
+typedef int (*i915_test_irq_install_fn)(struct i915_device *i915);
+typedef void (*i915_test_irq_uninstall_fn)(struct i915_device *i915);
 #endif
 
 struct i915_device {
@@ -99,6 +101,8 @@ struct i915_device {
 #ifdef TEST
   i915_test_mmio_read_fn test_mmio_read;
   i915_test_mmio_write_fn test_mmio_write;
+  i915_test_irq_install_fn test_irq_install;
+  i915_test_irq_uninstall_fn test_irq_uninstall;
   void *test_private;
 #endif
 };

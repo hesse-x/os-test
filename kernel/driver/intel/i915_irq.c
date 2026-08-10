@@ -83,6 +83,14 @@ int i915_irq_install(struct i915_device *i915) {
   int rc = i915_irq_quiesce(i915);
   if (rc)
     return rc;
+#ifdef TEST
+  if (i915->test_irq_install) {
+    rc = i915->test_irq_install(i915);
+    if (!rc)
+      i915->resources |= I915_RES_IRQ;
+    return rc;
+  }
+#endif
   rc = pci_enable_msi(i915->pdev);
   if (rc)
     return rc;
@@ -99,6 +107,13 @@ void i915_irq_uninstall(struct i915_device *i915) {
   if (!i915 || !(i915->resources & I915_RES_IRQ))
     return;
   (void)i915_irq_quiesce(i915);
+#ifdef TEST
+  if (i915->test_irq_uninstall) {
+    i915->test_irq_uninstall(i915);
+    i915->resources &= ~I915_RES_IRQ;
+    return;
+  }
+#endif
   pci_free_irq(i915->pdev, 0);
   pci_disable_interrupts(i915->pdev);
   i915->resources &= ~I915_RES_IRQ;
