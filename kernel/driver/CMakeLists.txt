@@ -6,26 +6,10 @@ add_kernel_object(driver_obj
     SOURCES init.c registry.c
             ahci.c xhci.c pci.c serial.c blk_dev.c
             virtio_pci.c virtio_ring.c virtio_gpu.c
-            intel/i915_probe.c
+            intel/i915_probe.c intel/i915_uncore.c intel/i915_stolen.c
+            intel/i915_irq.c
             drm/drm_core.c drm/drm_fence.c drm/drm_mock.c
 )
-target_compile_definitions(driver_obj PRIVATE
-    I915_PROBE_STAGE=${I915_PROBE_STAGE_VALUE})
-
-# Production stage images do not carry hardware helpers that their probe path
-# cannot reach. TEST keeps the component mocks available at every stage.
-if(TEST)
-    target_sources(driver_obj PRIVATE
-        intel/i915_uncore.c intel/i915_stolen.c)
-elseif(I915_PROBE_STAGE_VALUE GREATER_EQUAL 2)
-    target_sources(driver_obj PRIVATE
-        intel/i915_uncore.c intel/i915_stolen.c)
-endif()
-if(TEST)
-    target_sources(driver_obj PRIVATE intel/i915_irq.c)
-elseif(I915_PROBE_STAGE_VALUE GREATER_EQUAL 4)
-    target_sources(driver_obj PRIVATE intel/i915_irq.c)
-endif()
 if(TEST)
     target_sources(driver_obj PRIVATE intel/i915_mock.c)
 endif()

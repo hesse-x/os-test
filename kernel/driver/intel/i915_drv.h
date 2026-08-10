@@ -12,20 +12,6 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#define I915_PROBE_STAGE_LOG_ONLY 1
-#define I915_PROBE_STAGE_MMIO_READ 2
-#define I915_PROBE_STAGE_FORCEWAKE 3
-#define I915_PROBE_STAGE_IRQ_SAFE 4
-
-#ifndef I915_PROBE_STAGE
-#error "I915_PROBE_STAGE must be supplied by the build system"
-#endif
-
-#if I915_PROBE_STAGE < I915_PROBE_STAGE_LOG_ONLY ||                            \
-    I915_PROBE_STAGE > I915_PROBE_STAGE_IRQ_SAFE
-#error "invalid I915_PROBE_STAGE"
-#endif
-
 enum i915_probe_state {
   I915_ALLOCATED,
   I915_MATCHED,

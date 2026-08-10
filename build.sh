@@ -12,7 +12,6 @@ CMAKE_EXTRA=""
 OS_COMPILER=clang
 RA_MAX_PAGES=16
 PERF_TEST_NAME=""
-I915_PROBE_STAGE=log-only
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -59,20 +58,6 @@ while [[ $# -gt 0 ]]; do
             OS_COMPILER=clang
             shift
             ;;
-        --i915-stage)
-            if [[ $# -lt 2 ]]; then
-                echo "ERROR: --i915-stage requires log-only, mmio-read, forcewake, or irq-safe" >&2
-                exit 1
-            fi
-            case "$2" in
-                log-only|mmio-read|forcewake|irq-safe) I915_PROBE_STAGE="$2" ;;
-                *)
-                    echo "ERROR: --i915-stage requires log-only, mmio-read, forcewake, or irq-safe" >&2
-                    exit 1
-                    ;;
-            esac
-            shift 2
-            ;;
         --ra-pages)
             if [[ $# -lt 2 ]]; then
                 echo "ERROR: --ra-pages requires off, 4, 8, or 16" >&2
@@ -89,7 +74,7 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         *)
-            echo "Usage: $0 [-d] [--test] [--sanitizer] [--perf[=test_name]] [--ra-pages off|4|8|16] [--gcc] [--clang] [--i915-stage log-only|mmio-read|forcewake|irq-safe]"
+            echo "Usage: $0 [-d] [--test] [--sanitizer] [--perf[=test_name]] [--ra-pages off|4|8|16] [--gcc] [--clang]"
             exit 1
             ;;
     esac
@@ -117,7 +102,6 @@ cmake -GNinja \
       -DCMAKE_BUILD_TYPE=$BUILD_TYPE \
       -DOS_COMPILER=$OS_COMPILER \
       -DXOS_RA_MAX_PAGES=$RA_MAX_PAGES \
-      -DI915_PROBE_STAGE=$I915_PROBE_STAGE \
       $CMAKE_EXTRA \
       ..
 ninja

@@ -59,11 +59,9 @@ int i915_mmio_read64(struct i915_device *i915, uint32_t offset,
   return rc;
 }
 
-#if defined(TEST) || I915_PROBE_STAGE >= I915_PROBE_STAGE_FORCEWAKE
 static bool i915_write_allowed(uint32_t offset, enum i915_write_reason reason) {
   if (reason == I915_WRITE_FORCEWAKE)
     return offset == I915_FORCEWAKE_REQ_GT;
-#if defined(TEST) || I915_PROBE_STAGE >= I915_PROBE_STAGE_IRQ_SAFE
   if (reason != I915_WRITE_IRQ_CONTROL)
     return false;
   return offset == I915_GEN11_GFX_MSTR_IRQ ||
@@ -74,9 +72,6 @@ static bool i915_write_allowed(uint32_t offset, enum i915_write_reason reason) {
          offset == I915_GEN11_CRYPTO_RSVD_INTR_ENABLE ||
          offset == I915_GEN11_GUNIT_CSME_INTR_ENABLE ||
          offset == I915_GEN12_CCS_RSVD_INTR_ENABLE;
-#else
-  return false;
-#endif
 }
 
 int i915_mmio_write32_allowed(struct i915_device *i915, uint32_t offset,
@@ -96,14 +91,12 @@ int i915_mmio_write32_allowed(struct i915_device *i915, uint32_t offset,
   __asm__ volatile("" ::: "memory");
   return 0;
 }
-#endif
 
 int i915_posting_read32(struct i915_device *i915, uint32_t offset,
                         uint32_t *value) {
   return i915_mmio_read32(i915, offset, value);
 }
 
-#if defined(TEST) || I915_PROBE_STAGE >= I915_PROBE_STAGE_FORCEWAKE
 static int i915_wait_forcewake(struct i915_device *i915, bool asserted) {
   uint64_t budget =
       tsc_freq ? (tsc_freq / 1000000u) * I915_FORCEWAKE_TIMEOUT_US : 1000000u;
@@ -164,4 +157,3 @@ void i915_forcewake_put(struct i915_device *i915, uint32_t domains) {
   }
   mutex_unlock(&i915->uncore_mutex);
 }
-#endif

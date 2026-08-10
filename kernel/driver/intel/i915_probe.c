@@ -59,7 +59,6 @@ struct i915_probe_test_backend {
 
 static struct i915_probe_test_backend i915_probe_test;
 
-#if I915_PROBE_STAGE >= I915_PROBE_STAGE_MMIO_READ
 static int i915_probe_test_mmio_read(struct i915_device *i915, uint32_t offset,
                                      uint32_t *value) {
   struct i915_probe_test_backend *test = i915->test_private;
@@ -72,9 +71,7 @@ static int i915_probe_test_mmio_read(struct i915_device *i915, uint32_t offset,
     *value = 0;
   return 0;
 }
-#endif
 
-#if I915_PROBE_STAGE >= I915_PROBE_STAGE_FORCEWAKE
 static int i915_probe_test_mmio_write(struct i915_device *i915, uint32_t offset,
                                       uint32_t value) {
   struct i915_probe_test_backend *test = i915->test_private;
@@ -86,9 +83,7 @@ static int i915_probe_test_mmio_write(struct i915_device *i915, uint32_t offset,
   }
   return 0;
 }
-#endif
 
-#if I915_PROBE_STAGE >= I915_PROBE_STAGE_IRQ_SAFE
 static int i915_probe_test_irq_install(struct i915_device *i915) {
   struct i915_probe_test_backend *test = i915->test_private;
   BUG_ON(test->irq_live != 0);
@@ -102,7 +97,6 @@ static void i915_probe_test_irq_uninstall(struct i915_device *i915) {
   test->irq_live--;
 }
 #endif
-#endif
 
 static bool i915_device_supported(const pci_device *pdev) {
   return pdev && pdev->vendor_id == I915_VENDOR_ID &&
@@ -111,19 +105,6 @@ static bool i915_device_supported(const pci_device *pdev) {
          pdev->class_code == PCI_CLASS_DISPLAY;
 }
 
-static const char *i915_probe_stage_name(void) {
-#if I915_PROBE_STAGE == I915_PROBE_STAGE_LOG_ONLY
-  return "log-only";
-#elif I915_PROBE_STAGE == I915_PROBE_STAGE_MMIO_READ
-  return "mmio-read";
-#elif I915_PROBE_STAGE == I915_PROBE_STAGE_FORCEWAKE
-  return "forcewake";
-#else
-  return "irq-safe";
-#endif
-}
-
-#if I915_PROBE_STAGE >= I915_PROBE_STAGE_MMIO_READ
 static int i915_command_acquire(struct i915_device *i915) {
 #ifdef TEST
   if (i915_probe_test.active) {
@@ -168,13 +149,9 @@ static void __iomem *i915_map_bar0(struct i915_device *i915) {
     BUG_ON(i915_probe_test.map_live != 0);
     i915_probe_test.map_live++;
     i915->test_mmio_read = i915_probe_test_mmio_read;
-#if I915_PROBE_STAGE >= I915_PROBE_STAGE_FORCEWAKE
     i915->test_mmio_write = i915_probe_test_mmio_write;
-#endif
-#if I915_PROBE_STAGE >= I915_PROBE_STAGE_IRQ_SAFE
     i915->test_irq_install = i915_probe_test_irq_install;
     i915->test_irq_uninstall = i915_probe_test_irq_uninstall;
-#endif
     i915->test_private = &i915_probe_test;
     return (void __iomem *)&i915_probe_test;
   }
@@ -210,22 +187,16 @@ static int i915_parse_platform(struct i915_device *i915) {
 #endif
   return i915_stolen_probe(i915, &i915->memory);
 }
-#endif
 
 static void i915_cleanup(struct i915_device *i915, bool failed) {
   if (!i915)
     return;
   i915->quiescing = true;
   i915->state = I915_QUIESCING;
-#if I915_PROBE_STAGE >= I915_PROBE_STAGE_IRQ_SAFE
   i915_irq_uninstall(i915);
-#endif
-#if I915_PROBE_STAGE >= I915_PROBE_STAGE_FORCEWAKE
   while (i915->forcewake_ref)
     i915_forcewake_put(i915, I915_FORCEWAKE_DOMAIN_GT);
   i915->resources &= ~I915_RES_FORCEWAKE;
-#endif
-#if I915_PROBE_STAGE >= I915_PROBE_STAGE_MMIO_READ
   if (i915->resources & I915_RES_BAR0) {
     i915_unmap_bar0(i915);
     i915->regs = NULL;
@@ -240,7 +211,6 @@ static void i915_cleanup(struct i915_device *i915, bool failed) {
     }
     i915->resources &= ~I915_RES_COMMAND;
   }
-#endif
   i915->state = failed ? I915_FAILED : I915_DEAD;
   pci_set_driver_private(i915->pdev, NULL);
   i915->resources &= ~I915_RES_PRIVATE;
@@ -307,7 +277,6 @@ static int i915_probe_device(pci_device *pdev, const struct pci_device_id *id) {
   pci_set_driver_private(pdev, i915);
   i915->state = I915_MATCHED;
 
-#if I915_PROBE_STAGE >= I915_PROBE_STAGE_MMIO_READ
   int rc = i915_command_acquire(i915);
   i915->resources |= I915_RES_COMMAND;
 #ifdef TEST
@@ -351,9 +320,7 @@ static int i915_probe_device(pci_device *pdev, const struct pci_device_id *id) {
   if (rc)
     goto fail;
   i915->state = I915_PLATFORM_PARSED;
-#endif
 
-#if I915_PROBE_STAGE >= I915_PROBE_STAGE_FORCEWAKE
   rc = i915_forcewake_get(i915, I915_FORCEWAKE_DOMAIN_GT);
   if (rc)
     goto fail;
@@ -371,9 +338,7 @@ static int i915_probe_device(pci_device *pdev, const struct pci_device_id *id) {
     goto fail;
   }
   i915->state = I915_FORCEWAKE_READY;
-#endif
 
-#if I915_PROBE_STAGE >= I915_PROBE_STAGE_IRQ_SAFE
   rc = i915_irq_install(i915);
   if (rc)
     goto fail;
@@ -384,60 +349,44 @@ static int i915_probe_device(pci_device *pdev, const struct pci_device_id *id) {
     goto fail;
   }
 #endif
-#endif
   i915->state = I915_PROBED;
 #ifdef TEST
-  if (!i915_probe_test.active)
+  if (!i915_probe_test.active) {
 #endif
-#if I915_PROBE_STAGE == I915_PROBE_STAGE_LOG_ONLY
     printk(LOG_INFO,
-           "i915[0000:%02x:%02x.%x]: probe-only ready stage=%s "
-           "id=%04x:%04x rev=%02x subsystem=%04x:%04x "
-           "bar0=[0x%lx,+0x%lx] bar2=[0x%lx,+0x%lx]\n",
-           pdev->bus, pdev->dev, pdev->func, i915_probe_stage_name(),
-           pdev->vendor_id, pdev->device_id, pdev->revision_id,
-           pdev->subsystem_vendor_id, pdev->subsystem_device_id,
-           pdev->bar[0].phys, pdev->bar[0].size, pdev->bar[2].phys,
-           pdev->bar[2].size);
-#else
-  printk(LOG_INFO,
-         "i915[0000:%02x:%02x.%x]: probe-only ready stage=%s "
-         "id=%04x:%04x rev=%02x "
-         "subsystem=%04x:%04x cmd=%04x bar0=[0x%lx,+0x%lx] "
-         "stolen=[0x%lx,+0x%lx] gms=0x%x ggms=%u ggtt=0x%lx "
-         "aperture=0x%lx\n",
-         pdev->bus, pdev->dev, pdev->func, i915_probe_stage_name(),
-         pdev->vendor_id, pdev->device_id, pdev->revision_id,
-         pdev->subsystem_vendor_id, pdev->subsystem_device_id,
-         i915->original_command, pdev->bar[0].phys, pdev->bar[0].size,
-         i915->memory.stolen_base, i915->memory.stolen_size, i915->memory.gms,
-         i915->memory.ggms, i915->memory.ggtt_size, i915->memory.aperture_size);
-#if I915_PROBE_STAGE >= I915_PROBE_STAGE_FORCEWAKE
-  printk(LOG_INFO,
-         "i915[0000:%02x:%02x.%x]: forcewake get/put complete ack=0x%x\n",
-         pdev->bus, pdev->dev, pdev->func, i915->last_forcewake_ack);
-#endif
-#if I915_PROBE_STAGE >= I915_PROBE_STAGE_IRQ_SAFE
-  printk(LOG_INFO,
-         "i915[0000:%02x:%02x.%x]: IRQ-safe installed master/sources masked "
-         "msi_vec=%d\n",
-         pdev->bus, pdev->dev, pdev->func, pdev->msix_vector_base);
-#endif
+           "i915[0000:%02x:%02x.%x]: full probe-only ready "
+           "id=%04x:%04x rev=%02x "
+           "subsystem=%04x:%04x cmd=%04x bar0=[0x%lx,+0x%lx] "
+           "stolen=[0x%lx,+0x%lx] gms=0x%x ggms=%u ggtt=0x%lx "
+           "aperture=0x%lx\n",
+           pdev->bus, pdev->dev, pdev->func, pdev->vendor_id, pdev->device_id,
+           pdev->revision_id, pdev->subsystem_vendor_id,
+           pdev->subsystem_device_id, i915->original_command, pdev->bar[0].phys,
+           pdev->bar[0].size, i915->memory.stolen_base,
+           i915->memory.stolen_size, i915->memory.gms, i915->memory.ggms,
+           i915->memory.ggtt_size, i915->memory.aperture_size);
+    printk(LOG_INFO,
+           "i915[0000:%02x:%02x.%x]: forcewake get/put complete ack=0x%x\n",
+           pdev->bus, pdev->dev, pdev->func, i915->last_forcewake_ack);
+    printk(LOG_INFO,
+           "i915[0000:%02x:%02x.%x]: IRQ-safe installed "
+           "master/sources masked msi_vec=%d\n",
+           pdev->bus, pdev->dev, pdev->func, pdev->msix_vector_base);
+#ifdef TEST
+  }
 #endif
   return 0;
 
-#if I915_PROBE_STAGE >= I915_PROBE_STAGE_MMIO_READ
 fail:
 #ifdef TEST
   if (!i915_probe_test.active)
 #endif
     printk(
         LOG_ERROR,
-        "i915[0000:%02x:%02x.%x]: probe failed stage=%d rc=%d resources=0x%x\n",
+        "i915[0000:%02x:%02x.%x]: probe failed state=%d rc=%d resources=0x%x\n",
         pdev->bus, pdev->dev, pdev->func, i915->state, rc, i915->resources);
   i915_cleanup(i915, true);
   return rc;
-#endif
 }
 
 static void i915_probe_remove(pci_device *pdev) {
@@ -464,24 +413,15 @@ static const struct pci_driver i915_driver = {
 };
 
 int i915_probe_register(void) {
-  printk(LOG_INFO, "i915 probe-only: build stage=%s (%d)\n",
-         i915_probe_stage_name(), I915_PROBE_STAGE);
+  printk(LOG_INFO, "i915 probe-only: full M2 path enabled\n");
   return pci_register_driver(&i915_driver);
 }
 
 #ifdef TEST
 static void i915_probe_fault_matrix_test(void) {
   const enum i915_test_fault_stage faults[] = {
-      I915_TEST_FAULT_ALLOC,
-#if I915_PROBE_STAGE >= I915_PROBE_STAGE_MMIO_READ
-      I915_TEST_FAULT_COMMAND,   I915_TEST_FAULT_MAP, I915_TEST_FAULT_PARSE,
-#endif
-#if I915_PROBE_STAGE >= I915_PROBE_STAGE_FORCEWAKE
-      I915_TEST_FAULT_FORCEWAKE,
-#endif
-#if I915_PROBE_STAGE >= I915_PROBE_STAGE_IRQ_SAFE
-      I915_TEST_FAULT_IRQ,
-#endif
+      I915_TEST_FAULT_ALLOC, I915_TEST_FAULT_COMMAND,   I915_TEST_FAULT_MAP,
+      I915_TEST_FAULT_PARSE, I915_TEST_FAULT_FORCEWAKE, I915_TEST_FAULT_IRQ,
   };
   pci_device fake = {
       .vendor_id = I915_VENDOR_ID,
@@ -512,16 +452,9 @@ static void i915_probe_fault_matrix_test(void) {
     i915_probe_test.fault = I915_TEST_FAULT_NONE;
     BUG_ON(i915_probe_device(&fake, &i915_ids[0]));
     struct i915_device *i915 = pci_get_driver_private(&fake);
-    uint32_t expected_resources = I915_RES_PRIVATE;
-#if I915_PROBE_STAGE >= I915_PROBE_STAGE_MMIO_READ
-    expected_resources |= I915_RES_COMMAND | I915_RES_BAR0;
-#endif
-#if I915_PROBE_STAGE >= I915_PROBE_STAGE_FORCEWAKE
-    expected_resources |= I915_RES_FORCEWAKE;
-#endif
-#if I915_PROBE_STAGE >= I915_PROBE_STAGE_IRQ_SAFE
-    expected_resources |= I915_RES_IRQ;
-#endif
+    uint32_t expected_resources = I915_RES_PRIVATE | I915_RES_COMMAND |
+                                  I915_RES_BAR0 | I915_RES_FORCEWAKE |
+                                  I915_RES_IRQ;
     BUG_ON(!i915 || i915->state != I915_PROBED || i915->forcewake_ref ||
            i915->degraded || i915->resources != expected_resources);
     i915_probe_remove(&fake);
@@ -539,7 +472,7 @@ static void i915_probe_fault_matrix_test(void) {
          after.bound_devices != baseline.bound_devices);
 }
 
-static void i915_probe_stage_test(void) {
+static void i915_probe_full_path_test(void) {
   pci_device fake = {
       .vendor_id = I915_VENDOR_ID,
       .device_id = I915_DEVICE_ID,
@@ -556,23 +489,9 @@ static void i915_probe_stage_test(void) {
   i915_probe_test = (struct i915_probe_test_backend){.active = true};
   BUG_ON(i915_probe_device(&fake, &i915_ids[0]));
 
-#if I915_PROBE_STAGE == I915_PROBE_STAGE_LOG_ONLY
-  BUG_ON(i915_probe_test.command_live || i915_probe_test.map_live ||
-         i915_probe_test.mmio_reads || i915_probe_test.mmio_writes ||
-         i915_probe_test.irq_live);
-#elif I915_PROBE_STAGE == I915_PROBE_STAGE_MMIO_READ
-  BUG_ON(i915_probe_test.command_live != 1 || i915_probe_test.map_live != 1 ||
-         i915_probe_test.mmio_reads != 2 || i915_probe_test.mmio_writes ||
-         i915_probe_test.irq_live);
-#elif I915_PROBE_STAGE == I915_PROBE_STAGE_FORCEWAKE
-  BUG_ON(i915_probe_test.command_live != 1 || i915_probe_test.map_live != 1 ||
-         i915_probe_test.mmio_reads < 4 || i915_probe_test.mmio_writes != 2 ||
-         i915_probe_test.irq_live || i915_probe_test.forcewake_ack);
-#else
   BUG_ON(i915_probe_test.command_live != 1 || i915_probe_test.map_live != 1 ||
          i915_probe_test.mmio_reads < 12 || i915_probe_test.mmio_writes < 10 ||
          i915_probe_test.irq_live != 1 || i915_probe_test.forcewake_ack);
-#endif
 
   i915_probe_remove(&fake);
   BUG_ON(pci_get_driver_private(&fake) || i915_probe_test.private_live ||
@@ -613,12 +532,9 @@ void i915_probe_selftest(void) {
   printk(LOG_INFO,
          "i915 probe-only selftest: PASS (GMS, match, MMIO bounds)\n");
   i915_mock_selftest();
-  i915_probe_stage_test();
+  i915_probe_full_path_test();
   i915_probe_fault_matrix_test();
-  printk(LOG_INFO, "i915 probe stage selftest: PASS stage=%s\n",
-         i915_probe_stage_name());
-  printk(LOG_INFO,
-         "i915 probe fault matrix: PASS stage=%s (compiled stages, re-probe)\n",
-         i915_probe_stage_name());
+  printk(LOG_INFO, "i915 probe full-path selftest: PASS\n");
+  printk(LOG_INFO, "i915 probe fault matrix: PASS (full path, re-probe)\n");
 #endif
 }
