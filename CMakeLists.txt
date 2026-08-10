@@ -11,6 +11,23 @@ set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
 
 project(myos C CXX ASM)
 
+set(I915_PROBE_STAGE "log-only" CACHE STRING
+    "Intel probe-only hardware stage (log-only, mmio-read, forcewake, irq-safe)")
+set_property(CACHE I915_PROBE_STAGE PROPERTY STRINGS
+             log-only mmio-read forcewake irq-safe)
+if(I915_PROBE_STAGE STREQUAL "log-only")
+    set(I915_PROBE_STAGE_VALUE 1)
+elseif(I915_PROBE_STAGE STREQUAL "mmio-read")
+    set(I915_PROBE_STAGE_VALUE 2)
+elseif(I915_PROBE_STAGE STREQUAL "forcewake")
+    set(I915_PROBE_STAGE_VALUE 3)
+elseif(I915_PROBE_STAGE STREQUAL "irq-safe")
+    set(I915_PROBE_STAGE_VALUE 4)
+else()
+    message(FATAL_ERROR
+        "I915_PROBE_STAGE must be one of: log-only, mmio-read, forcewake, irq-safe")
+endif()
+
 set(PERF_TEST_NAME "" CACHE STRING "Run only this test_runner test under PERF")
 if(PERF_TEST_NAME AND NOT PERF)
     message(FATAL_ERROR "PERF_TEST_NAME requires PERF=1")
