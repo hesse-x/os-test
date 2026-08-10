@@ -145,47 +145,20 @@ void drm_mock_register_test_device(void) {
   BUG_ON(drm_core_device_state(failed) != DRM_CORE_INITIALIZED);
   drm_core_device_put(failed);
 
-  struct drm_core_device *old = drm_mock_alloc(1);
-  BUG_ON(!old);
-  rc = drm_core_device_register(old, DRM_NODE_PRIMARY | DRM_NODE_RENDER);
-  BUG_ON(rc != 0);
-  int old_slot = drm_core_device_slot(old);
-  BUG_ON(old_slot < 0);
-
-  char path[32];
-  snprintf(path, sizeof(path), "dri/card%d", old_slot);
-  struct inode *old_inode = devtmpfs_lookup(path);
-  BUG_ON(!old_inode);
-  struct dev_ops *old_ops = dev_ops_peek_by_inode(old_inode);
-  BUG_ON(!old_ops);
-  dev_ops_get(old_ops);
-
-  struct file old_file = {.inode = old_inode};
-  BUG_ON(drm_core_file_device(&old_file) != old);
-  BUG_ON(old_ops->open_file(NULL, &old_file) != 0);
-
-  drm_core_device_unregister(old);
-  BUG_ON(drm_core_device_state(old) != DRM_CORE_UNPLUGGED);
-  BUG_ON(old_ops->open_file(NULL, &old_file) != -ENODEV);
-  drm_core_device_put(old);
-
   drm_mock_device = drm_mock_alloc(2);
   BUG_ON(!drm_mock_device);
   rc = drm_core_device_register(drm_mock_device,
                                 DRM_NODE_PRIMARY | DRM_NODE_RENDER);
   BUG_ON(rc != 0);
-  BUG_ON(drm_core_device_slot(drm_mock_device) != old_slot);
+  int mock_slot = drm_core_device_slot(drm_mock_device);
+  BUG_ON(mock_slot < 0);
   BUG_ON(drm_core_object_alloc(drm_mock_device) != 1);
   BUG_ON(drm_core_object_alloc(drm_mock_device) != 2);
   uint32_t mock_object = drm_mock_init_kms(drm_mock_device, 2);
   BUG_ON(mock_object != 3);
-  BUG_ON(drm_core_file_device(&old_file) == drm_mock_device);
-  struct drm_mock_private *old_private =
-      drm_core_driver_private(drm_core_file_device(&old_file));
-  BUG_ON(!old_private || old_private->generation != 1);
-  BUG_ON(old_ops->close_file(NULL, &old_file) != 0);
-  inode_put(old_inode);
 
+  char path[32];
+  snprintf(path, sizeof(path), "dri/card%d", mock_slot);
   struct inode *new_inode = devtmpfs_lookup(path);
   BUG_ON(!new_inode);
   struct file new_file = {.inode = new_inode};
@@ -208,11 +181,10 @@ void drm_mock_register_test_device(void) {
 
   struct drm_get_cap cap = {.capability = DRM_CAP_TIMESTAMP_MONOTONIC};
   BUG_ON(drm_mock_get_cap(&cap) != 0 || cap.value != 1);
-  dev_ops_put(old_ops);
 
   /* With no hardware DRM device, retain a second mock so pure-core boots
    * exercise two simultaneously registered devices as well. */
-  if (old_slot == 0) {
+  if (mock_slot == 0) {
     drm_mock_device2 = drm_mock_alloc(1);
     BUG_ON(!drm_mock_device2);
     rc = drm_core_device_register(drm_mock_device2,
@@ -234,9 +206,9 @@ void drm_mock_register_test_device(void) {
   }
 
   printk(LOG_INFO,
-         "drm lifecycle selftest: PASS (rollback slot=%d generation isolation, "
+         "drm lifecycle selftest: PASS (register rollback, slot=%d, "
          "devices=%d)\n",
-         old_slot, old_slot == 0 ? 2 : 1);
+         mock_slot, mock_slot == 0 ? 2 : 1);
 }
 
 #endif

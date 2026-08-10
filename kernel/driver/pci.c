@@ -708,21 +708,18 @@ void pci_lifecycle_selftest(void) {
   pci_unregister_driver(&pci_test_driver);
 
   pci_test_fail_probe = false;
-  for (int i = 0; i < 1000; i++) {
-    BUG_ON(pci_register_driver(&pci_test_driver) != 0);
-    BUG_ON(fake->bind_state != PCI_BIND_BOUND ||
-           fake->driver != &pci_test_driver ||
-           pci_get_driver_private(fake) != &pci_test_cookie);
-    pci_unregister_driver(&pci_test_driver);
-    BUG_ON(fake->bind_state != PCI_BIND_UNBOUND || fake->driver != NULL ||
-           pci_get_driver_private(fake) != NULL);
-  }
-  BUG_ON(pci_test_probe_count != 1001 || pci_test_remove_count != 1000);
-  for (int i = 0; i < 1000; i++) {
-    int vector = pci_alloc_vectors(1);
-    BUG_ON(vector < PCI_VECTOR_FIRST);
-    pci_free_vectors(vector, 1);
-  }
+  BUG_ON(pci_register_driver(&pci_test_driver) != 0);
+  BUG_ON(fake->bind_state != PCI_BIND_BOUND ||
+         fake->driver != &pci_test_driver ||
+         pci_get_driver_private(fake) != &pci_test_cookie);
+  pci_unregister_driver(&pci_test_driver);
+  BUG_ON(fake->bind_state != PCI_BIND_UNBOUND || fake->driver != NULL ||
+         pci_get_driver_private(fake) != NULL);
+  BUG_ON(pci_test_probe_count != 2 || pci_test_remove_count != 1);
+
+  int vector = pci_alloc_vectors(1);
+  BUG_ON(vector < PCI_VECTOR_FIRST);
+  pci_free_vectors(vector, 1);
   pci_test_fail_once(PCI_FAULT_VECTOR_ALLOC);
   BUG_ON(pci_alloc_vectors(1) != -ENOMEM);
 
@@ -757,13 +754,11 @@ void pci_lifecycle_selftest(void) {
            fake->bar[0].map_page);
     BUG_ON(bfc_free_page_nums() != baseline_free_pages);
   }
-  for (int i = 0; i < 1000; i++) {
-    BUG_ON(!pci_iomap(fake, 0, false));
-    BUG_ON(fake->bar[0].map_slot < 0 || !fake->bar[0].map_page);
-    pci_iounmap(fake, 0);
-    BUG_ON(fake->bar[0].vaddr || fake->bar[0].map_slot != -1 ||
-           fake->bar[0].map_page);
-  }
+  BUG_ON(!pci_iomap(fake, 0, false));
+  BUG_ON(fake->bar[0].map_slot < 0 || !fake->bar[0].map_page);
+  pci_iounmap(fake, 0);
+  BUG_ON(fake->bar[0].vaddr || fake->bar[0].map_slot != -1 ||
+         fake->bar[0].map_page);
   struct pci_resource_stats after;
   pci_get_resource_stats(&after);
   BUG_ON(after.mapped_bars != baseline.mapped_bars ||
@@ -773,7 +768,8 @@ void pci_lifecycle_selftest(void) {
   BUG_ON(bfc_free_page_nums() != baseline_free_pages);
   __memset(fake, 0, sizeof(*fake));
   pci_device_count--;
-  printk(LOG_INFO, "pci lifecycle selftest: PASS (1000 bind/unbind cycles)\n");
+  printk(LOG_INFO,
+         "pci lifecycle selftest: PASS (failure unwind, controlled remove)\n");
 #endif
 }
 

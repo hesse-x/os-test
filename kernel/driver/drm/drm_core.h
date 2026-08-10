@@ -46,6 +46,7 @@ struct drm_core_config {
   const struct dev_ops *render_ops;
   void *driver_private;
   void (*master_drop)(void *driver_private);
+  void (*driver_release)(void *driver_private);
 };
 
 void drm_core_init(void);

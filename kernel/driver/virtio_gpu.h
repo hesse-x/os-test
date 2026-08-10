@@ -318,8 +318,8 @@ struct virtio_gpu_device {
 };
 
 /* ===== API ===== */
-/* Initialize virtio-gpu device: transport + ctrlq + MSI-X + ISR. */
-void virtio_gpu_init(void);
+/* Register the PCI probe/remove driver. */
+int virtio_gpu_register_driver(void);
 
 /* Periodic driver tick used to deliver paced DRM page-flip events. */
 void virtio_gpu_poll(void);
@@ -341,7 +341,5 @@ int virtio_gpu_resource_unref(uint32_t resource_id);
  * ctrl_hdr-bearing command + generic hdr response. */
 int virtio_gpu_send_cmd_3d(struct virtio_gpu_device *vgpu, void *cmd_buf,
                            size_t cmd_len, void *resp_buf, size_t resp_len);
-
-extern struct virtio_gpu_device g_virtio_gpu;
 
 #endif /* KERNEL_DRIVER_VIRTIO_GPU_H */

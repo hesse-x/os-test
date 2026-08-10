@@ -12,6 +12,8 @@
 #include "kernel/driver/virtio_pci.h"
 #include "kernel/xcore/log.h"
 
+#include <xos/errno.h>
+
 /* Read a virtio_pci_cap from PCI config space cap chain.
    Returns true if found, fills cap struct. */
 static bool virtio_pci_find_cap(struct pci_device *pdev, uint8_t cfg_type,
@@ -57,7 +59,9 @@ static void __iomem *virtio_pci_cap_addr(struct pci_device *pdev,
   if (cap->bar >= 6)
     return NULL;
   void __iomem *bar_vaddr = pdev->bar[cap->bar].vaddr;
-  if (!bar_vaddr)
+  uint64_t bar_size = pdev->bar[cap->bar].size;
+  if (!bar_vaddr || cap->offset > bar_size ||
+      cap->length > bar_size - cap->offset)
     return NULL;
   return (void __iomem *)((uint8_t __iomem *)bar_vaddr + cap->offset);
 }
@@ -67,24 +71,25 @@ int virtio_pci_init(struct virtio_pci_dev *vdev, struct pci_device *pdev) {
   vdev->pdev = pdev;
 
   /* Enable device (maps all BARs) */
-  if (pci_enable_device(pdev) < 0) {
-    printk(LOG_ERROR, "virtio_pci: pci_enable_device failed\n");
-    return -1;
+  int rc = pci_enable_device(pdev);
+  if (rc < 0) {
+    printk(LOG_ERROR, "virtio_pci: pci_enable_device failed: %d\n", rc);
+    return rc;
   }
 
   /* Find and map capabilities */
   struct virtio_pci_cap cap_common, cap_notify, cap_isr, cap_dev;
   if (!virtio_pci_find_cap(pdev, VIRTIO_PCI_CAP_COMMON_CFG, &cap_common)) {
     printk(LOG_ERROR, "virtio_pci: common_cfg cap not found\n");
-    return -1;
+    return -ENODEV;
   }
   if (!virtio_pci_find_cap(pdev, VIRTIO_PCI_CAP_NOTIFY_CFG, &cap_notify)) {
     printk(LOG_ERROR, "virtio_pci: notify cap not found\n");
-    return -1;
+    return -ENODEV;
   }
   if (!virtio_pci_find_cap(pdev, VIRTIO_PCI_CAP_ISR_CFG, &cap_isr)) {
     printk(LOG_ERROR, "virtio_pci: isr cap not found\n");
-    return -1;
+    return -ENODEV;
   }
   /* device_cfg is optional for some devices but required for virtio-gpu */
   bool has_dev_cfg =
@@ -124,7 +129,7 @@ int virtio_pci_init(struct virtio_pci_dev *vdev, struct pci_device *pdev) {
 
   if (!vdev->common || !vdev->notify_base || !vdev->isr) {
     printk(LOG_ERROR, "virtio_pci: failed to map capabilities\n");
-    return -1;
+    return -EFAULT;
   }
 
   printk(LOG_INFO,
@@ -200,7 +205,7 @@ int virtio_pci_negotiate_features(struct virtio_pci_dev *vdev, uint64_t want) {
   if (!(status & VIRTIO_STATUS_FEATURES_OK)) {
     printk(LOG_ERROR, "virtio_pci: device rejected features 0x%llx\n",
            (unsigned long long)driver);
-    return -1;
+    return -EIO;
   }
   vdev->features = driver;
   printk(LOG_INFO, "virtio_pci: negotiated features 0x%llx\n",

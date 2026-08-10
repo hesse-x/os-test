@@ -22,7 +22,6 @@
 // Driver definitions (in respective .c files)
 extern dev_driver ahci_driver;
 extern dev_driver xhci_driver;
-extern dev_driver virtio_gpu_driver;
 extern dev_driver serial_driver;
 
 static void driver_timer_poll(void) {
@@ -40,7 +39,9 @@ void driver_init(void) {
   // Register all built-in drivers
   driver_register(&ahci_driver);
   driver_register(&xhci_driver);
-  driver_register(&virtio_gpu_driver);
+  if (virtio_gpu_register_driver() != 0)
+    printk(LOG_ERROR,
+           "driver_init: virtio-gpu PCI driver registration failed\n");
   driver_register(&serial_driver);
 
   // PCI class/vendor auto-match: calls init() for matched drivers

@@ -136,6 +136,7 @@ struct drm_core_device {
   const struct dev_ops *render_template;
   void *driver_private;
   void (*master_drop)(void *driver_private);
+  void (*driver_release)(void *driver_private);
   mutex file_mutex;
   list_node files;
   struct drm_core_file *master;
@@ -215,6 +216,8 @@ void drm_core_device_put(struct drm_core_device *dev) {
   for (size_t i = 0; i < DRM_CORE_MAX_BLOBS; i++)
     if (dev->blobs[i].data)
       kfree(dev->blobs[i].data);
+  if (dev->driver_release)
+    dev->driver_release(dev->driver_private);
   kfree(dev);
 }
 
@@ -1260,6 +1263,7 @@ drm_core_device_alloc(const struct drm_core_config *config) {
   dev->render_template = config->render_ops;
   dev->driver_private = config->driver_private;
   dev->master_drop = config->master_drop;
+  dev->driver_release = config->driver_release;
   mutex_init(&dev->file_mutex);
   list_init(&dev->files);
   dev->next_object_id = 1;

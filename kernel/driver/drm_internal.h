@@ -17,10 +17,6 @@
 struct drm_gem_object;
 
 /* The virtio topology is fixed, but its IDs belong to the device namespace. */
-#define DRM_CRTC_ID (g_drm.crtc_id)
-#define DRM_CONNECTOR_ID (g_drm.connector_id)
-#define DRM_ENCODER_ID (g_drm.encoder_id)
-#define DRM_PLANE_ID (g_drm.plane_id)
 #define DRM_PLANE_TYPE_OVERLAY 0
 #define DRM_PLANE_TYPE_PRIMARY 1
 #define DRM_PLANE_TYPE_CURSOR 2
@@ -119,11 +115,7 @@ struct drm_file {
   int created_dumb_count;
 };
 
-extern struct drm_file **g_drm_files;
-extern int g_drm_files_capacity;
-extern spinlock g_drm_files_lock;
-
-/* ===== Default mode: 800x600@60 (runtime-overridable via g_drm.fb_*) ===== */
+/* ===== Default mode: 800x600@60 ===== */
 #define DRM_FB_WIDTH 800
 #define DRM_FB_HEIGHT 600
 #define DRM_FB_BPP 32
@@ -211,14 +203,6 @@ struct drm_device {
 
   struct drm_cursor cursor;
 };
-
-extern struct drm_device g_drm;
-/* Virtio's primary-node template. DRM core copies it into a per-minor dev_ops;
- * poll waiters route through the copied wait_queue_file callback. */
-extern struct dev_ops drm_dev_ops;
-
-/* ===== DRM mmap handler (called from dev_ops.mmap) ===== */
-uint64_t drm_mmap_handler(xtask *proc, uint64_t size, uint64_t offset);
 
 /* ===== Fence lifecycle (plan2). drm_fence_put reclaims the slot when the
  * last ref drops; called from sync_file fd close (proc.c file_put) and

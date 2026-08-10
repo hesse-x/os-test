@@ -12,6 +12,8 @@
 #include "kernel/xcore/mem/alloc.h"
 #include "kernel/xcore/mem/slab.h"
 
+#include <xos/errno.h>
+
 /* Helper: page-align a size */
 static uint64_t page_align(uint64_t sz) { return (sz + 4095) & ~4095UL; }
 
@@ -50,7 +52,7 @@ int vring_create(struct virtqueue *vq, uint16_t index, uint16_t size,
 
   if (!vq->desc || !vq->avail || !vq->used || !vq->next_free || !vq->ctx) {
     vring_destroy(vq);
-    return -1;
+    return -ENOMEM;
   }
 
   __memset(vq->desc, 0, desc_sz);
