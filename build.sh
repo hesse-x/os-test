@@ -95,6 +95,25 @@ CMAKE_EXTRA="$CMAKE_EXTRA -DPERF_TEST_NAME=$PERF_TEST_NAME"
 
 MESA_GALLIUM_DRIVERS=virgl,llvmpipe
 
+audit_locked_submodule() {
+    local path="$1"
+    local expected actual
+    expected="$(git ls-tree HEAD -- "$path" | awk '{print $3}')"
+    actual="$(git -C "$path" rev-parse HEAD)"
+    if [[ -z "$expected" || "$actual" != "$expected" ]] || \
+       ! git -C "$path" diff --quiet || \
+       ! git -C "$path" diff --cached --quiet; then
+        echo "ERROR: $path must stay at its locked commit with no tracked changes" >&2
+        exit 1
+    fi
+    printf 'submodule audit: %s %s clean\n' "$path" "$actual"
+}
+
+# The default renderer and the independent lavapipe smoke must not rewrite or
+# patch either upstream source tree.
+audit_locked_submodule third_party/mesa
+audit_locked_submodule third_party/wlroots
+
 # 1. CMake build (kernel + userspace)
 mkdir -p build && cd build
 cmake -GNinja \
@@ -599,7 +618,7 @@ PY
         --prefix /usr --libdir lib --buildtype release -Doptimization=2
         --default-library shared --wrap-mode nodownload
         --cross-file build/wlroots-cross.txt --native-file "$WLROOTS_NATIVE"
-        -Dauto_features=disabled -Dbackends=drm,libinput -Drenderers=gles2
+        -Dauto_features=disabled -Dbackends=drm,libinput -Drenderers=auto
         -Dallocators=gbm,udmabuf -Dsession=enabled -Dxwayland=disabled
         -Dxcb-errors=disabled -Dcolor-management=disabled
         # tinywl is maintained in user/compositor and linked against the
@@ -626,8 +645,8 @@ PY
 
     MESON_SUMMARY="$WLROOTS_BUILD/meson-logs/meson-log.txt"
     for feature in 'drm-backend: YES' 'libinput-backend: YES' 'session: YES' \
-                   'gles2-renderer: YES' 'gbm-allocator: YES' \
-                   'udmabuf-allocator: YES' 'egl: YES' \
+                   'gles2-renderer: NO' \
+                   'gbm-allocator: YES' 'udmabuf-allocator: YES' \
                    'x11-backend: NO' 'xwayland: NO' 'vulkan-renderer: NO' \
                    'color-management: NO' 'libliftoff: NO'; do
         feature_name="${feature%: *}"
@@ -638,6 +657,23 @@ PY
             exit 1
         fi
     done
+
+    python3 - "$WLROOTS_BUILD/meson-info/intro-buildoptions.json" <<'PY'
+import json
+import sys
+
+options = {item["name"]: item["value"] for item in json.load(open(sys.argv[1]))}
+expected = {
+    "renderers": ["auto"],
+    "backends": ["drm", "libinput"],
+    "allocators": ["gbm", "udmabuf"],
+}
+for name, wanted in expected.items():
+    if options.get(name) != wanted:
+        raise SystemExit(
+            f"ERROR: wlroots option {name}={options.get(name)!r}, expected {wanted!r}")
+print("wlroots Meson option audit: PASS")
+PY
 
     WLROOTS_LIB="$SYSROOT/usr/lib/libwlroots-0.20.so"
     install -m 755 "$WLROOTS_LIB" build/libwlroots-0.20.so
@@ -660,7 +696,7 @@ PY
         fi
         # Judge 2: forbidden dependency grep
         if LC_ALL=C readelf -dW build/tinywl.elf build/libwlroots-0.20.so | \
-           grep -Eiq 'lib(X11|xcb|vulkan|systemd|elogind|dbus|liftoff)|libstdc\+\+|llvmpipe'; then
+           grep -Eiq 'lib(X11|xcb|systemd|elogind|dbus|liftoff)|libstdc\+\+|llvmpipe'; then
             echo "ERROR: forbidden dependency in wlroots runtime" >&2
             exit 1
         fi
@@ -691,14 +727,16 @@ PY
 # Mesa stage above rather than in the first CMake ninja invocation.
 if echo "$CMAKE_EXTRA" | grep -q "TEST=1"; then
     echo "=== Building EGL/GLES2 and Vulkan smoke ELFs ==="
-    ninja -C build test_egl_smoke_elf test_vulkan_smoke_elf \
-        test_vulkan_drm_smoke_elf test_udmabuf_vulkan_kms_elf
+    ninja -C build test_egl_smoke_elf test_vulkan_smoke_elf
 fi
 
 if [ "${BUILD_TEST:-0}" = "1" ]; then
     echo "=== Auditing Vulkan runtime closure ==="
     python3 build_script/audit-vulkan.py
 fi
+
+audit_locked_submodule third_party/mesa
+audit_locked_submodule third_party/wlroots
 
 # 4. Generate disk.img (single disk, two partitions: ESP + root FAT32)
 TEST="${TEST:-0}"

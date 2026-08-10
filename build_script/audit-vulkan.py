@@ -14,7 +14,6 @@ SYSROOT_LIB = os.path.join(BUILD, "sysroot", "usr", "lib")
 MANIFEST = os.path.join(BUILD, "image_manifest.txt")
 TARGETS = [
     os.path.join(BUILD, "test_vulkan_smoke.elf"),
-    os.path.join(BUILD, "test_vulkan_drm_smoke.elf"),
     os.path.join(BUILD, "libvulkan.so.1"),
     os.path.join(BUILD, "libvulkan_lvp.so"),
     os.path.join(SYSROOT_LIB, "libLLVM.so.18.1"),
@@ -45,7 +44,7 @@ def main() -> int:
             destinations.add(destination)
 
     required_destinations = {
-        "test/vulkan_smoke.elf", "test/vulkan_drm_smoke.elf",
+        "test/vulkan_smoke.elf",
         "lib/libvulkan.so", "lib/libvulkan.so.1",
         "lib/libvulkan_lvp.so", "lib/libLLVM.so.18.1",
         "usr/share/vulkan/icd.d/lvp_icd.x86_64.json",

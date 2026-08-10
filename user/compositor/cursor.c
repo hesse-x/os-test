@@ -208,7 +208,6 @@ void os_cursor_init(void) {
       continue;
     }
     os_cursor_buffers[i] = buf;
-    wlr_log(WLR_INFO, "cursor: loaded %s (%dx%d)", os_cursors[i].name, w, h);
   }
 }
 

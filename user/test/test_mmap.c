@@ -6,6 +6,7 @@
 
 #include "user/test/test_helpers.h"
 #include <fcntl.h>
+#include <stdint.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/param.h>
@@ -195,6 +196,60 @@ void test_mmap_memfd_shared_cross(void) {
   close(fd);
 }
 
+/* Separate file offsets must map separate memfd pages. */
+void test_mmap_memfd_offset_isolation(void) {
+  int fd = memfd_create("offset_isolation", 0);
+  TEST_ASSERT_TRUE(fd >= 0);
+  TEST_ASSERT_EQUAL_INT(0, ftruncate(fd, 3 * 4096));
+
+  char *first = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+  char *third =
+      mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 2 * 4096);
+  TEST_ASSERT_TRUE(first != NULL && first != MAP_FAILED);
+  TEST_ASSERT_TRUE(third != NULL && third != MAP_FAILED);
+
+  memset(first, 'A', 4096);
+  memset(third, 'C', 4096);
+  TEST_ASSERT_EQUAL_INT('A', first[0]);
+  TEST_ASSERT_EQUAL_INT('A', first[4095]);
+  TEST_ASSERT_EQUAL_INT('C', third[0]);
+  TEST_ASSERT_EQUAL_INT('C', third[4095]);
+
+  munmap(first, 4096);
+  munmap(third, 4096);
+  close(fd);
+}
+
+void test_mmap_rejects_invalid_length_and_offset(void) {
+  errno = 0;
+  TEST_ASSERT_EQUAL_PTR(
+      MAP_FAILED, mmap(NULL, 0, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+  TEST_ASSERT_EQUAL_INT(EINVAL, errno);
+
+  errno = 0;
+  TEST_ASSERT_EQUAL_PTR(MAP_FAILED, mmap(NULL, SIZE_MAX, PROT_READ,
+                                         MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+  TEST_ASSERT_EQUAL_INT(ENOMEM, errno);
+
+  int fd = memfd_create("mmap_invalid_offset", 0);
+  TEST_ASSERT_GREATER_OR_EQUAL_INT(0, fd);
+  TEST_ASSERT_EQUAL_INT(0, ftruncate(fd, 4096));
+
+  errno = 0;
+  TEST_ASSERT_EQUAL_PTR(MAP_FAILED,
+                        mmap(NULL, 0, PROT_READ, MAP_SHARED, fd, 0));
+  TEST_ASSERT_EQUAL_INT(EINVAL, errno);
+  errno = 0;
+  TEST_ASSERT_EQUAL_PTR(MAP_FAILED,
+                        mmap(NULL, 4096, PROT_READ, MAP_SHARED, fd, 1));
+  TEST_ASSERT_EQUAL_INT(EINVAL, errno);
+  errno = 0;
+  TEST_ASSERT_EQUAL_PTR(MAP_FAILED,
+                        mmap(NULL, 4096, PROT_READ, MAP_SHARED, fd, 4096));
+  TEST_ASSERT_EQUAL_INT(EINVAL, errno);
+  close(fd);
+}
+
 /* 12. mmap on nonexistent fd → graceful failure */
 void test_mmap_bad_fd(void) {
   void *p = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, 999, 0);
@@ -374,6 +429,8 @@ int main(int argc, char **argv, char **envp) {
   RUN_TEST(test_ftruncate_grow);
   RUN_TEST(test_mmap_prot_exec);
   RUN_TEST(test_mmap_memfd_shared_cross);
+  RUN_TEST(test_mmap_memfd_offset_isolation);
+  RUN_TEST(test_mmap_rejects_invalid_length_and_offset);
   RUN_TEST(test_mmap_bad_fd);
   RUN_TEST(test_mmap_memfd_verify);
   RUN_TEST(test_mmap_file_shared_writeback);

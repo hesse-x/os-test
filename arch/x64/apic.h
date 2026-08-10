@@ -78,6 +78,7 @@
 
 // Reschedule IPI vector — 0xec (236), same as Linux RESCHEDULE_VECTOR
 #define RESCHEDULE_VECTOR 0xec
+#define TLB_SHOOTDOWN_VECTOR 0xeb
 
 extern void __iomem *lapic_vaddr;
 extern void __iomem *ioapic_vaddr;
@@ -128,5 +129,6 @@ uint64_t sched_clock();
 
 // Reschedule IPI
 void lapic_send_reschedule(int target_cpu);
+void lapic_send_ipi(int target_cpu, uint8_t vector);
 
 #endif // ARCH_X64_APIC_H

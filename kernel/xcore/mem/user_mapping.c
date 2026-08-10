@@ -133,6 +133,8 @@ map_user_page_direct(uint64_t *new_pml4, uint64_t vaddr, uint64_t phys,
   if (pte_present(pt[pt_idx]))
     return false;
   pt[pt_idx] = phys | flags;
+  // A MAP_FIXED replacement can reuse a VA with a cached old translation.
+  invlpg(vaddr);
   return true;
 }
 

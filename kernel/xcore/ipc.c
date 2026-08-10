@@ -29,7 +29,6 @@
 #include "kernel/xcore/trap.h"
 #include "kernel/xcore/wait_queue.h"
 #include "kernel/xcore/xtask.h"
-#include "xos/perf.h"
 
 #include <xos/errno.h>
 #include <xos/page.h>
@@ -38,6 +37,9 @@
 #include <xos/thread.h>
 #include <xos/time.h>
 
+#ifdef PERF
+#include "xos/perf.h"
+#endif
 // ===================== IRQ owner table (shared with trap.c)
 // =====================
 extern pid_t irq_owner[MAX_IRQ_HANDLERS];

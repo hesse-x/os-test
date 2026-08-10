@@ -28,13 +28,13 @@
 #include "kernel/xcore/atomic.h"
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/mem/kasan.h"
-#include "xos/page.h"
 #include "kernel/xcore/mem/slab.h"
 #include "kernel/xcore/mutex.h"
 #include "kernel/xcore/rcu.h"
 #include "kernel/xcore/sparse.h"
 #include "kernel/xcore/spinlock.h"
 #include "kernel/xcore/xtask.h"
+#include "xos/page.h"
 #include <kernel/bsd/stat_abi.h>
 #include <kernel/bsd/statx_abi.h>
 #include <stdbool.h>

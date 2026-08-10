@@ -11,7 +11,6 @@ PC_DIR="$LIB_DIR/pkgconfig"
 NATIVE_PC_DIR="$BUILD/wlroots/native-pkgconfig"
 NATIVE_FILE="$BUILD/wlroots-native.txt"
 PROTOCOL_BUILD="$BUILD/wlroots/wayland-protocols"
-
 install -d "$INCLUDE_DIR" "$LIB_DIR" "$PC_DIR" "$NATIVE_PC_DIR"
 
 # wayland-protocols 1.49 generates its *-enum.h headers with

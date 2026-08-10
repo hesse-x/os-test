@@ -427,8 +427,6 @@ static void accept_client(int listen_fd) {
   udev_clients[slot].pipe_wr = pipe_wr;
 
   close(cfd); // connect == subscribe; close conn (§4.4 step 8)
-  putchar('a');
-
   // First client replays coldplug (§4.5): synthesize add for existing devices
   // and forward to that client. Reuse the coldplug_trigger kernel-rebroadcast
   // path — the rebroadcast uevent comes back to udevd's own netlink fd and is
@@ -611,10 +609,8 @@ static int process_one_uevent(const char *payload, int payload_len) {
   // udev_device from this.
   char kv[1024];
   int klen = device_complete_kv(action, devname, subsys, NULL, kv, sizeof(kv));
-  if (klen > 0) {
+  if (klen > 0)
     clients_broadcast(kv, klen);
-    putchar(strcmp(action, "remove") == 0 ? 'r' : 'u');
-  }
   return 1;
 }
 
@@ -797,21 +793,6 @@ int main(void) {
         char *payload = (char *)NLMSG_DATA(nh);
         int payload_len = (int)(nh->nlmsg_len) - NLMSG_HDRLEN;
 
-        // Print uevent info
-        printf("udevd: uevent type=%d pid=%u len=%d: ", nh->nlmsg_type,
-               nh->nlmsg_pid, payload_len);
-
-        // Payload is \0-separated key-value pairs; print first segment
-        // (the "action@devpath" line) then remaining pairs
-        char *p = payload;
-        int remaining = payload_len;
-        while (remaining > 0 && *p) {
-          printf("[%s] ", p);
-          int seg_len = (int)strlen(p) + 1;
-          p += seg_len;
-          remaining -= seg_len;
-        }
-        printf("\n");
         /* 解析 KV + add 处理(drain 与主循环共用 process_one_uevent) */
         process_one_uevent(payload, payload_len);
       } else if (events[i].data.fd == listen_fd) {

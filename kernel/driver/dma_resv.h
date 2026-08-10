@@ -1,4 +1,8 @@
-/* SPDX-License-Identifier: MIT */
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
 #ifndef KERNEL_DRIVER_DMA_RESV_H
 #define KERNEL_DRIVER_DMA_RESV_H
 

@@ -1,4 +1,8 @@
-/* SPDX-License-Identifier: MIT */
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
 #define _GNU_SOURCE
 #include "unity.h"
 

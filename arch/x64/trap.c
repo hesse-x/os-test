@@ -138,6 +138,7 @@ V(124);
 V(125);
 V(126);
 V(127);
+V(235);
 V(236);
 #undef V
 
@@ -194,6 +195,8 @@ void idt_install() {
   set_idt_gate(2, (uint64_t)vector2, 0x8E, 1);   // NMI → IST1
   set_idt_gate(8, (uint64_t)vector8, 0x8E, 2);   // Double Fault → IST2
   set_idt_gate(18, (uint64_t)vector18, 0x8E, 3); // Machine Check → IST3
+  set_idt_gate(0xeb, (uint64_t)vector235, 0x8E,
+               0); // TLB shootdown IPI → RSP0 (no IST)
   set_idt_gate(0xec, (uint64_t)vector236, 0x8E,
                0); // Reschedule IPI → RSP0 (no IST)
   set_idt();

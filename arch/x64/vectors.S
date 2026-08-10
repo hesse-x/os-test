@@ -11,8 +11,8 @@
 # (frame_opt.md block 1) Two entry points, mirroring Linux idtentry vs
 # common_interrupt:
 #   vector0..31  (synchronous exceptions) -> jmp __alltraps  (stays on task stack)
-#   vector32..127 + vector236 (hardware IRQs)  -> jmp __irq_entry (switches to
-#                                                  the per-CPU IRQ stack)
+#   vector32..127 + vector235..236 (hardware IRQs) -> jmp __irq_entry
+#                                                       (per-CPU IRQ stack)
 .text
 .code64
 .globl vector0
@@ -647,6 +647,12 @@ vector126:
 vector127:
   pushq $0
   pushq $127
+  jmp __irq_entry
+
+.globl vector235
+vector235:
+  pushq $0
+  pushq $235
   jmp __irq_entry
 
 .globl vector236

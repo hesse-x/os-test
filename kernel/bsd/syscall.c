@@ -1064,12 +1064,8 @@ static mmap_region *mmap_place_file_region(xtask *proc, uint64_t *pml4,
                                            uint32_t flags, uint64_t hint,
                                            uint32_t prot, int fd,
                                            uint64_t offset, int64_t *out_err) {
-  int64_t picked = vma_pick_addr(proc->mm, pml4, addr, size, flags, hint);
-  if (picked < 0) {
-    *out_err = picked;
-    return NULL;
-  }
-  uint64_t vaddr = (uint64_t)picked;
+  // Allocate the replacement descriptor before MAP_FIXED starts tearing down
+  // old VMAs. This preserves the old mapping on the common OOM failure path.
   mmap_region *region = (mmap_region *)kmalloc(sizeof(mmap_region));
   if (!region) {
     *out_err = -ENOMEM;
@@ -1077,6 +1073,14 @@ static mmap_region *mmap_place_file_region(xtask *proc, uint64_t *pml4,
   }
   __memset(region, 0, sizeof(*region));
   vma_reset_readahead(region);
+
+  int64_t picked = vma_pick_addr(proc->mm, pml4, addr, size, flags, hint);
+  if (picked < 0) {
+    kfree(region);
+    *out_err = picked;
+    return NULL;
+  }
+  uint64_t vaddr = (uint64_t)picked;
   region->vaddr = vaddr;
   region->size = size;
   region->phys = 0;
@@ -1439,7 +1443,8 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   int fd = (int)arg5;
   uint64_t offset = arg6;
 
-  if (size == 0 && ((flags & MAP_SHARED) == 0 || fd < 0))
+  /* Linux rejects a zero-length mapping regardless of backing type. */
+  if (size == 0)
     return -EINVAL;
   // Reject genuinely-unknown flag bits; recognized-but-unsupported bits
   // (HUGETLB/POPULATE/STACK/LOCKED/NORESERVE/GROWSDOWN/GROWSUP) fall through
@@ -1447,7 +1452,13 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   // space failure → -ENOMEM (RLIMIT_AS is a future todo; the OS has no rlimit).
   if ((flags & ~MAP_KNOWN_FLAGS) != 0)
     return -EINVAL;
+  if (size > SIZE_MAX - (PAGE_SIZE - 1))
+    return -ENOMEM;
   size = ALIGN_UP(size, PAGE_SIZE);
+
+  /* File offsets are always page-aligned; this also covers device mappings. */
+  if (fd >= 0 && !(flags & MAP_ANONYMOUS) && (offset & (PAGE_SIZE - 1)))
+    return -EINVAL;
 
   bool fixed = (flags & MAP_FIXED) || (flags & MAP_FIXED_NOREPLACE);
   // MAP_FIXED / MAP_FIXED_NOREPLACE require a page-aligned addr (and offset for
@@ -1455,8 +1466,6 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   // error.
   if (fixed) {
     if (addr & (PAGE_SIZE - 1))
-      return -EINVAL;
-    if (fd >= 0 && (offset & (PAGE_SIZE - 1)))
       return -EINVAL;
   }
   uint64_t hint = (!fixed && addr) ? ALIGN_DOWN(addr, PAGE_SIZE) : 0;
@@ -1546,8 +1555,22 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
           size_t npages = target_shm->npages;
           size_t list_pages =
               target_shm->page_list ? (size_t)target_shm->num_pages : 0;
+          if (npages > SIZE_MAX - list_pages) {
+            shm_put(target_shm);
+            file_put(f);
+            spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
+            return -EINVAL;
+          }
           size_t total_pages = npages + list_pages;
-          size = total_pages * PAGE_SIZE;
+          size_t first_page = (size_t)(offset / PAGE_SIZE);
+          size_t map_pages = size / PAGE_SIZE;
+          if (first_page > total_pages ||
+              map_pages > total_pages - first_page) {
+            shm_put(target_shm);
+            file_put(f);
+            spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
+            return -EINVAL;
+          }
 
           int64_t picked =
               vma_pick_addr(proc->mm, pml4, addr, size, (uint32_t)flags, hint);
@@ -1564,12 +1587,13 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
           if (!(prot & PROT_EXEC))
             pte_flags |= PTE_NX;
 
-          for (size_t i = 0; i < total_pages; i++) {
+          for (size_t i = 0; i < map_pages; i++) {
+            size_t page = first_page + i;
             uint64_t page_phys;
-            if (i < npages) {
-              page_phys = target_shm->phys + i * PAGE_SIZE;
+            if (page < npages) {
+              page_phys = target_shm->phys + page * PAGE_SIZE;
             } else {
-              page_phys = target_shm->page_list[i - npages];
+              page_phys = target_shm->page_list[page - npages];
             }
             if (!map_user_page_direct(pml4, vaddr + i * PAGE_SIZE, page_phys,
                                       pte_flags)) {
@@ -1585,7 +1609,7 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
 
           mmap_region *region = (mmap_region *)kmalloc(sizeof(mmap_region));
           if (!region) {
-            for (size_t i = 0; i < total_pages; i++)
+            for (size_t i = 0; i < map_pages; i++)
               unmap_user_pages(pml4, vaddr + i * PAGE_SIZE,
                                vaddr + (i + 1) * PAGE_SIZE, 1);
             shm_put(target_shm);
@@ -1644,8 +1668,22 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
 
     size_t npages = shm->npages;
     size_t list_pages = shm->page_list ? (size_t)shm->num_pages : 0;
+    if (npages > SIZE_MAX - list_pages) {
+      shm_put(shm);
+      file_put(f);
+      spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
+      return -EINVAL;
+    }
     size_t total_pages = npages + list_pages;
-    size = total_pages * PAGE_SIZE;
+    size_t first_page = (size_t)(offset / PAGE_SIZE);
+    size_t map_pages = size / PAGE_SIZE;
+    if ((offset & (PAGE_SIZE - 1)) || first_page > total_pages ||
+        map_pages > total_pages - first_page) {
+      shm_put(shm);
+      file_put(f);
+      spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
+      return -EINVAL;
+    }
 
     int64_t picked =
         vma_pick_addr(proc->mm, pml4, addr, size, (uint32_t)flags, hint);
@@ -1662,12 +1700,13 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
     if (!(prot & PROT_EXEC))
       pte_flags |= PTE_NX;
 
-    for (size_t i = 0; i < total_pages; i++) {
+    for (size_t i = 0; i < map_pages; i++) {
+      size_t page = first_page + i;
       uint64_t page_phys;
-      if (i < npages) {
-        page_phys = shm->phys + i * PAGE_SIZE;
+      if (page < npages) {
+        page_phys = shm->phys + page * PAGE_SIZE;
       } else {
-        page_phys = shm->page_list[i - npages];
+        page_phys = shm->page_list[page - npages];
       }
       if (!map_user_page_direct(pml4, vaddr + i * PAGE_SIZE, page_phys,
                                 pte_flags)) {
@@ -1683,7 +1722,7 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
 
     mmap_region *region = (mmap_region *)kmalloc(sizeof(mmap_region));
     if (!region) {
-      for (size_t i = 0; i < total_pages; i++)
+      for (size_t i = 0; i < map_pages; i++)
         unmap_user_pages(pml4, vaddr + i * PAGE_SIZE,
                          vaddr + (i + 1) * PAGE_SIZE, 1);
       shm_put(shm);
@@ -1710,6 +1749,7 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
       atomic_inc(&shm->writable_shared_mappings);
     mmap_advance_brk(proc->mm, addr, (uint32_t)flags, vaddr, size);
 
+    file_put(f);
     spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
     return vaddr;
   }

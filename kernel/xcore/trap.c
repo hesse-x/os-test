@@ -383,13 +383,17 @@ void trap_dispatch(trapframe *tf) {
   irq_handler_ctx_fn handler_ctx = NULL;
   void *handler_arg = NULL;
   if (tf->trapno < MAX_IRQ_HANDLERS) {
-    spin_lock(&irq_registry_lock);
+    // Process-context page faults run with IF enabled because their demand
+    // paging path may sleep. Disable interrupts around the registry lookup so
+    // a timer IRQ cannot re-enter this lock on the same CPU.
+    uint64_t registry_flags;
+    spin_lock_irqsave(&irq_registry_lock, &registry_flags);
     handler = irq_slots[tf->trapno].handler;
     handler_ctx = irq_slots[tf->trapno].handler_ctx;
     handler_arg = irq_slots[tf->trapno].ctx;
     if (handler || handler_ctx)
       atomic_inc(&irq_slots[tf->trapno].in_flight);
-    spin_unlock(&irq_registry_lock);
+    spin_unlock_irqrestore(&irq_registry_lock, registry_flags);
   }
   if (handler || handler_ctx) {
     bool trace_irq =
@@ -427,11 +431,26 @@ void trap_dispatch(trapframe *tf) {
     bool is_write = error_code & 2;
     bool is_present = error_code & 1;
     if (is_present && is_write) {
+      uint64_t mmap_flags;
+      spin_lock_irqsave(&current_task->mm->mmap_lock, &mmap_flags);
       uint64_t *pte = lookup_pte(current_task->mm->cr3, fault_addr);
       if (pte && (*pte & PTE_COW)) {
         resolve_cow_fault(current_task, pte, fault_addr);
+        spin_unlock_irqrestore(&current_task->mm->mmap_lock, mmap_flags);
+        // CLONE_VM siblings share this page table and can retain the old
+        // read-only COW translation on another CPU after the leaf becomes RW.
+        tlb_shootdown_mm(current_task->mm->cr3);
         return; // COW resolved, retry faulting instruction
       }
+      if (pte && (*pte & PTE_RW)) {
+        spin_unlock_irqrestore(&current_task->mm->mmap_lock, mmap_flags);
+        // Another CPU sharing this mm completed COW after this CPU took the
+        // fault. The leaf is already writable; discard the stale local
+        // translation and retry instead of misreporting SIGSEGV.
+        invlpg(fault_addr);
+        return;
+      }
+      spin_unlock_irqrestore(&current_task->mm->mmap_lock, mmap_flags);
     }
     // BSD layer file fault handler (e.g., mmap file page-in).  This may block
     // on page_cache / wait_queue and call schedule() to wait for the page to be
@@ -450,7 +469,10 @@ void trap_dispatch(trapframe *tf) {
     // we hold no lock whose consistency depends on staying atomic past this
     // point (COW already returned above), and a process-context #PF scheduling
     // inside it is legitimate.
-    if (fault_handler && current_task->proc) {
+    // File-backed demand paging only handles hardware not-present faults.
+    // Keeping protection faults out of the handler also lets it treat a
+    // concurrently-installed present PTE as a completed page-in safely.
+    if (!is_present && fault_handler && current_task->proc) {
       int fault_result = fault_handler(fault_addr, current_task);
       if (fault_result == FAULT_IO_ERROR) {
         if (force_sig_hook)
@@ -738,6 +760,58 @@ static void reschedule_ipi_handler(trapframe *tf) {
   lapic_eoi();
 }
 
+static spinlock tlb_shootdown_lock = SPINLOCK_INIT;
+static volatile uint64_t tlb_shootdown_cr3[MAX_CPUS];
+static volatile uint32_t tlb_shootdown_done[MAX_CPUS];
+
+static void tlb_shootdown_ipi_handler(trapframe *tf) {
+  (void)tf;
+  int cpu = get_cpu_local()->cpu_id;
+  uint64_t requested_cr3 =
+      __atomic_load_n(&tlb_shootdown_cr3[cpu], __ATOMIC_ACQUIRE);
+  if (current_task && current_task->cr3 == requested_cr3)
+    load_cr3(requested_cr3);
+  __atomic_store_n(&tlb_shootdown_done[cpu], 1, __ATOMIC_RELEASE);
+  lapic_eoi();
+}
+
+void tlb_shootdown_mm(uint64_t cr3) {
+  // Keep interrupts enabled while contending for the global request slot. A
+  // CPU waiting here must still be able to acknowledge another CPU's active
+  // shootdown, otherwise two concurrent callers can deadlock.
+  spin_lock(&tlb_shootdown_lock);
+
+  int self = get_cpu_local()->cpu_id;
+  uint64_t targets = 0;
+  for (int cpu = 0; cpu < ncpu; cpu++) {
+    if (cpu == self)
+      continue;
+    xtask *running = cpu_locals[cpu]._cur_proc;
+    if (!running || running->cr3 != cr3)
+      continue;
+    __atomic_store_n(&tlb_shootdown_cr3[cpu], cr3, __ATOMIC_RELAXED);
+    __atomic_store_n(&tlb_shootdown_done[cpu], 0, __ATOMIC_RELAXED);
+    targets |= 1ULL << cpu;
+  }
+  __atomic_thread_fence(__ATOMIC_RELEASE);
+
+  for (int cpu = 0; cpu < ncpu; cpu++)
+    if (targets & (1ULL << cpu))
+      lapic_send_ipi(cpu, TLB_SHOOTDOWN_VECTOR);
+
+  // Reloading CR3 invalidates every non-global translation for this mm on the
+  // calling CPU, including all writable leaves converted to COW by fork.
+  load_cr3(cr3);
+  for (int cpu = 0; cpu < ncpu; cpu++) {
+    if (!(targets & (1ULL << cpu)))
+      continue;
+    while (!__atomic_load_n(&tlb_shootdown_done[cpu], __ATOMIC_ACQUIRE))
+      __asm__ volatile("pause");
+  }
+
+  spin_unlock(&tlb_shootdown_lock);
+}
+
 static void timer_handler(trapframe *tf) {
   perf_watchdog_tick();
   perf_pmu_ensure_cpu();
@@ -941,6 +1015,7 @@ void irq_init() {
   // Register default handlers
   irq_register(LAPIC_TIMER_VECTOR, timer_handler);
   irq_register(RESCHEDULE_VECTOR, reschedule_ipi_handler);
+  irq_register(TLB_SHOOTDOWN_VECTOR, tlb_shootdown_ipi_handler);
 
   // Re-initialize GDT with per-CPU setup (now running at virtual address)
   smp_init_cpu(0, 0, (int64_t)&stack_bottom + 8192);

@@ -278,7 +278,11 @@ int64_t sys_futex(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
       spin_unlock_irqrestore(&bucket->lock, bflags);
       return (int64_t)-EINVAL;
     }
-    timeout_ns = (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+    uint64_t seconds = (uint64_t)ts.tv_sec;
+    uint64_t nanoseconds = (uint64_t)ts.tv_nsec;
+    timeout_ns = seconds > (UINT64_MAX - nanoseconds) / 1000000000ULL
+                     ? UINT64_MAX
+                     : seconds * 1000000000ULL + nanoseconds;
     has_timeout = 1;
   }
 
@@ -288,7 +292,9 @@ int64_t sys_futex(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   spin_lock_irqsave(&cpu_locals[cpu].scheduler_lock, &flags);
   cur->wait_timed_out = 0;
   if (has_timeout) {
-    cur->wait_deadline = sched_clock() + timeout_ns;
+    uint64_t now = sched_clock();
+    cur->wait_deadline =
+        UINT64_MAX - now < timeout_ns ? UINT64_MAX : now + timeout_ns;
     sched_timer_queue_insert(cpu, cur);
   }
   cur->wait_event = WAIT_FUTEX;

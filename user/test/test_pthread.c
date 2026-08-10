@@ -5,6 +5,7 @@
  */
 
 #include <errno.h>
+#include <linux/futex.h>
 #include <pthread.h>
 #include <sched.h> // sched_yield (musl <unistd.h> no longer declares it)
 #include <signal.h>
@@ -16,6 +17,7 @@
 #include <unistd.h>
 #include <unity.h>
 #include <xos/errno.h>
+#include <xos/syscall_ext.h>
 // This OS does not have that header, and angle brackets would fall back to the
 // host's /usr/include/sched.h, pulling in the host's struct timespec which
 // conflicts with our xos/time.h (redefinition).
@@ -346,6 +348,44 @@ void test_futex_stress(void) {
   pthread_mutex_destroy(&stress_mutex);
 }
 
+static uint32_t overflow_futex;
+static volatile int overflow_waiter_ready;
+static volatile int overflow_waiter_done;
+
+static void *thread_futex_overflow_fn(void *arg) {
+  (void)arg;
+  /* This tv_sec value made tv_sec * 1e9 wrap to 512ns. */
+  struct timespec timeout = {.tv_sec = 20211507185753197L, .tv_nsec = 0};
+  overflow_waiter_ready = 1;
+  int rc = sys_futex(&overflow_futex, FUTEX_WAIT | FUTEX_PRIVATE_FLAG, 0,
+                     &timeout, NULL, 0);
+  overflow_waiter_done = 1;
+  return (void *)(intptr_t)rc;
+}
+
+void test_futex_timeout_conversion_saturates(void) {
+  overflow_futex = 0;
+  overflow_waiter_ready = 0;
+  overflow_waiter_done = 0;
+
+  pthread_t waiter;
+  TEST_ASSERT_EQUAL_INT(
+      0, pthread_create(&waiter, NULL, thread_futex_overflow_fn, NULL));
+  while (!overflow_waiter_ready)
+    sched_yield();
+
+  struct timespec delay = {.tv_sec = 0, .tv_nsec = 10 * 1000 * 1000L};
+  nanosleep(&delay, NULL);
+  TEST_ASSERT_EQUAL_INT(0, overflow_waiter_done);
+  TEST_ASSERT_EQUAL_INT(1, sys_futex(&overflow_futex,
+                                     FUTEX_WAKE | FUTEX_PRIVATE_FLAG, 1, NULL,
+                                     NULL, 0));
+
+  void *result = NULL;
+  TEST_ASSERT_EQUAL_INT(0, pthread_join(waiter, &result));
+  TEST_ASSERT_EQUAL_PTR(NULL, result);
+}
+
 static volatile int jctx_b_running = 1;
 static void *jctx_thread_b(void *arg) {
   (void)arg;
@@ -400,6 +440,7 @@ int main(int argc, char **argv, char **envp) {
   RUN_TEST(test_pthread_detached_leak);
   RUN_TEST(test_pthread_mutex_timedlock_timeout);
   RUN_TEST(test_futex_stress);
+  RUN_TEST(test_futex_timeout_conversion_saturates);
   RUN_TEST(test_pthread_join_cancel);
   return UNITY_END();
 }

@@ -44,7 +44,7 @@ CheckOptions:
   # exceptions, none are defects. Categories of exceptions:
   #   POSIX/C standard — errno, _exit, sa_handler, sigaddset, etc.
   #   Linux _/__ prefix — __memcpy, __syscall*, _IOC*, etc.
-  #   Include guards — _STDIO_H, _COMMON_DIRENT_H, etc.
+  #   Include guards — _STDIO_H, _COMMON_DIRENT_H, _DMA_BUF_UAPI_H_, etc.
   #   glibc/crt internals — __libc_start_main, __assert_fail, etc.
   #   UEFI spec — EfiBootServicesCode, ImageHandle, etc.
   #   Hardware spec — AHCI Px*, DRM/KMS, ELF Elf64_*
@@ -78,7 +78,7 @@ CheckOptions:
   # keyword; _(BSD|XOPEN|GNU|DEFAULT|ALL)_SOURCE and _POSIX_*(C_SOURCE|
   # V[67]_LP64_OFF64) are the POSIX feature-test macros.
   - key: readability-identifier-naming.MacroDefinitionIgnoredRegexp
-    value: '^(alloca|fpclassify|isfinite|isnormal|isnan|isinf|signbit|_IOC_[A-Z]+|_SC_[A-Z_]+|_IO$|_IOR$|_IOW$|_IOWR$|_IO[A-Z]+|_F_[A-Z]+|static_assert|input_event_(sec|usec)|errno|sa_handler|sa_sigaction|sigaddset|sigdelset|sigemptyset|sigfillset|sigismember|current_task|current_proc|current_xtask|Px[A-Z][a-zA-Z]*|Efi[A-Z][a-zA-Z]*|DRM_MODE_SUBCONNECTOR_Automatic|__[a-zA-Z0-9_]+|assert|rb_[a-z_]+|_ASM_[A-Z]+|SYS_[a-zA-Z0-9_]+|_(Addr|Int64|Reg)|_Noreturn|_(BSD|XOPEN|GNU|DEFAULT|ALL)_SOURCE|_POSIX_(C_SOURCE|V[67]_LP64_OFF64)|_.*_H)$'
+    value: '^(alloca|fpclassify|isfinite|isnormal|isnan|isinf|signbit|_IOC_[A-Z]+|_SC_[A-Z_]+|_IO$|_IOR$|_IOW$|_IOWR$|_IO[A-Z]+|_F_[A-Z]+|static_assert|input_event_(sec|usec)|errno|sa_handler|sa_sigaction|sigaddset|sigdelset|sigemptyset|sigfillset|sigismember|current_task|current_proc|current_xtask|Px[A-Z][a-zA-Z]*|Efi[A-Z][a-zA-Z]*|DRM_MODE_SUBCONNECTOR_Automatic|__[a-zA-Z0-9_]+|assert|rb_[a-z_]+|_ASM_[A-Z]+|SYS_[a-zA-Z0-9_]+|_(Addr|Int64|Reg)|_Noreturn|_(BSD|XOPEN|GNU|DEFAULT|ALL)_SOURCE|_POSIX_(C_SOURCE|V[67]_LP64_OFF64)|_.*_H_?)$'
 
   # Variable exceptions: TLS runtime, kernel internal, libc internals, linker section boundaries
   # The __start_/__stop_ alternatives cover linker-generated section boundary symbols

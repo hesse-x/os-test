@@ -1314,8 +1314,11 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
         (uint64_t *)phys_to_virt((__force phys_addr_t)parent->mm->cr3);
     uint64_t *dst_pml4 =
         (uint64_t *)phys_to_virt((__force phys_addr_t)child_mm->cr3);
+    uint64_t mmap_flags;
+    spin_lock_irqsave(&parent->mm->mmap_lock, &mmap_flags);
     int ret = copy_page_table(src_pml4, dst_pml4, parent->mm->mmap_regions);
     if (ret < 0) {
+      spin_unlock_irqrestore(&parent->mm->mmap_lock, mmap_flags);
       mm_put(child_mm);
       bfc_free_page(child->fpu_page, 1);
       child->fpu_page = NULL;
@@ -1323,10 +1326,15 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
       spin_unlock(&tasks_lock);
       return (int64_t)ret;
     }
-    load_cr3(parent->mm->cr3);
     child_mm->mmap_regions = copy_mmap_regions(parent->mm->mmap_regions);
     child_mm->mmap_brk = parent->mm->mmap_brk;
     child_mm->mmap_phys_brk = parent->mm->mmap_phys_brk;
+    spin_unlock_irqrestore(&parent->mm->mmap_lock, mmap_flags);
+    // copy_page_table write-protects the parent's writable leaves. Threads
+    // sharing this mm may be running on other CPUs, so a local CR3 reload is
+    // insufficient: their stale writable TLB entries would bypass COW and can
+    // later produce a protection fault after the leaf becomes writable again.
+    tlb_shootdown_mm(parent->mm->cr3);
     child_mm->parent_pid = parent->pid;
     child->cr3 = child_mm->cr3;
   }

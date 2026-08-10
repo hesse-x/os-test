@@ -255,6 +255,41 @@ void test_mmap_file_private_fork_independent(void) {
   unlink_file("mfp_fork");
 }
 
+/* Mirror musl map_library's topology: it first maps an entire ELF image from
+ * the lowest PT_LOAD, then MAP_FIXED replaces later file segments and the BSS
+ * tail. Every retained/replaced page must still fault from its own VMA. */
+void test_mmap_file_fixed_segment_replacement(void) {
+  char data[3 * PAGE];
+  memset(data, 'A', PAGE);
+  memset(data + PAGE, 'B', PAGE);
+  memset(data + 2 * PAGE, 'C', PAGE);
+  int fd = make_file("mfp_fixed_segments", data, sizeof(data));
+  TEST_ASSERT_TRUE(fd >= 0);
+
+  char *image = (char *)mmap(NULL, 3 * PAGE, PROT_READ, MAP_PRIVATE, fd, 0);
+  TEST_ASSERT_TRUE(image != NULL && image != MAP_FAILED);
+  TEST_ASSERT_EQUAL_INT('A', image[0]);
+
+  char *segment = (char *)mmap(image + PAGE, PAGE, PROT_READ,
+                               MAP_PRIVATE | MAP_FIXED, fd, PAGE);
+  TEST_ASSERT_EQUAL_PTR(image + PAGE, segment);
+  TEST_ASSERT_EQUAL_INT('A', image[0]);
+  TEST_ASSERT_EQUAL_INT('B', segment[0]);
+  TEST_ASSERT_EQUAL_INT('C', image[2 * PAGE]);
+
+  char *bss = (char *)mmap(image + 2 * PAGE, PAGE, PROT_READ | PROT_WRITE,
+                           MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+  TEST_ASSERT_EQUAL_PTR(image + 2 * PAGE, bss);
+  TEST_ASSERT_EQUAL_INT(0, bss[0]);
+  bss[0] = 'Z';
+  TEST_ASSERT_EQUAL_INT('Z', bss[0]);
+  TEST_ASSERT_EQUAL_INT('B', segment[0]);
+
+  munmap(image, 3 * PAGE);
+  close(fd);
+  unlink_file("mfp_fixed_segments");
+}
+
 int main(void) {
   UNITY_BEGIN();
   RUN_TEST(test_mmap_file_private_basic_read);
@@ -266,5 +301,6 @@ int main(void) {
   RUN_TEST(test_mmap_memfd_private_cow);
   RUN_TEST(test_tmpfs_shared_mapping_cross_fd);
   RUN_TEST(test_mmap_file_private_fork_independent);
+  RUN_TEST(test_mmap_file_fixed_segment_replacement);
   return UNITY_END();
 }

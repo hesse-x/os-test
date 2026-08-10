@@ -80,28 +80,36 @@ static bool file_fault_map(uint64_t cr3, uint64_t page_addr, uint64_t user_phys,
 
 int file_fault_handler(uint64_t fault_addr, xtask *t) {
   uint64_t page_addr = ALIGN_DOWN(fault_addr, PAGE_SIZE);
+  uint64_t mmap_flags;
+  spin_lock_irqsave(&t->mm->mmap_lock, &mmap_flags);
   mmap_region *mr = vma_find(t->mm, page_addr);
-  if (!mr)
-    return 0; // not a known mapping — let #PF deliver SIGSEGV
+  if (!mr) {
+    spin_unlock_irqrestore(&t->mm->mmap_lock, mmap_flags);
+    return FAULT_NOT_HANDLED;
+  }
 
-  uint64_t fault_off = mr->offset + (page_addr - mr->vaddr);
-
-  // Already mapped (present)? Then this is not a file-backed demand-fault
-  // (e.g. a PROT_NONE guard, or a genuine permission violation). Hand it back.
+  // trap_dispatch only calls us for a hardware not-present fault. If the PTE
+  // is hardware-present now, another thread completed the same page-in after
+  // this CPU faulted. PTE_PROTNONE is logically present to the VM subsystem
+  // but must fall through so the access is delivered as SIGSEGV.
   uint64_t *pte = lookup_pte(t->mm->cr3, page_addr);
-  if (pte && pte_present(*pte))
-    return 0;
+  if (pte && (*pte & PTE_PRESENT)) {
+    invlpg(page_addr);
+    spin_unlock_irqrestore(&t->mm->mmap_lock, mmap_flags);
+    return FAULT_HANDLED;
+  }
+
+  // Snapshot only stable VMA fields while holding mmap_lock and retain the
+  // backing object before I/O. MAP_FIXED/munmap may free mr after we unlock.
+  uint64_t snap_vaddr = mr->vaddr;
+  uint64_t snap_size = mr->size;
+  uint64_t snap_offset = mr->offset;
+  uint32_t snap_prot = mr->prot;
+  uint32_t snap_flags = mr->flags;
+  uint64_t fault_off = snap_offset + (page_addr - snap_vaddr);
 
   // ---- FD_REGULAR file-backed mapping: page-in via the page cache ----
   if (mr->inode) {
-    uint64_t mmap_flags;
-    spin_lock_irqsave(&t->mm->mmap_lock, &mmap_flags);
-    mr = vma_find(t->mm, page_addr);
-    if (!mr || !mr->inode) {
-      spin_unlock_irqrestore(&t->mm->mmap_lock, mmap_flags);
-      return FAULT_NOT_HANDLED;
-    }
-    fault_off = mr->offset + (page_addr - mr->vaddr);
     uint64_t page_idx = fault_off / PAGE_SIZE;
     uint32_t window = 1;
     if (mr->ra_sequential_faults == 0) {
@@ -126,17 +134,13 @@ int file_fault_handler(uint64_t fault_addr, xtask *t) {
     }
     mr->ra_last_page = page_idx;
 
-    uint64_t vma_end = mr->vaddr + mr->size;
+    uint64_t vma_end = snap_vaddr + snap_size;
     uint64_t vma_pages = (vma_end - page_addr) / PAGE_SIZE;
     if (vma_pages == 0)
       vma_pages = 1;
     if (window > vma_pages)
       window = (uint32_t)vma_pages;
 
-    uint64_t snap_vaddr = mr->vaddr;
-    uint64_t snap_size = mr->size;
-    uint64_t snap_offset = mr->offset;
-    uint32_t snap_prot = mr->prot;
     struct inode *ip = inode_get(mr->inode);
     spin_unlock_irqrestore(&t->mm->mmap_lock, mmap_flags);
 
@@ -187,9 +191,10 @@ int file_fault_handler(uint64_t fault_addr, xtask *t) {
     bool same_mapping =
         current && current->inode == ip && current->vaddr == snap_vaddr &&
         current->size == snap_size && current->offset == snap_offset &&
-        current->prot == snap_prot;
+        current->prot == snap_prot && current->flags == snap_flags;
     pte = lookup_pte(t->mm->cr3, page_addr);
-    if (same_mapping && pte && pte_present(*pte)) {
+    if (same_mapping && pte && (*pte & PTE_PRESENT)) {
+      invlpg(page_addr);
       spin_unlock_irqrestore(&t->mm->mmap_lock, mmap_flags);
       bfc_free_page(user_page, 1);
       inode_put(ip);
@@ -207,6 +212,8 @@ int file_fault_handler(uint64_t fault_addr, xtask *t) {
   // ---- memfd MAP_PRIVATE mapping: COW-copy from the shm page list ----
   if (mr->shm_private_src) {
     struct shm *shm = mr->shm_private_src;
+    shm_get(shm);
+    spin_unlock_irqrestore(&t->mm->mmap_lock, mmap_flags);
     size_t idx = (size_t)(fault_off / PAGE_SIZE);
     uint64_t src_phys;
     size_t npages = shm->npages;
@@ -216,6 +223,7 @@ int file_fault_handler(uint64_t fault_addr, xtask *t) {
     } else if (idx - npages < list_pages) {
       src_phys = shm->page_list[idx - npages];
     } else {
+      shm_put(shm);
       return 0; // beyond the memfd → SIGSEGV
     }
 
@@ -223,6 +231,7 @@ int file_fault_handler(uint64_t fault_addr, xtask *t) {
     if (!user_page) {
       printk(LOG_WARN, "file_fault: OOM user page (memfd) addr=0x%lx\n",
              (unsigned long)page_addr);
+      shm_put(shm);
       return 0;
     }
     uint64_t user_phys = (__force uint64_t)page_to_phys(user_page);
@@ -231,14 +240,32 @@ int file_fault_handler(uint64_t fault_addr, xtask *t) {
     void *src_va = (__force void *)phys_to_virt((__force phys_addr_t)src_phys);
     __memcpy(user_va, src_va, PAGE_SIZE);
 
-    uint64_t pte_flags = file_fault_pte_flags(mr->prot);
-    if (!file_fault_map(t->mm->cr3, page_addr, user_phys, pte_flags)) {
+    uint64_t pte_flags = file_fault_pte_flags(snap_prot);
+    spin_lock_irqsave(&t->mm->mmap_lock, &mmap_flags);
+    mmap_region *current = vma_find(t->mm, page_addr);
+    bool same_mapping =
+        current && current->shm_private_src == shm &&
+        current->vaddr == snap_vaddr && current->size == snap_size &&
+        current->offset == snap_offset && current->prot == snap_prot &&
+        current->flags == snap_flags;
+    pte = lookup_pte(t->mm->cr3, page_addr);
+    if (same_mapping && pte && (*pte & PTE_PRESENT)) {
+      invlpg(page_addr);
+      spin_unlock_irqrestore(&t->mm->mmap_lock, mmap_flags);
       bfc_free_page(user_page, 1);
-      return 0;
+      shm_put(shm);
+      return FAULT_HANDLED;
     }
-    return 1;
+    bool mapped = same_mapping &&
+                  file_fault_map(t->mm->cr3, page_addr, user_phys, pte_flags);
+    spin_unlock_irqrestore(&t->mm->mmap_lock, mmap_flags);
+    if (!mapped)
+      bfc_free_page(user_page, 1);
+    shm_put(shm);
+    return mapped ? FAULT_HANDLED : FAULT_NOT_HANDLED;
   }
 
+  spin_unlock_irqrestore(&t->mm->mmap_lock, mmap_flags);
   return 0; // anonymous / SHM / PHYSICAL — not a file-backed demand-fault
 }
 

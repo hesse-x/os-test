@@ -8,12 +8,16 @@
 #define KERNEL_XCORE_TRAP_H
 
 #include "arch/x64/trap.h"
-#include "kernel/xcore/xtask.h"
+
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+
+#include "kernel/xcore/xtask.h"
+
 #include <xos/syscall_nums.h>
 
+struct page;
 // Hook registration points: BSD layer registers during init, Xcore calls at
 // trap_dispatch end
 typedef void (*signal_check_fn)(xtask *t, trapframe *tf);
@@ -72,6 +76,7 @@ void trap_dispatch(trapframe *tf);
 void xcall_dispatch(trapframe *tf);
 void irq_init(void);
 void sig_init(void);
+void tlb_shootdown_mm(uint64_t cr3);
 
 // Xcore IPC syscall function declarations
 int64_t sys_getpid(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);

@@ -1,4 +1,8 @@
-/* SPDX-License-Identifier: MIT */
+/*
+ * Copyright (c) 2026 hesse
+ *
+ * SPDX-License-Identifier: MIT
+ */
 #include <stddef.h>
 
 #include "kernel/driver/dma_resv.h"

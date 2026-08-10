@@ -8,8 +8,6 @@
 # is injected via the QEMU monitor's `sendkey` command (monitor on stdio).
 #
 # -s: enable GDB remote debug (off by default)
-# -o <file>: serial output written to the specified file (default log.txt)
-
 
 LOGFILE="log.txt"
 rm -f "$LOGFILE"
