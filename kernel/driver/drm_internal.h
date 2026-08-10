@@ -96,7 +96,7 @@ struct drm_file {
   int fd;         /* system fd number, 0 = free slot */
   xtask *proc;    /* owning process */
   bool used;      /* slot in use */
-  bool is_render; /* render node (renderD128): no master/auth */
+  bool is_render; /* render nodes do not participate in master/auth */
 
   /* Venus 3D context (plan1 CONTEXT_INIT) */
   uint32_t ctx_id;    /* 0 = no context */

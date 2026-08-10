@@ -7,6 +7,7 @@
 // kernel/xcore/init.c — Xcore initialization sequence
 // Extracted from kernel/kernel.c (phase 5 step 5.1)
 
+#include "arch/x64/intel_stolen_early.h"
 #include "arch/x64/paging.h"
 #include "arch/x64/smp.h"
 #include "arch/x64/utils.h"
@@ -35,6 +36,7 @@ __attribute__((no_sanitize("kernel-address"))) void xcore_init(boot_info *bi) {
   }
 
   PERF_PHASE_BEGIN(PERF_PHASE_MEMORY);
+  intel_stolen_early_detect();
   init_mem(bi);
   PERF_PHASE_END(PERF_PHASE_MEMORY);
   PERF_PHASE_BEGIN(PERF_PHASE_ACPI);

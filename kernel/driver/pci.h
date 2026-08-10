@@ -55,6 +55,8 @@ enum pci_irq_mode {
   PCI_IRQ_MSIX,
 };
 
+typedef void (*pci_irq_handler_t)(trapframe *frame, void *ctx);
+
 // ===================== PCI device =====================
 typedef struct pci_device {
   uint8_t bus;
@@ -62,6 +64,7 @@ typedef struct pci_device {
   uint8_t func;
   uint16_t vendor_id;
   uint16_t device_id;
+  uint8_t revision_id;
   uint16_t class_code; // (class << 8) | subclass
   uint32_t class_id;   // (class << 16) | (subclass << 8) | prog_if
   uint16_t subsystem_vendor_id;
@@ -79,6 +82,14 @@ typedef struct pci_device {
   int msix_num_vectors;       // Number of vectors allocated
   enum pci_irq_mode irq_mode;
   uint32_t irq_registered_mask;
+  uint16_t irq_saved_command;
+  uint16_t irq_saved_control;
+  uint32_t irq_saved_address_lo;
+  uint32_t irq_saved_address_hi;
+  uint32_t irq_saved_data;
+  bool irq_saved_64bit;
+  bool irq_state_saved;
+  bool bar_sizing_valid;
   bool enabled;
   uint64_t dma_mask;
   enum {
@@ -140,8 +151,12 @@ void pci_init();
 
 uint32_t pci_read_config(uint8_t bus, uint8_t dev, uint8_t func,
                          uint16_t offset);
+uint16_t pci_read_config16(uint8_t bus, uint8_t dev, uint8_t func,
+                           uint16_t offset);
 void pci_write_config(uint8_t bus, uint8_t dev, uint8_t func, uint16_t offset,
                       uint32_t value);
+void pci_write_config16(uint8_t bus, uint8_t dev, uint8_t func, uint16_t offset,
+                        uint16_t value);
 
 pci_device *pci_find_device(uint16_t class_code);
 pci_device *pci_find_device_by_id(uint16_t vendor, uint16_t device);
@@ -164,6 +179,8 @@ void pci_iounmap(pci_device *dev, int bar_idx);
 int pci_set_dma_mask(pci_device *dev, uint8_t address_bits);
 int pci_enable_msi(pci_device *dev);
 int pci_request_irq(pci_device *dev, int entry, void (*handler)(trapframe *));
+int pci_request_irq_ctx(pci_device *dev, int entry, pci_irq_handler_t handler,
+                        void *ctx);
 void pci_free_irq(pci_device *dev, int entry);
 void pci_disable_interrupts(pci_device *dev);
 void pci_get_resource_stats(struct pci_resource_stats *stats);

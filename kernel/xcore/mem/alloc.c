@@ -5,6 +5,7 @@
  */
 
 #include "kernel/xcore/mem/alloc.h"
+#include "arch/x64/intel_stolen_early.h"
 #include "arch/x64/memlayout.h"
 #include "arch/x64/paging.h"
 #include "arch/x64/smp.h" // AP_TRAMPOLINE_PHYS (reserve out of BFC free list)
@@ -358,6 +359,24 @@ __attribute__((no_sanitize("kernel-address"))) void init_mem(boot_info *bi) {
       frames[ap_idx].status = PAGE_RESERVED;
       refcount_set(&frames[ap_idx].p_refcount, 0);
     }
+  }
+
+  // The firmware may describe stolen graphics memory as conventional RAM.
+  // Keep it out of BFC before the free list is constructed.
+  const struct intel_stolen_early_info *stolen = intel_stolen_early_get();
+  if (stolen->valid) {
+    size_t first = PHY_TO_PAGE(stolen->base);
+    size_t pages = stolen->size / PAGE_SIZE;
+    for (size_t i = 0; i < pages && first + i < total_page_frames; i++) {
+      frames[first + i].status = PAGE_RESERVED;
+      refcount_set(&frames[first + i].p_refcount, 0);
+    }
+    printk(LOG_INFO,
+           "i915 early: reserved stolen [0x%lx,0x%lx) gms=0x%x ggms=%u\n",
+           stolen->base, stolen->base + stolen->size, stolen->gms,
+           stolen->ggms);
+  } else if (stolen->matched) {
+    printk(LOG_ERROR, "i915 early: target matched but stolen range invalid\n");
   }
 
   // 6. The full direct map (identity + higher-half) was already built by

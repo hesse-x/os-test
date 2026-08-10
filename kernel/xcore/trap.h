@@ -96,10 +96,13 @@ int64_t sys_pthread_setup(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 // IRQ registration
 #define MAX_IRQ_HANDLERS 256
 typedef void (*irq_handler_fn)(trapframe *);
+typedef void (*irq_handler_ctx_fn)(trapframe *, void *);
 typedef int64_t (*syscall_fn)(int64_t, int64_t, int64_t, int64_t, int64_t,
                               int64_t);
 void irq_register(int vec, irq_handler_fn fn);
 void irq_unregister(int vec);
+int irq_register_ctx(int vec, irq_handler_ctx_fn fn, void *ctx);
+void irq_unregister_sync(int vec);
 int irq_owner_check(int irq);
 void irq_owner_cleanup(pid_t pid);
 int irq_has_handler(int irq);

@@ -24,8 +24,6 @@
 #include "kernel/xcore/perf/core.h"
 #include "kernel/xcore/perf/event.h"
 #include "kernel/xcore/perf/pmu.h"
-#include "kernel/xcore/perf/sample.h"
-#include "kernel/xcore/perf/unwind.h"
 #include "kernel/xcore/rcu.h"
 #include "kernel/xcore/sched.h"
 #include "kernel/xcore/sparse.h"
@@ -36,9 +34,21 @@
 #include <xos/signal.h>
 #include <xos/syscall_nums.h>
 
+#ifdef PERF
+#include "kernel/xcore/perf/sample.h"
+#include "kernel/xcore/perf/unwind.h"
+#endif
+
 // ===================== IRQ handler registry =====================
 #define MAX_IRQ_HANDLERS 256
-static irq_handler_fn irq_handlers[MAX_IRQ_HANDLERS];
+struct irq_slot {
+  irq_handler_fn handler;
+  irq_handler_ctx_fn handler_ctx;
+  void *ctx;
+  atomic_t in_flight;
+};
+static struct irq_slot irq_slots[MAX_IRQ_HANDLERS];
+static spinlock irq_registry_lock = SPINLOCK_INIT;
 
 // ===================== IRQ owner (user-space driver binding)
 // =====================
@@ -48,20 +58,55 @@ pid_t irq_owner[MAX_IRQ_HANDLERS];
 int irq_has_handler(int irq) {
   if (irq < 0 || irq >= MAX_IRQ_HANDLERS)
     return 0;
-  return irq_handlers[irq] != NULL;
+  bool present;
+  uint64_t flags;
+  spin_lock_irqsave(&irq_registry_lock, &flags);
+  present =
+      irq_slots[irq].handler != NULL || irq_slots[irq].handler_ctx != NULL;
+  spin_unlock_irqrestore(&irq_registry_lock, flags);
+  return present;
 }
 
 void irq_register(int vec, irq_handler_fn fn) {
   if (vec >= 0 && vec < MAX_IRQ_HANDLERS) {
-    irq_handlers[vec] = fn;
+    uint64_t flags;
+    spin_lock_irqsave(&irq_registry_lock, &flags);
+    irq_slots[vec].handler = fn;
+    irq_slots[vec].handler_ctx = NULL;
+    irq_slots[vec].ctx = NULL;
+    spin_unlock_irqrestore(&irq_registry_lock, flags);
   }
 }
 
-void irq_unregister(int vec) {
-  if (vec >= 0 && vec < MAX_IRQ_HANDLERS) {
-    irq_handlers[vec] = NULL;
+int irq_register_ctx(int vec, irq_handler_ctx_fn fn, void *ctx) {
+  if (vec < 0 || vec >= MAX_IRQ_HANDLERS || !fn)
+    return -EINVAL;
+  uint64_t flags;
+  spin_lock_irqsave(&irq_registry_lock, &flags);
+  if (irq_slots[vec].handler || irq_slots[vec].handler_ctx) {
+    spin_unlock_irqrestore(&irq_registry_lock, flags);
+    return -EBUSY;
   }
+  irq_slots[vec].handler_ctx = fn;
+  irq_slots[vec].ctx = ctx;
+  spin_unlock_irqrestore(&irq_registry_lock, flags);
+  return 0;
 }
+
+void irq_unregister_sync(int vec) {
+  if (vec < 0 || vec >= MAX_IRQ_HANDLERS)
+    return;
+  uint64_t flags;
+  spin_lock_irqsave(&irq_registry_lock, &flags);
+  irq_slots[vec].handler = NULL;
+  irq_slots[vec].handler_ctx = NULL;
+  irq_slots[vec].ctx = NULL;
+  spin_unlock_irqrestore(&irq_registry_lock, flags);
+  while (atomic_read(&irq_slots[vec].in_flight) != 0)
+    __asm__ volatile("pause" ::: "memory");
+}
+
+void irq_unregister(int vec) { irq_unregister_sync(vec); }
 
 // ===================== Hook variables (BSD layer registers during init)
 // ===================== Defined here; declarations in kernel/xcore/trap.h
@@ -334,12 +379,28 @@ void trap_dispatch(trapframe *tf) {
   }
 
   // Check registered handler
-  if (tf->trapno < MAX_IRQ_HANDLERS && irq_handlers[tf->trapno] != NULL) {
+  irq_handler_fn handler = NULL;
+  irq_handler_ctx_fn handler_ctx = NULL;
+  void *handler_arg = NULL;
+  if (tf->trapno < MAX_IRQ_HANDLERS) {
+    spin_lock(&irq_registry_lock);
+    handler = irq_slots[tf->trapno].handler;
+    handler_ctx = irq_slots[tf->trapno].handler_ctx;
+    handler_arg = irq_slots[tf->trapno].ctx;
+    if (handler || handler_ctx)
+      atomic_inc(&irq_slots[tf->trapno].in_flight);
+    spin_unlock(&irq_registry_lock);
+  }
+  if (handler || handler_ctx) {
     bool trace_irq =
         tf->trapno != LAPIC_TIMER_VECTOR && tf->trapno != RESCHEDULE_VECTOR;
     if (trace_irq)
       perf_trace_irq(XOS_PERF_TRACE_IRQ_BEGIN, (uint16_t)tf->trapno, -1);
-    irq_handlers[tf->trapno](tf);
+    if (handler_ctx)
+      handler_ctx(tf, handler_arg);
+    else
+      handler(tf);
+    atomic_dec(&irq_slots[tf->trapno].in_flight);
     if (trace_irq)
       perf_trace_irq(XOS_PERF_TRACE_IRQ_END, (uint16_t)tf->trapno, -1);
     return;

@@ -2758,8 +2758,8 @@ static int drm_open_file(xtask *proc, struct file *file) {
   return drm_open_file_common(proc, file, false);
 }
 
-/* Render node open: shares virtio_gpu_backend->files[] with card0 but marks
- * is_render. Render fds reject SET_MASTER/GET_MAGIC/AUTH_MAGIC. */
+/* Render node open shares the backend file table with the primary node, but
+ * marks is_render. Render fds reject SET_MASTER/GET_MAGIC/AUTH_MAGIC. */
 static int drm_render_open_file(xtask *proc, struct file *file) {
   return drm_open_file_common(proc, file, true);
 }
@@ -2838,7 +2838,7 @@ static const struct dev_ops virtio_gpu_primary_ops = {
     .ioctl_file = drm_ioctl_file,
 };
 
-/* Render node ops: kernel device, shares ioctl/mmap/close with card0,
+/* Render node ops: shares ioctl/mmap/close with the paired primary node and
  * rejects read/poll (no vblank events on render nodes). */
 static const struct dev_ops virtio_gpu_render_ops = {
     .driver_pid = 0,
@@ -2978,16 +2978,17 @@ static int drm_dev_register(void) {
     return rc;
   }
 
-  struct sysfs_node *card0 =
+  struct sysfs_node *primary_node =
       drm_core_class_node(virtio_gpu_backend->core, DRM_NODE_PRIMARY);
-  if (card0) {
-    sysfs_create_file(card0, "vendor", &drm_attr_vendor);
-    sysfs_create_file(card0, "device", &drm_attr_device);
-    sysfs_create_file(card0, "class", &drm_attr_class);
-    sysfs_create_file(card0, "enabled", &drm_attr_enabled);
-    sysfs_create_file(card0, "mode", &drm_attr_mode);
-    sysfs_create_file(card0, "connector_status", &drm_attr_connector_status);
-    sysfs_create_file(card0, "num_scanouts", &drm_attr_num_scanouts);
+  if (primary_node) {
+    sysfs_create_file(primary_node, "vendor", &drm_attr_vendor);
+    sysfs_create_file(primary_node, "device", &drm_attr_device);
+    sysfs_create_file(primary_node, "class", &drm_attr_class);
+    sysfs_create_file(primary_node, "enabled", &drm_attr_enabled);
+    sysfs_create_file(primary_node, "mode", &drm_attr_mode);
+    sysfs_create_file(primary_node, "connector_status",
+                      &drm_attr_connector_status);
+    sysfs_create_file(primary_node, "num_scanouts", &drm_attr_num_scanouts);
   }
 
   struct sysfs_node *rnode =

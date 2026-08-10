@@ -16,6 +16,7 @@
 #include "arch/x64/utils.h"
 #include "kernel/bsd/proc.h"
 #include "kernel/bsd/sysfs.h"
+#include "kernel/firmware.h"
 #include "kernel/kernel.h"
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/mem/alloc.h"
@@ -84,7 +85,7 @@ __attribute__((no_sanitize("kernel-address"))) void kernel_main(boot_info *bi) {
   // VFS data structures must be initialized before driver_init
   // so that devtmpfs_create() calls during driver_init survive.
   // sysfs_init must also run before driver_init so that
-  // drm_dev_register can create /sys/class/drm/card0/* attributes.
+  // DRM registration can create attributes below dynamically allocated nodes.
   PERF_PHASE_BEGIN(PERF_PHASE_VFS_CORE);
   PERF_PHASE_BEGIN(PERF_PHASE_INODE);
   inode_init();
@@ -112,6 +113,7 @@ __attribute__((no_sanitize("kernel-address"))) void kernel_main(boot_info *bi) {
   // allocator, and VFS have all reached their steady-state configuration.
   sysfs_lifecycle_selftest();
   xcore_async_selftest_start();
+  firmware_selftest_start();
 
   // Early BSP-side SSE self-test: verify CR4.OSFXSR lets SSE instructions
   // execute without #UD. This is the exact failure mode seen when APs

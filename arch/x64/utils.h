@@ -27,6 +27,12 @@ static inline uint8_t inb(uint16_t port) {
   return ret;
 }
 
+static inline uint32_t inl(uint16_t port) {
+  uint32_t ret;
+  __asm__ volatile("inl %1, %0" : "=a"(ret) : "Nd"(port));
+  return ret;
+}
+
 // ===================== MSR helpers =====================
 static inline void wrmsr(uint32_t msr, uint64_t val) {
   uint32_t lo = val & 0xFFFFFFFF;

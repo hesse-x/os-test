@@ -130,6 +130,16 @@ pci_read_config(uint8_t bus, uint8_t dev, uint8_t func, uint16_t offset) {
   return *(volatile uint32_t __force *)addr;
 }
 
+__attribute__((no_sanitize("kernel-address"))) uint16_t
+pci_read_config16(uint8_t bus, uint8_t dev, uint8_t func, uint16_t offset) {
+  volatile uint16_t __iomem *addr =
+      (volatile uint16_t __iomem *)((uint8_t __iomem *)ecam_vbase +
+                                    ((uint64_t)bus << 20) +
+                                    ((uint64_t)dev << 15) +
+                                    ((uint64_t)func << 12) + offset);
+  return *(volatile uint16_t __force *)addr;
+}
+
 __attribute__((no_sanitize("kernel-address"))) void
 pci_write_config(uint8_t bus, uint8_t dev, uint8_t func, uint16_t offset,
                  uint32_t value) {
@@ -141,9 +151,20 @@ pci_write_config(uint8_t bus, uint8_t dev, uint8_t func, uint16_t offset,
   *(volatile uint32_t __force *)addr = value;
 }
 
+__attribute__((no_sanitize("kernel-address"))) void
+pci_write_config16(uint8_t bus, uint8_t dev, uint8_t func, uint16_t offset,
+                   uint16_t value) {
+  volatile uint16_t __iomem *addr =
+      (volatile uint16_t __iomem *)((uint8_t __iomem *)ecam_vbase +
+                                    ((uint64_t)bus << 20) +
+                                    ((uint64_t)dev << 15) +
+                                    ((uint64_t)func << 12) + offset);
+  *(volatile uint16_t __force *)addr = value;
+}
+
 // ===================== BAR sizing =====================
 
-static void pci_size_bar(pci_device *d, int bar_idx) {
+static bool pci_size_bar(pci_device *d, int bar_idx) {
   uint8_t bus = d->bus, dev = d->dev, func = d->func;
   uint8_t offset = 0x10 + bar_idx * 4;
 
@@ -152,10 +173,13 @@ static void pci_size_bar(pci_device *d, int bar_idx) {
     d->bar[bar_idx].phys = 0;
     d->bar[bar_idx].size = 0;
     d->bar[bar_idx].type = 0;
-    return;
+    return true;
   }
 
+  uint16_t command = pci_read_config16(bus, dev, func, 0x04);
+  pci_write_config16(bus, dev, func, 0x04, command & ~0x3u);
   bool is_io = (orig & PCI_BAR_IO_SPACE);
+  bool restored = true;
 
   // Write all 1s, read back mask (hardwired bits survive, decode bits read as
   // 0)
@@ -173,6 +197,13 @@ static void pci_size_bar(pci_device *d, int bar_idx) {
     d->bar[bar_idx].size = io_size;
     d->bar[bar_idx].type = 1; // I/O
   } else if (is_64) {
+    if (bar_idx == 5) {
+      pci_write_config(bus, dev, func, offset, orig);
+      pci_write_config16(bus, dev, func, 0x04, command);
+      d->bar[bar_idx].phys = 0;
+      d->bar[bar_idx].size = 0;
+      return false;
+    }
     // Also size the high 32 bits (next BAR) before restoring low
     uint32_t orig_hi = pci_read_config(bus, dev, func, offset + 4);
     pci_write_config(bus, dev, func, offset + 4, 0xFFFFFFFF);
@@ -180,6 +211,7 @@ static void pci_size_bar(pci_device *d, int bar_idx) {
     // Restore both halves
     pci_write_config(bus, dev, func, offset + 4, orig_hi);
     pci_write_config(bus, dev, func, offset, orig);
+    restored = pci_read_config(bus, dev, func, offset + 4) == orig_hi;
 
     uint64_t size64 = ((uint64_t)mask_hi << 32) | (mask & ~0xFU);
     size64 = ~size64 + 1;
@@ -197,6 +229,14 @@ static void pci_size_bar(pci_device *d, int bar_idx) {
     d->bar[bar_idx].size = size32;
     d->bar[bar_idx].type = 0; // MMIO32
   }
+  pci_write_config16(bus, dev, func, 0x04, command);
+  if (!restored || pci_read_config(bus, dev, func, offset) != orig ||
+      pci_read_config16(bus, dev, func, 0x04) != command) {
+    d->bar[bar_idx].phys = 0;
+    d->bar[bar_idx].size = 0;
+    return false;
+  }
+  return true;
 }
 
 // ===================== Device scanning =====================
@@ -224,6 +264,7 @@ pci_scan_function(uint8_t bus, uint8_t dev, uint8_t func) {
   d->func = func;
   d->vendor_id = vendor;
   d->device_id = device;
+  d->revision_id = rev_class & 0xff;
   d->class_code = class_code;
   d->class_id = (rev_class >> 8) & 0xffffff;
   d->header_type = header_type & 0x7F;
@@ -237,6 +278,8 @@ pci_scan_function(uint8_t bus, uint8_t dev, uint8_t func) {
   d->msix_num_vectors = 0;
   d->irq_mode = PCI_IRQ_NONE;
   d->irq_registered_mask = 0;
+  d->irq_state_saved = false;
+  d->bar_sizing_valid = true;
   d->enabled = false;
   d->dma_mask = UINT32_MAX;
   d->bind_state = PCI_BIND_UNBOUND;
@@ -284,7 +327,8 @@ pci_scan_function(uint8_t bus, uint8_t dev, uint8_t func) {
   // Size all BARs
   int max_bars = (d->header_type == PCI_HEADER_TYPE_BRIDGE) ? 2 : 6;
   for (int i = 0; i < max_bars; i++) {
-    pci_size_bar(d, i);
+    if (!pci_size_bar(d, i))
+      d->bar_sizing_valid = false;
     if (d->bar[i].type == 2 && i < max_bars - 1)
       i++; // skip next (consumed by 64-bit)
   }
@@ -451,9 +495,9 @@ pci_enable_device_bars(pci_device *d, uint32_t bar_mask, uint32_t wc_mask) {
     newly_mapped |= 1u << i;
   }
 
-  uint32_t cmd = pci_read_config(d->bus, d->dev, d->func, 0x04);
+  uint16_t cmd = pci_read_config16(d->bus, d->dev, d->func, 0x04);
   cmd |= (1 << 1) | (1 << 2); // Bus Master + Memory Space
-  pci_write_config(d->bus, d->dev, d->func, 0x04, cmd);
+  pci_write_config16(d->bus, d->dev, d->func, 0x04, cmd);
   d->enabled = true;
   return 0;
 }
@@ -475,9 +519,9 @@ pci_disable_device(pci_device *d) {
   if (!d)
     return;
   pci_disable_interrupts(d);
-  uint32_t cmd = pci_read_config(d->bus, d->dev, d->func, 0x04);
+  uint16_t cmd = pci_read_config16(d->bus, d->dev, d->func, 0x04);
   cmd &= ~((1u << 1) | (1u << 2));
-  pci_write_config(d->bus, d->dev, d->func, 0x04, cmd);
+  pci_write_config16(d->bus, d->dev, d->func, 0x04, cmd);
   for (int i = 0; i < 6; i++)
     pci_iounmap(d, i);
   d->enabled = false;
@@ -643,6 +687,10 @@ static bool pci_test_fail_probe;
 static int pci_test_cookie;
 
 static void pci_test_irq(trapframe *frame) { (void)frame; }
+static void pci_test_irq_ctx(trapframe *frame, void *ctx) {
+  (void)frame;
+  BUG_ON(ctx != &pci_test_cookie);
+}
 
 static int pci_test_probe(pci_device *dev, const struct pci_device_id *id) {
   BUG_ON(!dev || !id || dev->bind_state != PCI_BIND_PROBING);
@@ -731,7 +779,7 @@ void pci_lifecycle_selftest(void) {
   pci_test_fail_once(PCI_FAULT_IRQ_REGISTER);
   BUG_ON(pci_request_irq(fake, 0, pci_test_irq) != -ENOMEM);
   BUG_ON(fake->irq_registered_mask != 0 || irq_has_handler(irq_vector));
-  BUG_ON(pci_request_irq(fake, 0, pci_test_irq) != 0);
+  BUG_ON(pci_request_irq_ctx(fake, 0, pci_test_irq_ctx, &pci_test_cookie) != 0);
   BUG_ON(!(fake->irq_registered_mask & 1u) || !irq_has_handler(irq_vector));
   pci_free_irq(fake, 0);
   BUG_ON(fake->irq_registered_mask != 0 || irq_has_handler(irq_vector));
@@ -872,6 +920,19 @@ pci_enable_msi(pci_device *dev) {
   dev->msix_vector_base = vector; // reuse field for MSI vector base
   dev->msix_num_vectors = 1;
   dev->irq_mode = PCI_IRQ_MSI;
+  dev->irq_saved_control = msg_ctrl;
+  dev->irq_saved_command =
+      pci_read_config16(dev->bus, dev->dev, dev->func, 0x04);
+  dev->irq_saved_address_lo =
+      pci_read_config(dev->bus, dev->dev, dev->func, dev->msi_cap_offset + 4);
+  dev->irq_saved_64bit = is_64bit;
+  dev->irq_saved_address_hi =
+      is_64bit ? pci_read_config(dev->bus, dev->dev, dev->func,
+                                 dev->msi_cap_offset + 8)
+               : 0;
+  dev->irq_saved_data = pci_read_config(
+      dev->bus, dev->dev, dev->func, dev->msi_cap_offset + (is_64bit ? 12 : 8));
+  dev->irq_state_saved = true;
 
   uint32_t bsp_apic_id = (uint32_t)(lapic_read(LAPIC_ID) >> 24);
 
@@ -901,9 +962,8 @@ pci_enable_msi(pci_device *dev) {
                    cap_dword);
 
   // Disable INTx: set bit 10 (Interrupt Disable) in Command register
-  uint32_t cmd = pci_read_config(dev->bus, dev->dev, dev->func, 0x04);
-  cmd |= (1 << 10);
-  pci_write_config(dev->bus, dev->dev, dev->func, 0x04, cmd);
+  pci_write_config16(dev->bus, dev->dev, dev->func, 0x04,
+                     dev->irq_saved_command | (1 << 10));
 
   return 0;
 }
@@ -945,6 +1005,10 @@ pci_enable_msix(pci_device *dev, int num_vectors) {
   dev->msix_vector_base = base;
   dev->msix_num_vectors = num_vectors;
   dev->irq_mode = PCI_IRQ_MSIX;
+  dev->irq_saved_control = msg_ctrl;
+  dev->irq_saved_command =
+      pci_read_config16(dev->bus, dev->dev, dev->func, 0x04);
+  dev->irq_state_saved = true;
 
   volatile uint32_t __iomem *table =
       (volatile uint32_t __iomem *)((uint8_t __iomem *)bar_vaddr +
@@ -987,9 +1051,8 @@ pci_enable_msix(pci_device *dev, int num_vectors) {
                    cap_dword);
 
   // Disable INTx: set bit 10 (Interrupt Disable) in Command register
-  uint32_t cmd = pci_read_config(dev->bus, dev->dev, dev->func, 0x04);
-  cmd |= (1 << 10); // Interrupt Disable
-  pci_write_config(dev->bus, dev->dev, dev->func, 0x04, cmd);
+  pci_write_config16(dev->bus, dev->dev, dev->func, 0x04,
+                     dev->irq_saved_command | (1 << 10));
 
   // Clear Function Mask now that setup is done
   cap_dword =
@@ -1051,13 +1114,40 @@ int pci_request_irq(pci_device *dev, int entry, void (*handler)(trapframe *)) {
   return 0;
 }
 
+int pci_request_irq_ctx(pci_device *dev, int entry, pci_irq_handler_t handler,
+                        void *ctx) {
+  if (!dev || !handler || dev->irq_mode == PCI_IRQ_NONE || entry < 0 ||
+      entry >= dev->msix_num_vectors || entry >= 32)
+    return -EINVAL;
+  int vector = dev->msix_vector_base + entry;
+  mutex_lock(&pci_resource_mutex);
+  uint32_t mask = 1u << entry;
+  if ((dev->irq_registered_mask & mask) || irq_has_handler(vector)) {
+    mutex_unlock(&pci_resource_mutex);
+    return -EBUSY;
+  }
+  if (pci_fault(PCI_FAULT_IRQ_REGISTER)) {
+    mutex_unlock(&pci_resource_mutex);
+    return -ENOMEM;
+  }
+  int rc = irq_register_ctx(vector, handler, ctx);
+  if (rc) {
+    mutex_unlock(&pci_resource_mutex);
+    return rc;
+  }
+  dev->irq_registered_mask |= mask;
+  pci_stats.registered_irqs++;
+  mutex_unlock(&pci_resource_mutex);
+  return 0;
+}
+
 void pci_free_irq(pci_device *dev, int entry) {
   if (!dev || entry < 0 || entry >= 32)
     return;
   mutex_lock(&pci_resource_mutex);
   uint32_t mask = 1u << entry;
   if (dev->irq_registered_mask & mask) {
-    irq_unregister(dev->msix_vector_base + entry);
+    irq_unregister_sync(dev->msix_vector_base + entry);
     dev->irq_registered_mask &= ~mask;
     ASSERT(pci_stats.registered_irqs > 0);
     pci_stats.registered_irqs--;
@@ -1070,7 +1160,8 @@ pci_disable_interrupts(pci_device *dev) {
   if (!dev || dev->irq_mode == PCI_IRQ_NONE)
     return;
 
-  if (dev->irq_mode == PCI_IRQ_MSIX) {
+  enum pci_irq_mode old_mode = dev->irq_mode;
+  if (old_mode == PCI_IRQ_MSIX) {
     uint32_t cap =
         pci_read_config(dev->bus, dev->dev, dev->func, dev->msix_cap_offset);
     uint16_t ctrl = cap >> 16;
@@ -1093,9 +1184,29 @@ pci_disable_interrupts(pci_device *dev) {
     if (dev->irq_registered_mask & (1u << i))
       pci_free_irq(dev, i);
     else
-      irq_unregister(dev->msix_vector_base + i);
+      irq_unregister_sync(dev->msix_vector_base + i);
   }
   pci_free_vectors(dev->msix_vector_base, dev->msix_num_vectors);
+  if (dev->irq_state_saved) {
+    uint8_t cap_offset =
+        old_mode == PCI_IRQ_MSIX ? dev->msix_cap_offset : dev->msi_cap_offset;
+    uint32_t cap = pci_read_config(dev->bus, dev->dev, dev->func, cap_offset);
+    if (old_mode == PCI_IRQ_MSI) {
+      pci_write_config(dev->bus, dev->dev, dev->func, cap_offset + 4,
+                       dev->irq_saved_address_lo);
+      if (dev->irq_saved_64bit)
+        pci_write_config(dev->bus, dev->dev, dev->func, cap_offset + 8,
+                         dev->irq_saved_address_hi);
+      pci_write_config(dev->bus, dev->dev, dev->func,
+                       cap_offset + (dev->irq_saved_64bit ? 12 : 8),
+                       dev->irq_saved_data);
+    }
+    pci_write_config(dev->bus, dev->dev, dev->func, cap_offset,
+                     (cap & 0xffff) | ((uint32_t)dev->irq_saved_control << 16));
+    pci_write_config16(dev->bus, dev->dev, dev->func, 0x04,
+                       dev->irq_saved_command);
+    dev->irq_state_saved = false;
+  }
   dev->msix_vector_base = -1;
   dev->msix_num_vectors = 0;
   dev->irq_mode = PCI_IRQ_NONE;
