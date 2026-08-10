@@ -138,9 +138,14 @@ struct drm_fence;
 int bsd_sync_file_fd_install(xtask *proc, struct drm_fence *fence);
 struct file *bsd_sync_file_fd_get(xtask *proc, int fd);
 struct drm_prime_object;
+struct dma_buf;
 int bsd_drm_prime_fd_install(xtask *proc, struct drm_prime_object *object,
                              bool cloexec);
 struct file *bsd_drm_prime_fd_get(xtask *proc, int fd);
+int bsd_dma_buf_fd_install(xtask *proc, struct dma_buf *dmabuf, bool cloexec);
+struct dma_buf *bsd_dma_buf_get_from_fd(xtask *proc, int fd);
+struct file *bsd_shm_fd_get(xtask *proc, int fd);
+int bsd_close_installed_fd(xtask *proc, int fd);
 
 // Process creation (kernel/bsd/proc_create.c)
 xtask *process_create_elf(const uint8_t *elf_data, uint64_t elf_size);

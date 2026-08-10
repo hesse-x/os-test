@@ -23,6 +23,7 @@
 #include "kernel/bsd/socket.h"
 #include "kernel/bsd/timerfd.h"
 #include "kernel/bsd/types.h"
+#include "kernel/driver/drm/drm_core.h"
 #include "kernel/xcore/atomic.h"
 #include "kernel/xcore/list.h"
 #include "kernel/xcore/spinlock.h"
@@ -30,6 +31,7 @@
 
 #include <xos/socket.h>
 
+struct dma_buf;
 struct drm_fence;
 // Per-type readiness probe extracted from sys_poll. Pure query: no blocking,
 // no long locks. Semantics match the if-else chain in socket.c sys_poll.
@@ -159,6 +161,15 @@ __poll file_poll(struct file *f, __poll events) {
     struct drm_fence *fence = f->sync_file_fence;
     if (fence && drm_fence_is_signaled(fence))
       revents |= (events & POLLIN);
+  } else if (f->type == FD_DRM_PRIME) {
+    if (drm_prime_object_cpu_access_ready(f->drm_prime))
+      revents |= events & (POLLIN | POLLOUT);
+  } else if (f->type == FD_DMA_BUF) {
+    extern bool dma_buf_poll_ready(struct dma_buf * dmabuf, bool write);
+    if ((events & POLLIN) && dma_buf_poll_ready(f->dma_buf, false))
+      revents |= POLLIN;
+    if ((events & POLLOUT) && dma_buf_poll_ready(f->dma_buf, true))
+      revents |= POLLOUT;
   } else if (f->type == FD_IPC) {
     // FD_IPC: POLLIN iff owner's recv queue is non-empty.  Non-owner
     // (cross-process hand-off) reports 0 — never ready, harmless to a

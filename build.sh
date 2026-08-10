@@ -465,7 +465,8 @@ if [[ -d "$MESADIR" ]]; then
     # Machine-file changes affect Meson's configure probes, but a normal
     # reconfigure retains failed probes. Wipe when either machine file changes.
     CROSS_STAMP="$MESADIR/.xos-cross-file.sha256"
-    CROSS_SUM="$({ sha256sum "$CROSS" "$NATIVE"; printf '%s\n' "${MESA_SETUP[*]}"; } | sha256sum | awk '{print $1}')"
+    CROSS_SUM="$({ sha256sum "$CROSS" "$NATIVE" include/uapi/linux/udmabuf.h \
+        include/uapi/linux/dma-buf.h; printf '%s\n' "${MESA_SETUP[*]}"; } | sha256sum | awk '{print $1}')"
     if [[ ! -f "$CROSS_STAMP" || "$(<"$CROSS_STAMP")" != "$CROSS_SUM" ]]; then
         meson setup --wipe "${MESA_SETUP[@]}"
         printf '%s\n' "$CROSS_SUM" > "$CROSS_STAMP"
@@ -599,14 +600,16 @@ PY
         --default-library shared --wrap-mode nodownload
         --cross-file build/wlroots-cross.txt --native-file "$WLROOTS_NATIVE"
         -Dauto_features=disabled -Dbackends=drm,libinput -Drenderers=gles2
-        -Dallocators=gbm -Dsession=enabled -Dxwayland=disabled
+        -Dallocators=gbm,udmabuf -Dsession=enabled -Dxwayland=disabled
         -Dxcb-errors=disabled -Dcolor-management=disabled
         # tinywl is maintained in user/compositor and linked against the
         # installed shared library; do not build wlroots' upstream examples.
         -Dlibliftoff=disabled -Dexamples=false -Dwerror=false
         "$WLROOTS_BUILD" third_party/wlroots
     )
-    WLROOTS_CONFIG_SUM="$({ sha256sum build/wlroots-cross.txt "$WLROOTS_NATIVE"; \
+    WLROOTS_CONFIG_SUM="$({ sha256sum build/wlroots-cross.txt "$WLROOTS_NATIVE" \
+        include/uapi/linux/udmabuf.h include/uapi/linux/dma-buf.h \
+        include/uapi/linux/version.h; \
         git -C third_party/wlroots rev-parse HEAD; printf '%s\n' "${WLROOTS_SETUP[*]}"; } | sha256sum | awk '{print $1}')"
     WLROOTS_STAMP="$WLROOTS_BUILD/.xos-config.sha256"
     if [ -d "$WLROOTS_BUILD" ] && \
@@ -623,7 +626,8 @@ PY
 
     MESON_SUMMARY="$WLROOTS_BUILD/meson-logs/meson-log.txt"
     for feature in 'drm-backend: YES' 'libinput-backend: YES' 'session: YES' \
-                   'gles2-renderer: YES' 'gbm-allocator: YES' 'egl: YES' \
+                   'gles2-renderer: YES' 'gbm-allocator: YES' \
+                   'udmabuf-allocator: YES' 'egl: YES' \
                    'x11-backend: NO' 'xwayland: NO' 'vulkan-renderer: NO' \
                    'color-management: NO' 'libliftoff: NO'; do
         feature_name="${feature%: *}"
@@ -687,7 +691,8 @@ PY
 # Mesa stage above rather than in the first CMake ninja invocation.
 if echo "$CMAKE_EXTRA" | grep -q "TEST=1"; then
     echo "=== Building EGL/GLES2 and Vulkan smoke ELFs ==="
-    ninja -C build test_egl_smoke_elf test_vulkan_smoke_elf
+    ninja -C build test_egl_smoke_elf test_vulkan_smoke_elf \
+        test_vulkan_drm_smoke_elf test_udmabuf_vulkan_kms_elf
 fi
 
 if [ "${BUILD_TEST:-0}" = "1" ]; then

@@ -12,6 +12,7 @@
 // headers.
 
 #include "kernel/xcore/atomic.h"
+#include "kernel/xcore/mutex.h"
 #include "kernel/xcore/sparse.h"
 #include "kernel/xcore/spinlock.h"
 #include <stddef.h>
@@ -20,7 +21,9 @@
 #include <xos/types.h> // pid_t
 
 // ===================== SHM =====================
-#define SHM_SEALED 2
+#define SHM_ALLOW_SEALING 2
+#define SHM_F_SEAL_SHRINK 0x0002u
+#define SHM_F_SEAL_WRITE 0x0008u
 
 typedef struct shm {
   uint64_t phys;
@@ -29,6 +32,10 @@ typedef struct shm {
   refcount_t s_count;
   int flags;
   uint32_t seals;
+  mutex lock;
+  atomic_t pin_count;
+  atomic_t writable_shared_mappings;
+  uint64_t object_id;
   char name[32];
   uint64_t *page_list;
   int num_pages;
@@ -46,7 +53,9 @@ typedef struct shm {
                                     */
 #define KMAP_DMA_OWNED 0x40000000u /* kernel DMA allocation owns phys pages */
 #define KMAP_VMA_OWNER 0x20000000u /* region carries a vma_owner reference */
-#define KMAP_UC 0x08u              /* map uncacheable (device MMIO) */
+#define KMAP_SHM_MAYWRITE                                                      \
+  0x10000000u         /* writable shared mapping blocks F_SEAL_WRITE */
+#define KMAP_UC 0x08u /* map uncacheable (device MMIO) */
 
 struct vma_owner_ops {
   void (*get)(void *owner);

@@ -1890,7 +1890,8 @@ static long drm_ioctl_setcrtc(void *arg) {
   virtio_gpu_backend->drm.current_fb_id = c->fb_id;
   virtio_gpu_backend->drm.mode_valid = true;
   struct drm_dumb_buffer *d = drm_find_dumb(fb->dumb_handle);
-  uint32_t resource_id = d ? d->virtio_res_id : 0;
+  uint32_t resource_id =
+      fb->is_imported ? fb->resource_id : (d ? d->virtio_res_id : 0);
   if (fb->is_virgl) {
     struct drm_virgl_resource *r =
         drm_find_virgl_resource((uint32_t)fb->dumb_handle);
@@ -2045,7 +2046,9 @@ static long drm_ioctl_create_dumb(void *arg, struct file *file) {
     spin_unlock(&virtio_gpu_backend->drm.dumb_lock);
     return -ENOMEM;
   }
-  __memset(buf->kernel_vaddr, 0, d->size);
+  /* PRIME mappings expose the last whole page, so keep its logical EOF tail
+   * deterministic even when pitch * height is not page aligned. */
+  __memset(buf->kernel_vaddr, 0, (size_t)npages * PAGE_SIZE);
   buf->guest_phys = (uint64_t)PHY_ADDR((uintptr_t)buf->kernel_vaddr);
   printk(LOG_INFO, "drm gem alloc dumb handle=%d vaddr=%p pages=%u\n", handle,
          buf->kernel_vaddr, npages);
@@ -2182,6 +2185,13 @@ static long drm_ioctl_addfb2(void *arg, struct drm_file *cf,
   if (!c)
     return -EFAULT;
 
+  for (unsigned i = 1; i < 4; i++) {
+    if (c->handles[i] || c->pitches[i] || c->offsets[i] || c->modifier[i])
+      return -EINVAL;
+  }
+  if (!c->handles[0] || c->offsets[0] != 0 || c->modifier[0] != 0)
+    return -EINVAL;
+
   /* Validate pixel format */
   int bpp = bpp_from_format(c->pixel_format);
   if (bpp == 0)
@@ -2194,7 +2204,9 @@ static long drm_ioctl_addfb2(void *arg, struct drm_file *cf,
   bool is_virgl = c->handles[0] >= VIRGL_HANDLE_BASE;
   struct drm_gem_object *gem = drm_core_gem_object_lookup(file, c->handles[0]);
   void *backing = gem ? drm_gem_object_private(gem) : NULL;
-  if (!backing) {
+  bool is_imported = gem && !backing;
+  int backend_handle = (int)c->handles[0];
+  if (!gem) {
     drm_gem_object_put(gem);
     return -ENOENT;
   }
@@ -2204,12 +2216,28 @@ static long drm_ioctl_addfb2(void *arg, struct drm_file *cf,
       drm_gem_object_put(gem);
       return -ENOENT;
     }
-  } else {
-    struct drm_dumb_buffer *d = drm_find_dumb((int)c->handles[0]);
-    if (!d || backing != d) {
+    backend_handle = (int)r->bo_handle;
+  } else if (!is_imported) {
+    struct drm_dumb_buffer *d = backing;
+    if (d->gem != gem || drm_find_dumb(d->handle) != d) {
       drm_gem_object_put(gem);
       return -ENOENT;
     }
+    backend_handle = d->handle;
+    if ((c->pixel_format != DRM_FORMAT_XRGB8888 &&
+         c->pixel_format != DRM_FORMAT_ARGB8888) ||
+        c->width != d->width || c->height != d->height ||
+        c->pitches[0] != d->pitch ||
+        (uint64_t)c->pitches[0] * c->height > drm_gem_object_size(gem)) {
+      drm_gem_object_put(gem);
+      return -EINVAL;
+    }
+  } else if ((c->pixel_format != DRM_FORMAT_XRGB8888 &&
+              c->pixel_format != DRM_FORMAT_ARGB8888) ||
+             c->pitches[0] < c->width * 4 ||
+             (uint64_t)c->pitches[0] * c->height > drm_gem_object_size(gem)) {
+    drm_gem_object_put(gem);
+    return -EINVAL;
   }
 
   /* Allocate fb_id (shared with ADDFB) */
@@ -2223,8 +2251,35 @@ static long drm_ioctl_addfb2(void *arg, struct drm_file *cf,
   struct drm_framebuffer *fb = &virtio_gpu_backend->drm.fbs[fb_id - 1];
   spin_unlock(&virtio_gpu_backend->drm.fb_lock);
 
-  fb->dumb_handle = (int)c->handles[0];
+  if (is_imported) {
+    uint32_t page_count = 0;
+    struct page **pages = drm_gem_object_pages(gem, &page_count);
+    uint64_t first_phys =
+        pages && page_count ? (__force uint64_t)page_to_phys(pages[0]) : 0;
+    bool contiguous = pages && page_count;
+    for (uint32_t i = 1; contiguous && i < page_count; i++)
+      contiguous = (__force uint64_t)page_to_phys(pages[i]) ==
+                   first_phys + (uint64_t)i * PAGE_SIZE;
+    fb->resource_id = 0x80000000u | (uint32_t)fb_id;
+    bool resource_created = false;
+    if (contiguous &&
+        virtio_gpu_create_2d(fb->resource_id, c->width, c->height,
+                             VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM) == 0)
+      resource_created = true;
+    if (!resource_created ||
+        virtio_gpu_attach_backing(fb->resource_id, first_phys,
+                                  (uint32_t)drm_gem_object_size(gem)) < 0) {
+      if (resource_created)
+        virtio_gpu_resource_unref(fb->resource_id);
+      __memset(fb, 0, sizeof(*fb));
+      drm_gem_object_put(gem);
+      return contiguous ? -EIO : -EINVAL;
+    }
+  }
+
+  fb->dumb_handle = backend_handle;
   fb->is_virgl = is_virgl;
+  fb->is_imported = is_imported;
   fb->gem = gem;
   fb->owner = cf;
   fb->width = c->width;
@@ -2274,11 +2329,14 @@ static long drm_ioctl_rmfb(void *arg) {
   }
   fb->refcount--;
   struct drm_gem_object *gem = fb->gem;
+  uint32_t imported_resource = fb->is_imported ? fb->resource_id : 0;
   if (fb->refcount <= 0) {
     __memset(fb, 0, sizeof(*fb));
   }
   spin_unlock(&virtio_gpu_backend->drm.fb_lock);
 
+  if (imported_resource)
+    virtio_gpu_resource_unref(imported_resource);
   drm_gem_object_put(gem);
   return 0;
 }
@@ -2399,7 +2457,8 @@ static long drm_ioctl_page_flip(struct file *file, void *arg) {
   if (!fb)
     return -EINVAL;
   struct drm_dumb_buffer *d = drm_find_dumb(fb->dumb_handle);
-  uint32_t resource_id = d ? d->virtio_res_id : 0;
+  uint32_t resource_id =
+      fb->is_imported ? fb->resource_id : (d ? d->virtio_res_id : 0);
   if (fb->is_virgl) {
     struct drm_virgl_resource *r =
         drm_find_virgl_resource((uint32_t)fb->dumb_handle);
@@ -2420,6 +2479,8 @@ static long drm_ioctl_page_flip(struct file *file, void *arg) {
   if (d) {
     drm_cursor_overlay(d);
     virtio_gpu_transfer_2d(resource_id, 0, 0, d->width, d->height, 0);
+  } else if (fb->is_imported) {
+    virtio_gpu_transfer_2d(resource_id, 0, 0, fb->width, fb->height, 0);
   }
   virtio_gpu_set_scanout(0, resource_id, 0, 0, fb->width, fb->height);
   virtio_gpu_flush(resource_id, 0, 0, fb->width, fb->height);
@@ -2460,7 +2521,8 @@ static long drm_ioctl_dirtyfb(void *arg) {
   if (!fb)
     return -EINVAL;
   struct drm_dumb_buffer *d = drm_find_dumb(fb->dumb_handle);
-  uint32_t resource_id = d ? d->virtio_res_id : 0;
+  uint32_t resource_id =
+      fb->is_imported ? fb->resource_id : (d ? d->virtio_res_id : 0);
   if (fb->is_virgl) {
     struct drm_virgl_resource *r =
         drm_find_virgl_resource((uint32_t)fb->dumb_handle);
@@ -2471,6 +2533,8 @@ static long drm_ioctl_dirtyfb(void *arg) {
   if (d) {
     drm_cursor_overlay(d);
     virtio_gpu_transfer_2d(resource_id, 0, 0, d->width, d->height, 0);
+  } else if (fb->is_imported) {
+    virtio_gpu_transfer_2d(resource_id, 0, 0, fb->width, fb->height, 0);
   }
   virtio_gpu_flush(resource_id, 0, 0, fb->width, fb->height);
   return 0;
@@ -2773,12 +2837,15 @@ static void drm_release_fb(int fb_id, struct drm_file *owner) {
     return;
   }
   struct drm_gem_object *gem = fb->gem;
+  uint32_t imported_resource = fb->is_imported ? fb->resource_id : 0;
   fb->refcount--;
   if (fb->refcount <= 0) {
     __memset(fb, 0, sizeof(*fb));
   }
   spin_unlock(&virtio_gpu_backend->drm.fb_lock);
 
+  if (imported_resource)
+    virtio_gpu_resource_unref(imported_resource);
   drm_gem_object_put(gem);
 }
 

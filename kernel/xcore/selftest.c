@@ -13,9 +13,9 @@
 #include "arch/x64/utils.h"
 #include "kernel/xcore/atomic.h"
 #include "kernel/xcore/completion.h"
+#include "kernel/xcore/kpi.h"
 #include "kernel/xcore/kthread.h"
 #include "kernel/xcore/log.h"
-#include "kernel/xcore/mem/slab.h"
 #include "kernel/xcore/mem/vma.h"
 #include "kernel/xcore/mm_types.h"
 #include "kernel/xcore/workqueue.h"
@@ -66,6 +66,34 @@ static void selftest_vma_owner_lifecycle(void) {
   SELFTEST_CHECK(atomic_read(&selftest_vma_refs) == 0);
 }
 
+static void selftest_vma_shm_split_refs(void) {
+  mm address_space = {0};
+  shm *backing = kmalloc(sizeof(*backing));
+  mmap_region *front = kmalloc(sizeof(*front));
+  SELFTEST_CHECK(backing && front);
+  __memset(backing, 0, sizeof(*backing));
+  __memset(front, 0, sizeof(*front));
+  refcount_set(&backing->s_count, 1); // Owned by the initial region.
+  front->vaddr = 0x200000;
+  front->size = 3 * PAGE_SIZE;
+  front->fd = -1;
+  front->shm_obj = backing;
+  SELFTEST_CHECK(vma_insert_sorted(&address_space, front) == 0);
+
+  mmap_region *mid =
+      vma_split(&address_space, front, front->vaddr + PAGE_SIZE, PAGE_SIZE);
+  SELFTEST_CHECK(mid && mid->next);
+  mmap_region *tail = mid->next;
+  SELFTEST_CHECK(refcount_read(&backing->s_count) == 3);
+
+  shm_put(front->shm_obj);
+  shm_put(mid->shm_obj);
+  shm_put(tail->shm_obj);
+  kfree(front);
+  kfree(mid);
+  kfree(tail);
+}
+
 static int async_selftest_thread(void *arg) {
   (void)arg;
   completion c;
@@ -74,6 +102,7 @@ static int async_selftest_thread(void *arg) {
   SELFTEST_CHECK(wait_for_completion_timeout(&c, 1000000ULL) == 0);
   SELFTEST_CHECK(wait_for_completion_timeout(&c, 1000000ULL) == -ETIMEDOUT);
   selftest_vma_owner_lifecycle();
+  selftest_vma_shm_split_refs();
 
   atomic_set(&selftest_owner_refs, 0);
   const struct work_owner_ops owner_ops = {

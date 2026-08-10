@@ -54,6 +54,7 @@
 #define FD_SYNC_FILE 15
 #define FD_INOTIFY 16
 #define FD_DRM_PRIME 17
+#define FD_DMA_BUF 18
 
 struct inode;
 struct unix_sock;
@@ -65,6 +66,7 @@ struct signalfd_ctx;
 struct netlink_sock;
 struct drm_fence;
 struct drm_prime_object;
+struct dma_buf;
 struct file_operations;
 struct mount_entry;
 
@@ -105,6 +107,7 @@ typedef struct file {
     pid_t ipcfd_owner_pid;
     struct drm_fence *sync_file_fence;
     struct drm_prime_object *drm_prime;
+    struct dma_buf *dma_buf;
   };
 } file;
 

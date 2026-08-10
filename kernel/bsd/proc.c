@@ -384,6 +384,13 @@ void file_put(struct file *f) {
       f->drm_prime = NULL;
     }
     break;
+  case FD_DMA_BUF:
+    if (f->dma_buf) {
+      extern void dma_buf_put(struct dma_buf * dmabuf);
+      dma_buf_put(f->dma_buf);
+      f->dma_buf = NULL;
+    }
+    break;
   case FD_IPC:
     // Clear the owner task's ipcfd_file back-link and drop the create-time
     // reference (evdev_refact.md §4.3 生命周期 / §5.6).
@@ -514,6 +521,76 @@ struct file *bsd_drm_prime_fd_get(xtask *proc, int fd) {
   file_get(f);
   spin_unlock(&fl->fd_lock);
   return f;
+}
+
+int bsd_dma_buf_fd_install(xtask *proc, struct dma_buf *dmabuf, bool cloexec) {
+  if (!proc || !dmabuf)
+    return -EINVAL;
+  files *fl = proc->proc->files;
+  spin_lock(&fl->fd_lock);
+  int fd = alloc_fd(fl, 0);
+  if (fd < 0) {
+    spin_unlock(&fl->fd_lock);
+    return fd;
+  }
+  struct file *f = kmalloc(sizeof(*f));
+  if (!f) {
+    spin_unlock(&fl->fd_lock);
+    return -ENOMEM;
+  }
+  __memset(f, 0, sizeof(*f));
+  refcount_set(&f->f_count, 1);
+  f->type = FD_DMA_BUF;
+  f->flags = O_RDWR;
+  f->dma_buf = dmabuf;
+  fd_install(fl, fd, f);
+  fd_set_cloexec(fl, fd, cloexec ? 1 : 0);
+  spin_unlock(&fl->fd_lock);
+  return fd;
+}
+
+struct dma_buf *bsd_dma_buf_get_from_fd(xtask *proc, int fd) {
+  if (!proc || fd < 0 || fd >= MAX_FD)
+    return NULL;
+  files *fl = proc->proc->files;
+  spin_lock(&fl->fd_lock);
+  struct file *f = fd_lookup(fl, fd);
+  struct dma_buf *dmabuf = f && f->type == FD_DMA_BUF ? f->dma_buf : NULL;
+  if (dmabuf) {
+    extern void dma_buf_get(struct dma_buf * dmabuf);
+    dma_buf_get(dmabuf);
+  }
+  spin_unlock(&fl->fd_lock);
+  return dmabuf;
+}
+
+struct file *bsd_shm_fd_get(xtask *proc, int fd) {
+  if (!proc || fd < 0 || fd >= MAX_FD)
+    return NULL;
+  files *fl = proc->proc->files;
+  spin_lock(&fl->fd_lock);
+  struct file *f = fd_lookup(fl, fd);
+  if (!f || f->type != FD_SHM || !f->shm)
+    f = NULL;
+  else
+    file_get(f);
+  spin_unlock(&fl->fd_lock);
+  return f;
+}
+
+int bsd_close_installed_fd(xtask *proc, int fd) {
+  if (!proc || !proc->proc || fd < 0 || fd >= MAX_FD)
+    return -EBADF;
+  files *fl = proc->proc->files;
+  spin_lock(&fl->fd_lock);
+  struct file *f = fd_uninstall(fl, fd);
+  fd_set_cloexec(fl, fd, 0);
+  spin_unlock(&fl->fd_lock);
+  if (!f)
+    return -EBADF;
+  synchronize_rcu();
+  file_put(f);
+  return 0;
 }
 
 void pty_close_file(struct file *f) {
@@ -760,6 +837,8 @@ void mm_release(mm *mm, pid_t owner_pid) {
   while (region) {
     mmap_region *next = region->next;
     if (region->shm_obj) {
+      if (region->flags & KMAP_SHM_MAYWRITE)
+        atomic_dec(&region->shm_obj->writable_shared_mappings);
       shm_put(region->shm_obj);
     }
     // S12: release file-backed mmap refs. The faulted-in private user pages
@@ -1005,6 +1084,8 @@ copy_mmap_regions(mmap_region *src) {
     new_mr->next = NULL;
     if (mr->shm_obj)
       shm_get(mr->shm_obj);
+    if (mr->flags & KMAP_SHM_MAYWRITE)
+      atomic_inc(&mr->shm_obj->writable_shared_mappings);
     // S12: each copied file-backed region owns its own inode/shm reference,
     // released when the child's region is freed (munmap/mm_release/execve).
     if (mr->inode)

@@ -22,10 +22,13 @@
 #include "kernel/bsd/tmpfs.h"
 #include "kernel/bsd/types.h"
 #include "kernel/driver/blk_dev.h"
+#include "kernel/driver/dma_buf.h"
+#include "kernel/driver/drm/drm_core.h"
 #include "kernel/driver/serial.h"
 #include "kernel/xcore/atomic.h"
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/mem/kasan.h"
+#include "xos/page.h"
 #include "kernel/xcore/mem/slab.h"
 #include "kernel/xcore/mutex.h"
 #include "kernel/xcore/rcu.h"
@@ -752,6 +755,30 @@ static int fstat_fill(struct file *f, struct kstat *ks) {
   case FD_SHM:
     ks->st_mode = S_IFREG | 0666;
     return 0;
+  case FD_DRM_PRIME: {
+    uint64_t size = drm_prime_object_size(f->drm_prime);
+    uint64_t id = drm_prime_object_id(f->drm_prime);
+    if (!size || !id || size > INT64_MAX)
+      return -EBADF;
+    ks->st_mode = S_IFREG | 0600;
+    ks->st_ino = id;
+    ks->st_size = (int64_t)size;
+    ks->st_blksize = PAGE_SIZE;
+    ks->st_blocks = (int64_t)(size / 512 + (size % 512 != 0));
+    return 0;
+  }
+  case FD_DMA_BUF: {
+    uint64_t size = dma_buf_size(f->dma_buf);
+    uint64_t id = dma_buf_id(f->dma_buf);
+    if (!size || !id || size > INT64_MAX)
+      return -EBADF;
+    ks->st_mode = S_IFREG | 0600;
+    ks->st_ino = id;
+    ks->st_size = (int64_t)size;
+    ks->st_blksize = PAGE_SIZE;
+    ks->st_blocks = (int64_t)(size / 512 + (size % 512 != 0));
+    return 0;
+  }
   default:
     return -EBADF;
   }

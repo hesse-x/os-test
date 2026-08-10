@@ -433,6 +433,69 @@ void test_drm_prime_object_lifetime_and_cross_device(void) {
   close(foreign);
 }
 
+// PRIME descriptors provide the minimal dma-buf-style ABI consumed by
+// llvmpipe, while preserving export access mode and VMA ownership.
+void test_drm_prime_fd_file_semantics(void) {
+  int drm_fd = open("/dev/dri/card0", O_RDWR);
+  if (drm_fd < 0) {
+    TEST_IGNORE_MESSAGE("/dev/dri/card0 not available");
+    return;
+  }
+
+  struct drm_mode_create_dumb dumb = {.width = 800, .height = 600, .bpp = 32};
+  TEST_ASSERT_EQUAL_INT(0, ioctl(drm_fd, DRM_IOCTL_MODE_CREATE_DUMB, &dumb));
+
+  struct drm_prime_handle ro = {.handle = dumb.handle, .flags = DRM_CLOEXEC};
+  TEST_ASSERT_EQUAL_INT(0, ioctl(drm_fd, DRM_IOCTL_PRIME_HANDLE_TO_FD, &ro));
+  void *bad =
+      mmap(NULL, dumb.size, PROT_READ | PROT_WRITE, MAP_SHARED, ro.fd, 0);
+  TEST_ASSERT_EQUAL_PTR(MAP_FAILED, bad);
+  TEST_ASSERT_EQUAL_INT(EACCES, errno);
+  close(ro.fd);
+
+  struct drm_prime_handle prime = {.handle = dumb.handle,
+                                   .flags = DRM_CLOEXEC | DRM_RDWR};
+  TEST_ASSERT_EQUAL_INT(0, ioctl(drm_fd, DRM_IOCTL_PRIME_HANDLE_TO_FD, &prime));
+
+  struct stat st;
+  TEST_ASSERT_EQUAL_INT(0, fstat(prime.fd, &st));
+  TEST_ASSERT_EQUAL_UINT64(dumb.size, (uint64_t)st.st_size);
+  TEST_ASSERT_EQUAL_INT(S_IFREG, st.st_mode & S_IFMT);
+  TEST_ASSERT_EQUAL_INT(4096, st.st_blksize);
+  TEST_ASSERT_TRUE(st.st_ino != 0);
+  TEST_ASSERT_EQUAL_INT64((off_t)dumb.size, lseek(prime.fd, 0, SEEK_END));
+  TEST_ASSERT_EQUAL_INT64(0, lseek(prime.fd, 0, SEEK_SET));
+  TEST_ASSERT_EQUAL_INT64(-1, lseek(prime.fd, -1, SEEK_SET));
+  TEST_ASSERT_EQUAL_INT(EINVAL, errno);
+
+  struct pollfd pfd = {.fd = prime.fd, .events = POLLIN | POLLOUT};
+  TEST_ASSERT_EQUAL_INT(1, poll(&pfd, 1, 0));
+  TEST_ASSERT_BITS(POLLIN | POLLOUT, POLLIN | POLLOUT, pfd.revents);
+
+  int duplicate = fcntl(prime.fd, F_DUPFD_CLOEXEC, 0);
+  TEST_ASSERT_GREATER_OR_EQUAL_INT(0, duplicate);
+  TEST_ASSERT_BITS(FD_CLOEXEC, FD_CLOEXEC, fcntl(duplicate, F_GETFD));
+
+  uint32_t *view =
+      mmap(NULL, dumb.size, PROT_READ | PROT_WRITE, MAP_SHARED, duplicate, 0);
+  TEST_ASSERT_NOT_EQUAL(MAP_FAILED, view);
+  bad = mmap(NULL, dumb.size, PROT_READ, MAP_PRIVATE, duplicate, 0);
+  TEST_ASSERT_EQUAL_PTR(MAP_FAILED, bad);
+  bad = mmap(NULL, dumb.size, PROT_EXEC, MAP_SHARED, duplicate, 0);
+  TEST_ASSERT_EQUAL_PTR(MAP_FAILED, bad);
+  bad = mmap(NULL, dumb.size + 1, PROT_READ, MAP_SHARED, duplicate, 0);
+  TEST_ASSERT_EQUAL_PTR(MAP_FAILED, bad);
+
+  view[0] = 0x119535ffu;
+  close(prime.fd);
+  close(duplicate);
+  struct drm_gem_close gem_close = {.handle = dumb.handle};
+  TEST_ASSERT_EQUAL_INT(0, ioctl(drm_fd, DRM_IOCTL_GEM_CLOSE, &gem_close));
+  close(drm_fd);
+  TEST_ASSERT_EQUAL_HEX32(0x119535ffu, view[0]);
+  TEST_ASSERT_EQUAL_INT(0, munmap(view, dumb.size));
+}
+
 // 11. Binary syncobjs are file-scoped, waitable, and keep fences alive through
 // sync_file descriptors independently of their DRM fd.
 void test_drm_binary_syncobj_and_sync_file(void) {
@@ -525,6 +588,7 @@ int main(int argc, char **argv, char **envp) {
   RUN_TEST(test_drm_core_device_isolation);
   RUN_TEST(test_drm_gem_vma_lifetime_and_authorization);
   RUN_TEST(test_drm_prime_object_lifetime_and_cross_device);
+  RUN_TEST(test_drm_prime_fd_file_semantics);
   RUN_TEST(test_drm_binary_syncobj_and_sync_file);
   return UNITY_END();
 }

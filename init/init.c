@@ -60,6 +60,21 @@ static int spawn_service(const char *path) {
   return spawn_process(path, argv, NULL, -1, -1, (mode_t)-1);
 }
 
+#ifdef TEST
+static int run_graphics_gate(const char *name) {
+  char *const argv[] = {"/test/test_runner.elf", (char *)name, NULL};
+  char *const envp[] = {"LD_LIBRARY_PATH=/lib:/test/lib", "XOS_SKIP_AUTOTEST=1",
+                        NULL};
+  int pid = spawn_process(argv[0], argv, envp, -1, -1, (mode_t)-1);
+  if (pid < 0)
+    return -1;
+  int status = 0;
+  if (waitpid(pid, &status, 0) != pid || !WIFEXITED(status))
+    return -1;
+  return WEXITSTATUS(status) == 0 ? 0 : -1;
+}
+#endif
+
 // spawn_with_fd: fork+exec passes fd to the child as fd 3 (socket activation).
 // The child normalizes the activation fd to 3, clears its per-fd CLOEXEC bit,
 // closes every other non-stdio descriptor, and then execs with explicit argv.
@@ -226,6 +241,20 @@ int main(int argc, char **argv, char **envp) {
     usleep(10 * 1000);
   }
   (void)udev_settled;
+
+#ifdef TEST
+  const char *graphics_gates[] = {"drm_ioctl", "udmabuf", "vulkan_smoke",
+                                  "vulkan_drm_smoke", "udmabuf_vulkan_kms"};
+  for (size_t i = 0; i < sizeof(graphics_gates) / sizeof(graphics_gates[0]);
+       i++) {
+    printf("init: graphics gate %s\n", graphics_gates[i]);
+    if (run_graphics_gate(graphics_gates[i]) < 0) {
+      printf("init: graphics gate %s failed\n", graphics_gates[i]);
+      for (;;)
+        pause();
+    }
+  }
+#endif
 
   int seatd_ready_fd = -1;
   int seatd_pid = start_seatd(&seatd_ready_fd);

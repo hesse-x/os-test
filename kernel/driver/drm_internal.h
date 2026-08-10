@@ -146,6 +146,8 @@ struct drm_framebuffer {
   int refcount;
   int dumb_handle; /* references drm_dumb_buffer.handle */
   bool is_virgl;
+  bool is_imported;
+  uint32_t resource_id;
   struct drm_gem_object *gem;
   struct drm_file *owner;
   uint32_t width;

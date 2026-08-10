@@ -43,6 +43,8 @@
 #include "kernel/bsd/types.h"
 #include "kernel/bsd/vfs.h"
 #include "kernel/driver/ahci.h"
+#include "kernel/driver/dma_buf.h"
+#include "kernel/driver/drm/drm_core.h"
 #include "kernel/driver/pci.h"
 #include "kernel/kernel.h" // hostname_get (sys_uname nodename)
 #include "kernel/xcore/atomic.h"
@@ -68,6 +70,7 @@
 #include "kernel/bsd/kfcntl.h"
 #include <kernel/bsd/stat_abi.h>
 #include <kernel/bsd/statfs_abi.h>
+#include <linux/udmabuf.h>
 #include <xos/capability.h>
 #include <xos/confname.h> // _SC_* (shared with user-side sysconf)
 #include <xos/errno.h>
@@ -1174,6 +1177,8 @@ static int64_t sys_mmap_tmpfs_shared(xtask *proc, uint64_t *pml4, uint64_t addr,
   region->fd = fd;
   region->offset = offset;
   region->flags = flags;
+  if ((flags & MAP_SHARED) && (prot & PROT_WRITE))
+    region->flags |= KMAP_SHM_MAYWRITE;
   if (vma_insert_sorted(proc->mm, region) != 0) {
     for (size_t i = 0; i < map_pages; i++)
       clear_user_pte(pml4, vaddr + i * PAGE_SIZE);
@@ -1183,6 +1188,8 @@ static int64_t sys_mmap_tmpfs_shared(xtask *proc, uint64_t *pml4, uint64_t addr,
     spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
     return -ENOMEM;
   }
+  if (region->flags & KMAP_SHM_MAYWRITE)
+    atomic_inc(&shm->writable_shared_mappings);
   mmap_advance_brk(proc->mm, addr, flags, vaddr, size);
 
   file_put(f);
@@ -1363,8 +1370,8 @@ static int64_t sys_mmap_file_backed(xtask *proc, uint64_t *pml4, uint64_t addr,
 
 // ===================== BSD syscall: mmap =====================
 static int64_t sys_mmap_device_prepared(xtask *proc, uint64_t addr,
-                                        uint64_t size, uint32_t prot,
-                                        uint32_t flags, int fd,
+                                        uint64_t requested_size, uint64_t size,
+                                        uint32_t prot, uint32_t flags, int fd,
                                         uint64_t offset) {
   if (!(flags & MAP_SHARED) || fd < 0)
     return -ENOSYS;
@@ -1378,26 +1385,32 @@ static int64_t sys_mmap_device_prepared(xtask *proc, uint64_t addr,
   rcu_read_unlock();
   if (!f)
     return -EBADF;
-  if (f->type != FD_DEV || !f->inode) {
-    file_put(f);
-    return -ENOSYS;
-  }
-
-  struct dev_ops *ops = dev_ops_peek_by_inode(f->inode);
-  if (!ops || ops->driver_pid != 0 || !ops->mmap_prepare_file) {
-    file_put(f);
-    return -ENOSYS;
-  }
-
   struct dev_mmap_request request = {
       .addr = addr,
+      .requested_length = requested_size,
       .length = size,
       .offset = offset,
       .prot = prot,
       .flags = flags,
   };
   struct dev_mmap_backing backing = {0};
-  int rc = ops->mmap_prepare_file(f, &request, &backing);
+
+  int rc;
+  if (f->type == FD_DMA_BUF) {
+    rc = dma_buf_mmap_prepare(f->dma_buf, &request, &backing);
+  } else if (f->type == FD_DRM_PRIME) {
+    rc = drm_prime_mmap_prepare(f->drm_prime, &request, &backing);
+  } else if (f->type != FD_DEV || !f->inode) {
+    file_put(f);
+    return -ENOSYS;
+  } else {
+    struct dev_ops *ops = dev_ops_peek_by_inode(f->inode);
+    if (!ops || ops->driver_pid != 0 || !ops->mmap_prepare_file) {
+      file_put(f);
+      return -ENOSYS;
+    }
+    rc = ops->mmap_prepare_file(f, &request, &backing);
+  }
   if (rc) {
     dev_mmap_abort(&backing);
     file_put(f);
@@ -1420,6 +1433,7 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
                  int64_t arg5, int64_t arg6) {
   uint64_t addr = (uint64_t)arg1; // addr hint (or exact addr with MAP_FIXED)
   size_t size = (size_t)arg2;
+  size_t requested_size = size;
   uint32_t prot = (uint32_t)arg3;
   int flags = (int)arg4;
   int fd = (int)arg5;
@@ -1448,8 +1462,8 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   uint64_t hint = (!fixed && addr) ? ALIGN_DOWN(addr, PAGE_SIZE) : 0;
 
   xtask *proc = current_task;
-  int64_t prepared = sys_mmap_device_prepared(proc, addr, size, prot,
-                                              (uint32_t)flags, fd, offset);
+  int64_t prepared = sys_mmap_device_prepared(
+      proc, addr, requested_size, size, prot, (uint32_t)flags, fd, offset);
   if (prepared != -ENOSYS)
     return prepared;
 
@@ -1587,10 +1601,15 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
           region->fd = fd;
           region->offset = offset;
           region->flags = (uint32_t)flags;
+          region->prot = prot;
+          if ((flags & MAP_SHARED) && (prot & PROT_WRITE))
+            region->flags |= KMAP_SHM_MAYWRITE;
           region->inode = NULL;
           region->shm_private_src = NULL;
           region->next = NULL;
           vma_insert_sorted(proc->mm, region);
+          if (region->flags & KMAP_SHM_MAYWRITE)
+            atomic_inc(&target_shm->writable_shared_mappings);
           mmap_advance_brk(proc->mm, addr, (uint32_t)flags, vaddr, size);
 
           file_put(f);
@@ -1680,10 +1699,15 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
     region->fd = fd;
     region->offset = offset;
     region->flags = (uint32_t)flags;
+    region->prot = prot;
+    if ((flags & MAP_SHARED) && (prot & PROT_WRITE))
+      region->flags |= KMAP_SHM_MAYWRITE;
     region->inode = NULL;
     region->shm_private_src = NULL;
     region->next = NULL;
     vma_insert_sorted(proc->mm, region);
+    if (region->flags & KMAP_SHM_MAYWRITE)
+      atomic_inc(&shm->writable_shared_mappings);
     mmap_advance_brk(proc->mm, addr, (uint32_t)flags, vaddr, size);
 
     spin_unlock_irqrestore(&proc->mm->mmap_lock, mmap_flags);
@@ -3622,11 +3646,13 @@ int64_t sys_fcntl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
       ret = -EBADF;
       goto out;
     }
-    if (!(shm->flags & SHM_SEALED)) {
+    if (!(shm->flags & SHM_ALLOW_SEALING)) {
       ret = -EPERM;
       goto out;
     }
+    mutex_lock(&shm->lock);
     if (shm->seals & F_SEAL_SEAL) {
+      mutex_unlock(&shm->lock);
       ret = -EPERM;
       goto out;
     }
@@ -3634,19 +3660,22 @@ int64_t sys_fcntl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
     unsigned int new_seals = (unsigned int)arg;
     if (new_seals &
         ~(F_SEAL_SEAL | F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE)) {
+      mutex_unlock(&shm->lock);
       ret = -EINVAL;
       goto out;
     }
 
     if (new_seals & F_SEAL_WRITE) {
-      for (mmap_region *mr = proc->mm->mmap_regions; mr; mr = mr->next) {
-        if (mr->shm_obj == shm) {
-          break;
-        }
+      if (atomic_read(&shm->pin_count) != 0 ||
+          atomic_read(&shm->writable_shared_mappings) != 0) {
+        mutex_unlock(&shm->lock);
+        ret = -EBUSY;
+        goto out;
       }
     }
 
     shm->seals |= new_seals;
+    mutex_unlock(&shm->lock);
     ret = 0;
     goto out;
   }
@@ -3660,7 +3689,9 @@ int64_t sys_fcntl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
       ret = -EBADF;
       goto out;
     }
+    mutex_lock(&shm->lock);
     ret = (int64_t)shm->seals;
+    mutex_unlock(&shm->lock);
     goto out;
   }
   case F_GETFD:
@@ -5471,8 +5502,14 @@ int64_t sys_ioctl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
   // ioctl must fall through to the FD_DEV driver_pid proxy path below so that
   // EVIOCG* reach the user-space driver (or INPUT_REGISTER hits the control
   // node).
-  if (f->f_op && f->f_op->ioctl)
-    return f->f_op->ioctl(proc, f, cmd, arg);
+  if (f->type == FD_DMA_BUF) {
+    ret = dma_buf_ioctl(proc, f->dma_buf, cmd, arg);
+    goto out;
+  }
+  if (f->f_op && f->f_op->ioctl) {
+    ret = f->f_op->ioctl(proc, f, cmd, arg);
+    goto out;
+  }
 
   switch (f->type) {
   case FD_DEV: {
@@ -5502,6 +5539,22 @@ int64_t sys_ioctl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
 
       uint16_t arg_size = _IOC_SIZE(cmd);
       uint8_t dir = _IOC_DIR(cmd);
+      if (cmd == UDMABUF_CREATE_LIST) {
+        struct udmabuf_create_list header;
+        if (copy_from_user(&header, arg, sizeof(header))) {
+          ret = -EFAULT;
+          goto out;
+        }
+        if (!header.count || header.count > 1024 ||
+            header.count > (UINT16_MAX - sizeof(header)) /
+                               sizeof(struct udmabuf_create_item)) {
+          ret = -EINVAL;
+          goto out;
+        }
+        arg_size =
+            (uint16_t)(sizeof(header) + (size_t)header.count *
+                                            sizeof(struct udmabuf_create_item));
+      }
       printk(LOG_DEBUG, "sys_ioctl(direct): pid=%d cmd=0x%x dir=%u size=%u\n",
              current_task->pid, cmd, dir, arg_size);
 
@@ -5841,8 +5894,9 @@ int64_t sys_memfd_create(int64_t arg1, int64_t arg2, int64_t unused1,
   shm->npages = 0;
   shm->file_size = 0;
   refcount_set(&shm->s_count, 1);
-  shm->flags = (flags & MFD_ALLOW_SEALING) ? SHM_SEALED : 0;
-  shm->seals = 0;
+  shm->flags = (flags & MFD_ALLOW_SEALING) ? SHM_ALLOW_SEALING : 0;
+  shm->seals = (flags & MFD_ALLOW_SEALING) ? 0 : F_SEAL_SEAL;
+  shm_init_metadata(shm);
   shm->page_list = NULL;
   shm->num_pages = 0;
 
@@ -6390,6 +6444,55 @@ int64_t sys_lseek(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
   rcu_read_unlock();
 
   int64_t ret;
+
+  if (f->type == FD_DRM_PRIME || f->type == FD_DMA_BUF) {
+    uint64_t size = f->type == FD_DMA_BUF ? dma_buf_size(f->dma_buf)
+                                          : drm_prime_object_size(f->drm_prime);
+    if (!size || size > INT64_MAX) {
+      ret = -EBADF;
+      goto out;
+    }
+    if (f->type == FD_DMA_BUF && offset != 0) {
+      ret = -EINVAL;
+      goto out;
+    }
+    int64_t base;
+    switch (whence) {
+    case SEEK_SET:
+      base = 0;
+      break;
+    case SEEK_CUR:
+      if (f->type == FD_DMA_BUF) {
+        ret = -EINVAL;
+        goto out;
+      }
+      if (f->offset > INT64_MAX) {
+        ret = -EINVAL;
+        goto out;
+      }
+      base = (int64_t)f->offset;
+      break;
+    case SEEK_END:
+      base = (int64_t)size;
+      break;
+    default:
+      ret = -EINVAL;
+      goto out;
+    }
+    if ((offset > 0 && base > INT64_MAX - offset) ||
+        (offset < 0 && base < INT64_MIN - offset)) {
+      ret = -EINVAL;
+      goto out;
+    }
+    int64_t new_offset = base + offset;
+    if (new_offset < 0 || (uint64_t)new_offset > size) {
+      ret = -EINVAL;
+      goto out;
+    }
+    f->offset = (uint64_t)new_offset;
+    ret = new_offset;
+    goto out;
+  }
 
   if (f->type == FD_PIPE || f->type == FD_SOCKET || f->type == FD_NETLINK ||
       f->type == FD_DEV) {

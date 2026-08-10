@@ -9,6 +9,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <xos/errno.h>
+#include <xos/mman.h>
 #include <xos/page.h>
 #include <xos/socket.h>
 
@@ -21,6 +22,8 @@
 #include "kernel/bsd/poll_types.h"
 #include "kernel/bsd/sysfs.h"
 #include "kernel/driver/bsd_types.h"
+#include "kernel/driver/dma_buf.h"
+#include "kernel/driver/dma_resv.h"
 #include "kernel/driver/drm/drm_fence.h"
 #include "kernel/xcore/atomic.h"
 #include "kernel/xcore/list.h"
@@ -61,6 +64,7 @@ struct drm_gem_object {
   uint32_t page_count;
   void *private;
   const struct drm_gem_object_ops *ops;
+  struct dma_buf *dmabuf;
 };
 
 struct drm_core_handle {
@@ -845,6 +849,19 @@ static long drm_core_common_ioctl(xtask *proc, struct file *file,
         drm_core_gem_object_lookup(file, prime->handle);
     if (!object)
       return -ENOENT;
+    if (object->dmabuf) {
+      dma_buf_get(object->dmabuf);
+      int fd = dma_buf_fd_install(proc, object->dmabuf,
+                                  (prime->flags & DRM_CLOEXEC) != 0);
+      if (fd < 0) {
+        dma_buf_put(object->dmabuf);
+        drm_gem_object_put(object);
+        return fd;
+      }
+      drm_gem_object_put(object);
+      prime->fd = fd;
+      return 0;
+    }
     struct drm_prime_object *wrapper = kmalloc(sizeof(*wrapper));
     if (!wrapper) {
       drm_gem_object_put(object);
@@ -852,6 +869,7 @@ static long drm_core_common_ioctl(xtask *proc, struct file *file,
     }
     wrapper->object = object;
     wrapper->handle_hint = prime->handle;
+    wrapper->writable = (prime->flags & DRM_RDWR) != 0;
     int fd = bsd_drm_prime_fd_install(proc, wrapper,
                                       (prime->flags & DRM_CLOEXEC) != 0);
     if (fd < 0) {
@@ -865,6 +883,48 @@ static long drm_core_common_ioctl(xtask *proc, struct file *file,
     struct drm_prime_handle *prime = arg;
     if (!prime || !proc)
       return -EFAULT;
+    struct dma_buf *dmabuf = dma_buf_get_from_fd(proc, prime->fd);
+    if (dmabuf) {
+      struct drm_gem_object *object = NULL;
+      mutex_lock(&df->dev->file_mutex);
+      for (size_t i = 0; i < DRM_CORE_MAX_HANDLES; i++) {
+        struct drm_gem_object *candidate = df->handles[i].object;
+        if (candidate && candidate->dmabuf == dmabuf) {
+          object = candidate;
+          drm_gem_object_get(object);
+          break;
+        }
+      }
+      mutex_unlock(&df->dev->file_mutex);
+      if (!object) {
+        uint32_t page_count = 0;
+        struct page **source = dma_buf_pages(dmabuf, &page_count);
+        struct page **pages =
+            source ? kmalloc((size_t)page_count * sizeof(*pages)) : NULL;
+        if (!pages) {
+          dma_buf_put(dmabuf);
+          return -ENOMEM;
+        }
+        __memcpy(pages, source, (size_t)page_count * sizeof(*pages));
+        object = drm_gem_object_create(df->dev, dma_buf_size(dmabuf), pages,
+                                       page_count, NULL, NULL);
+        if (!object) {
+          kfree(pages);
+          dma_buf_put(dmabuf);
+          return -ENOMEM;
+        }
+        object->dmabuf = dmabuf;
+      } else {
+        dma_buf_put(dmabuf);
+      }
+      uint32_t handle = 0;
+      int rc = drm_core_gem_handle_create(file, object, 0, &handle);
+      drm_gem_object_put(object);
+      if (rc)
+        return rc;
+      prime->handle = handle;
+      return 0;
+    }
     struct file *prime_file = bsd_drm_prime_fd_get(proc, prime->fd);
     if (!prime_file)
       return -EBADF;
@@ -1241,6 +1301,32 @@ static int drm_minor_mmap_prepare_file(struct file *file,
   return 0;
 }
 
+int drm_prime_mmap_prepare(struct drm_prime_object *prime,
+                           const struct dev_mmap_request *request,
+                           struct dev_mmap_backing *backing) {
+  if (!prime || !prime->object || !request || !backing ||
+      !request->requested_length || request->offset != 0 ||
+      !(request->flags & MAP_SHARED) || (request->flags & MAP_PRIVATE) ||
+      (request->flags & MAP_ANONYMOUS) || (request->prot & PROT_EXEC))
+    return -EINVAL;
+  if ((request->prot & PROT_WRITE) && !prime->writable)
+    return -EACCES;
+
+  struct drm_gem_object *object = prime->object;
+  if (!object->size || !object->pages || !object->page_count ||
+      request->requested_length > object->size ||
+      request->length / PAGE_SIZE > object->page_count)
+    return -EINVAL;
+
+  drm_gem_object_get(object);
+  backing->owner = object;
+  backing->owner_ops = &drm_gem_vma_owner_ops;
+  backing->pages = object->pages;
+  backing->page_count = request->length / PAGE_SIZE;
+  backing->cache_flags = 0;
+  return 0;
+}
+
 struct drm_core_device *
 drm_core_device_alloc(const struct drm_core_config *config) {
   if (!config || !config->driver_name || !config->driver_name[0] ||
@@ -1534,6 +1620,7 @@ void drm_gem_object_put(struct drm_gem_object *object) {
   drm_fence_put(object->exclusive_fence);
   if (object->ops && object->ops->release)
     object->ops->release(object);
+  dma_buf_put(object->dmabuf);
   kfree(object->pages);
   drm_core_device_put(object->dev);
   kfree(object);
@@ -1546,6 +1633,27 @@ void drm_prime_object_put(struct drm_prime_object *object) {
   kfree(object);
 }
 
+uint64_t drm_prime_object_size(const struct drm_prime_object *object) {
+  return object && object->object ? object->object->size : 0;
+}
+
+uint64_t drm_prime_object_id(const struct drm_prime_object *object) {
+  if (!object || !object->object)
+    return 0;
+  return object->object->mmap_offset / PAGE_SIZE;
+}
+
+bool drm_prime_object_cpu_access_ready(const struct drm_prime_object *object) {
+  if (!object || !object->object)
+    return false;
+  struct drm_fence *fence = drm_gem_reservation_get_exclusive(object->object);
+  if (!fence)
+    return true;
+  bool ready = drm_fence_is_signaled(fence);
+  drm_fence_put(fence);
+  return ready;
+}
+
 void *drm_gem_object_private(struct drm_gem_object *object) {
   return object ? object->private : NULL;
 }
@@ -1554,10 +1662,23 @@ uint64_t drm_gem_object_size(const struct drm_gem_object *object) {
   return object ? object->size : 0;
 }
 
+struct page **drm_gem_object_pages(struct drm_gem_object *object,
+                                   uint32_t *page_count) {
+  if (!object || !page_count)
+    return NULL;
+  *page_count = object->page_count;
+  return object->pages;
+}
+
 void drm_gem_reservation_set_exclusive(struct drm_gem_object *object,
                                        struct drm_fence *fence) {
   if (!object)
     return;
+  if (object->dmabuf) {
+    if (fence)
+      (void)dma_resv_add_fence(&object->dmabuf->resv, fence, true);
+    return;
+  }
   if (fence)
     drm_fence_get(fence);
   uint64_t flags;
@@ -1572,6 +1693,8 @@ struct drm_fence *
 drm_gem_reservation_get_exclusive(struct drm_gem_object *object) {
   if (!object)
     return NULL;
+  if (object->dmabuf)
+    return dma_resv_export_fence(&object->dmabuf->resv, false);
   uint64_t flags;
   spin_lock_irqsave(&object->reservation_lock, &flags);
   struct drm_fence *fence = object->exclusive_fence;

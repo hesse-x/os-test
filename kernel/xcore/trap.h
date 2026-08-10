@@ -118,6 +118,10 @@ uint64_t shm_alloc_pages(uint64_t npages);
 struct shm *shm_create_internal(uint64_t npages);
 struct shm *shm_get(struct shm *shm);
 void shm_put(struct shm *shm);
+void shm_init_metadata(struct shm *shm);
+int shm_pin_range(struct shm *shm, uint64_t offset, uint64_t size,
+                  struct page ***pages_out, uint32_t *count_out);
+void shm_unpin_range(struct shm *shm, struct page **pages, uint32_t count);
 uint64_t shm_add_page(struct shm *shm);
 int shm_grow(struct shm *shm, size_t npages);
 extern uint64_t sig_trampoline_phys;

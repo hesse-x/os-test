@@ -24,6 +24,8 @@ struct file;
 
 struct dev_mmap_request {
   uint64_t addr;
+  /* Length supplied by userspace before the syscall rounds to whole pages. */
+  uint64_t requested_length;
   uint64_t length;
   uint64_t offset;
   uint32_t prot;

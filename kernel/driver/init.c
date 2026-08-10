@@ -12,6 +12,7 @@
 #include "kernel/driver/intel/i915_drv.h"
 #include "kernel/driver/intel/i915_probe.h"
 #include "kernel/driver/pci.h"
+#include "kernel/driver/udmabuf.h"
 #include "kernel/driver/virtio_gpu.h"
 #include "kernel/driver/xhci.h"
 #include "kernel/xcore/log.h"
@@ -35,6 +36,7 @@ void driver_init(void) {
   PERF_PHASE_BEGIN(PERF_PHASE_PCI);
   pci_init();
   drm_core_init();
+  udmabuf_init();
   PERF_PHASE_END(PERF_PHASE_PCI);
   printk(LOG_INFO, "driver_init: pci_init done\n");
 

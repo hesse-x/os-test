@@ -29,10 +29,13 @@ enum drm_core_state {
 struct drm_core_device;
 struct drm_fence;
 struct drm_gem_object;
+struct dev_mmap_request;
+struct dev_mmap_backing;
 
 struct drm_prime_object {
   struct drm_gem_object *object;
   uint32_t handle_hint;
+  bool writable;
 };
 
 struct drm_gem_object_ops {
@@ -70,8 +73,16 @@ drm_gem_object_create(struct drm_core_device *dev, uint64_t size,
 void drm_gem_object_get(struct drm_gem_object *object);
 void drm_gem_object_put(struct drm_gem_object *object);
 void drm_prime_object_put(struct drm_prime_object *object);
+uint64_t drm_prime_object_size(const struct drm_prime_object *object);
+uint64_t drm_prime_object_id(const struct drm_prime_object *object);
+bool drm_prime_object_cpu_access_ready(const struct drm_prime_object *object);
+int drm_prime_mmap_prepare(struct drm_prime_object *prime,
+                           const struct dev_mmap_request *request,
+                           struct dev_mmap_backing *backing);
 void *drm_gem_object_private(struct drm_gem_object *object);
 uint64_t drm_gem_object_size(const struct drm_gem_object *object);
+struct page **drm_gem_object_pages(struct drm_gem_object *object,
+                                   uint32_t *page_count);
 void drm_gem_reservation_set_exclusive(struct drm_gem_object *object,
                                        struct drm_fence *fence);
 struct drm_fence *

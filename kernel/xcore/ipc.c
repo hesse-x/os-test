@@ -22,7 +22,7 @@
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/mem/alloc.h"
 #include "kernel/xcore/mm_types.h"
-#include "kernel/xcore/perf/event.h"
+#include "kernel/xcore/mutex.h"
 #include "kernel/xcore/sched.h"
 #include "kernel/xcore/sparse.h"
 #include "kernel/xcore/spinlock.h"
@@ -52,6 +52,57 @@ struct shm *shm_get(struct shm *shm) {
     return NULL;
   refcount_inc(&shm->s_count);
   return shm;
+}
+
+static atomic_t shm_next_object_id = {.counter = 0};
+
+void shm_init_metadata(struct shm *shm) {
+  mutex_init(&shm->lock);
+  atomic_set(&shm->pin_count, 0);
+  atomic_set(&shm->writable_shared_mappings, 0);
+  shm->object_id = (uint64_t)atomic_inc_return(&shm_next_object_id);
+}
+
+int shm_pin_range(struct shm *shm, uint64_t offset, uint64_t size,
+                  struct page ***pages_out, uint32_t *count_out) {
+  if (!shm || !pages_out || !count_out || !size || (offset & (PAGE_SIZE - 1)) ||
+      (size & (PAGE_SIZE - 1)))
+    return -EINVAL;
+  if (offset > UINT64_MAX - size)
+    return -EINVAL;
+
+  mutex_lock(&shm->lock);
+  uint64_t end = offset + size;
+  if (!(shm->seals & SHM_F_SEAL_SHRINK) || (shm->seals & SHM_F_SEAL_WRITE) ||
+      end > shm->file_size || size / PAGE_SIZE > UINT32_MAX) {
+    mutex_unlock(&shm->lock);
+    return -EINVAL;
+  }
+  uint32_t count = (uint32_t)(size / PAGE_SIZE);
+  struct page **pages = kmalloc((size_t)count * sizeof(*pages));
+  if (!pages) {
+    mutex_unlock(&shm->lock);
+    return -ENOMEM;
+  }
+  uint64_t first = offset / PAGE_SIZE;
+  for (uint32_t i = 0; i < count; i++) {
+    uint64_t phys = shm->page_list ? shm->page_list[first + i]
+                                   : shm->phys + (first + i) * PAGE_SIZE;
+    pages[i] = &bfc_frames[PHY_TO_PAGE(phys)];
+  }
+  atomic_inc(&shm->pin_count);
+  mutex_unlock(&shm->lock);
+  *pages_out = pages;
+  *count_out = count;
+  return 0;
+}
+
+void shm_unpin_range(struct shm *shm, struct page **pages, uint32_t count) {
+  (void)count;
+  if (!shm)
+    return;
+  kfree(pages);
+  atomic_dec(&shm->pin_count);
 }
 
 void shm_put(struct shm *shm) {
@@ -122,6 +173,7 @@ struct shm *shm_create_internal(uint64_t npages) {
   refcount_set(&shm->s_count, 1);
   shm->flags = 0; // no SHM_KERNEL
   shm->seals = 0;
+  shm_init_metadata(shm);
   shm->name[0] = '\0';
   shm->page_list = page_list;
   shm->num_pages = (int)npages;

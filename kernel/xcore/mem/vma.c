@@ -14,6 +14,7 @@
 #include <stdint.h>
 
 #include "arch/x64/utils.h"
+#include "kernel/xcore/atomic.h"
 #include "kernel/xcore/kpi.h"
 #include "kernel/xcore/mem/alloc.h"
 #include "kernel/xcore/mem/vma.h"
@@ -175,9 +176,13 @@ mmap_region *vma_split(mm *mm, mmap_region *r, uint64_t addr, uint64_t size) {
   mid->offset = mid_off;
   mid->phys = r->phys ? (r->phys + delta) : 0;
   mid->next = NULL;
-  // mid is a new owner of r's inode/shm_private_src: take its own reference so
-  // every region struct independently owns exactly one ref (see free_one_region
-  // / copy_mmap_regions). r keeps its own ref until it is freed/shrunk below.
+  // mid is a new owner of r's backing references: every region struct owns
+  // exactly one ref (see free_one_region / copy_mmap_regions). r keeps its own
+  // refs until it is freed or shrunk below.
+  if (mid->shm_obj)
+    shm_get(mid->shm_obj);
+  if (mid->flags & KMAP_SHM_MAYWRITE)
+    atomic_inc(&mid->shm_obj->writable_shared_mappings);
   if (mid->inode)
     inode_get(mid->inode);
   if (mid->shm_private_src)
@@ -189,6 +194,10 @@ mmap_region *vma_split(mm *mm, mmap_region *r, uint64_t addr, uint64_t size) {
   if (addr + size < r_end) {
     tail = (mmap_region *)kmalloc(sizeof(mmap_region));
     if (!tail) {
+      if (mid->flags & KMAP_SHM_MAYWRITE)
+        atomic_dec(&mid->shm_obj->writable_shared_mappings);
+      if (mid->shm_obj)
+        shm_put(mid->shm_obj);
       if (mid->inode)
         inode_put(mid->inode);
       if (mid->shm_private_src)
@@ -205,6 +214,10 @@ mmap_region *vma_split(mm *mm, mmap_region *r, uint64_t addr, uint64_t size) {
     tail->offset = r->offset + t_delta;
     tail->phys = r->phys ? (r->phys + t_delta) : 0;
     tail->next = NULL;
+    if (tail->shm_obj)
+      shm_get(tail->shm_obj);
+    if (tail->flags & KMAP_SHM_MAYWRITE)
+      atomic_inc(&tail->shm_obj->writable_shared_mappings);
     if (tail->inode)
       inode_get(tail->inode);
     if (tail->shm_private_src)
@@ -214,7 +227,7 @@ mmap_region *vma_split(mm *mm, mmap_region *r, uint64_t addr, uint64_t size) {
 
   if (addr == r->vaddr) {
     // No front piece: replace r in the list with mid (-> tail). r is destroyed,
-    // so release its own inode/shm reference (mid/tail each took their own).
+    // so release its backing refs (mid/tail each took their own).
     mmap_region **pp = &mm->mmap_regions;
     while (*pp != r)
       pp = &(*pp)->next;
@@ -223,6 +236,10 @@ mmap_region *vma_split(mm *mm, mmap_region *r, uint64_t addr, uint64_t size) {
     if (tail)
       tail->next = after;
     *pp = mid;
+    if (r->flags & KMAP_SHM_MAYWRITE)
+      atomic_dec(&r->shm_obj->writable_shared_mappings);
+    if (r->shm_obj)
+      shm_put(r->shm_obj);
     if (r->inode)
       inode_put(r->inode);
     if (r->shm_private_src)
@@ -384,6 +401,8 @@ static void free_one_region(mm *mm, uint64_t *pml4, mmap_region *r) {
       // cannot evict a cached one). Flush so the new mapping takes effect.
       invlpg(va);
     }
+    if (r->flags & KMAP_SHM_MAYWRITE)
+      atomic_dec(&r->shm_obj->writable_shared_mappings);
     if (r->shm_obj)
       shm_put(r->shm_obj);
     if (r->flags & KMAP_DMA_OWNED) {

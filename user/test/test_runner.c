@@ -49,6 +49,11 @@ static int file_is_elf(const char *path) {
   return read == sizeof(magic) && memcmp(magic, elf_magic, sizeof(magic)) == 0;
 }
 
+static int requires_exclusive_drm_master(const char *name) {
+  return strcmp(name, "vulkan_drm_smoke") == 0 ||
+         strcmp(name, "udmabuf_vulkan_kms") == 0;
+}
+
 static struct test_entry tests[] = {
     {"pipe", "/test/pipe.elf"},
     {"fcntl", "/test/fcntl.elf"},
@@ -95,6 +100,8 @@ static struct test_entry tests[] = {
     {"test_passwd", "/test/test_passwd.elf"},
     {"egl_smoke", "/test/test_egl_smoke.elf"},
     {"vulkan_smoke", "/test/vulkan_smoke.elf"},
+    {"vulkan_drm_smoke", "/test/vulkan_drm_smoke.elf"},
+    {"udmabuf_vulkan_kms", "/test/udmabuf_vulkan_kms.elf"},
     {"pixman_smoke", "/test/test_pixman_smoke.elf"},
     {"display_info_smoke", "/test/test_display_info_smoke.elf"},
     {"xkbcommon_smoke", "/test/test_xkbcommon_smoke.elf"},
@@ -106,6 +113,7 @@ static struct test_entry tests[] = {
     {"ld_cycle", "/test/ld_test_cycle.elf"},
     {"test_dl", "/test/test_dl.elf"},
     {"drm_ioctl", "/test/drm_ioctl.elf"},
+    {"udmabuf", "/test/test_udmabuf.elf"},
     {"drm_phase_c", "/test/drm_phase_c.elf"},
     {"drm_test_link", "/test/drm_test_link.elf"},
     {"virgl_channel", "/test/virgl_channel.elf"},
@@ -224,6 +232,14 @@ int main(int argc, char **argv, char **envp) {
 
     const char *name = tests[i].name;
     const char *path = tests[i].path;
+
+    /* These run as pre-compositor graphics gates. Once the desktop owns DRM
+     * master, repeating them from its terminal can only fail KMS operations. */
+    if (argc == 1 && requires_exclusive_drm_master(name)) {
+      printf("[SKIP] %-20s (requires exclusive DRM master)\n", name);
+      skip_count++;
+      continue;
+    }
 
 #ifdef PERF
     if (perf_excludes_long_timeout_test(name)) {

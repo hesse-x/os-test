@@ -87,6 +87,73 @@ if(TEST)
     add_custom_target(test_vulkan_smoke_elf DEPENDS ${VULKAN_SMOKE_ELF})
     add_dependencies(test_vulkan_smoke_elf musl_libc c_so)
     os_image_path(test_vulkan_smoke_elf test_vulkan_smoke.elf test/vulkan_smoke.elf PARTITION 2)
+
+    set(VULKAN_DRM_SMOKE_ELF ${CMAKE_BINARY_DIR}/test_vulkan_drm_smoke.elf)
+    set(VULKAN_DRM_SMOKE_OBJ ${CMAKE_BINARY_DIR}/test_vulkan_drm_smoke.elf.0.o)
+    add_custom_command(OUTPUT ${VULKAN_DRM_SMOKE_OBJ}
+        COMMAND ${CMAKE_C_COMPILER} ${USER_COMPILE_FLAGS} ${USER_BUILD_FLAGS}
+                -I${CMAKE_SOURCE_DIR}/third_party/Vulkan-Headers/include
+                -I${CMAKE_SOURCE_DIR}/third_party/drm/include
+                -I${CMAKE_SOURCE_DIR}/include/uapi -I${CMAKE_SOURCE_DIR}/user/include
+                -I${MUSL_GEN_DIR} ${MUSL_INCLUDE_FLAGS}
+                -c ${CMAKE_CURRENT_SOURCE_DIR}/test_vulkan_drm_smoke.c
+                -o ${VULKAN_DRM_SMOKE_OBJ}
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/test_vulkan_drm_smoke.c ${MUSL_GEN_HEADERS}
+        IMPLICIT_DEPENDS C ${CMAKE_CURRENT_SOURCE_DIR}/test_vulkan_drm_smoke.c
+        COMMENT "Compiling test_vulkan_drm_smoke.elf.0.o")
+    add_custom_command(OUTPUT ${VULKAN_DRM_SMOKE_ELF}
+        COMMAND ${CMAKE_C_COMPILER} -fno-pie -no-pie
+                -Wl,--dynamic-linker,/lib/ld-musl-x86_64.so.1
+                -Wl,--hash-style=gnu -Wl,--no-as-needed
+                -Wl,-rpath-link,${CMAKE_BINARY_DIR}/sysroot/usr/lib
+                -nostdlib -nodefaultlibs -o ${VULKAN_DRM_SMOKE_ELF}
+                ${MUSL_LIB_DIR}/Scrt1.o ${MUSL_LIB_DIR}/crti.o ${VULKAN_DRM_SMOKE_OBJ}
+                ${CMAKE_BINARY_DIR}/libvulkan.so ${CMAKE_BINARY_DIR}/libc.so
+                ${MUSL_LIB_DIR}/crtn.o
+        DEPENDS ${VULKAN_DRM_SMOKE_OBJ} ${MUSL_LIB_DIR}/Scrt1.o
+                ${MUSL_LIB_DIR}/crti.o ${MUSL_LIB_DIR}/crtn.o
+                ${CMAKE_BINARY_DIR}/libvulkan.so ${CMAKE_BINARY_DIR}/libc.so
+        COMMENT "Linking test_vulkan_drm_smoke.elf")
+    add_custom_target(test_vulkan_drm_smoke_elf DEPENDS ${VULKAN_DRM_SMOKE_ELF})
+    add_dependencies(test_vulkan_drm_smoke_elf musl_libc c_so)
+    os_image_path(test_vulkan_drm_smoke_elf test_vulkan_drm_smoke.elf
+                  test/vulkan_drm_smoke.elf PARTITION 2)
+
+    set(UDMABUF_VULKAN_KMS_ELF
+        ${CMAKE_BINARY_DIR}/test_udmabuf_vulkan_kms.elf)
+    set(UDMABUF_VULKAN_KMS_OBJ
+        ${CMAKE_BINARY_DIR}/test_udmabuf_vulkan_kms.elf.0.o)
+    add_custom_command(OUTPUT ${UDMABUF_VULKAN_KMS_OBJ}
+        COMMAND ${CMAKE_C_COMPILER} ${USER_COMPILE_FLAGS} ${USER_BUILD_FLAGS}
+                -DUDMABUF_VULKAN_KMS=1
+                -I${CMAKE_SOURCE_DIR}/third_party/Vulkan-Headers/include
+                -I${CMAKE_SOURCE_DIR}/third_party/drm/include
+                -I${CMAKE_SOURCE_DIR}/include/uapi -I${CMAKE_SOURCE_DIR}/user/include
+                -I${MUSL_GEN_DIR} ${MUSL_INCLUDE_FLAGS}
+                -c ${CMAKE_CURRENT_SOURCE_DIR}/test_vulkan_drm_smoke.c
+                -o ${UDMABUF_VULKAN_KMS_OBJ}
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/test_vulkan_drm_smoke.c
+                ${MUSL_GEN_HEADERS}
+        IMPLICIT_DEPENDS C ${CMAKE_CURRENT_SOURCE_DIR}/test_vulkan_drm_smoke.c
+        COMMENT "Compiling test_udmabuf_vulkan_kms.elf.0.o")
+    add_custom_command(OUTPUT ${UDMABUF_VULKAN_KMS_ELF}
+        COMMAND ${CMAKE_C_COMPILER} -fno-pie -no-pie
+                -Wl,--dynamic-linker,/lib/ld-musl-x86_64.so.1
+                -Wl,--hash-style=gnu -Wl,--no-as-needed
+                -Wl,-rpath-link,${CMAKE_BINARY_DIR}/sysroot/usr/lib
+                -nostdlib -nodefaultlibs -o ${UDMABUF_VULKAN_KMS_ELF}
+                ${MUSL_LIB_DIR}/Scrt1.o ${MUSL_LIB_DIR}/crti.o
+                ${UDMABUF_VULKAN_KMS_OBJ} ${CMAKE_BINARY_DIR}/libvulkan.so
+                ${CMAKE_BINARY_DIR}/libc.so ${MUSL_LIB_DIR}/crtn.o
+        DEPENDS ${UDMABUF_VULKAN_KMS_OBJ} ${MUSL_LIB_DIR}/Scrt1.o
+                ${MUSL_LIB_DIR}/crti.o ${MUSL_LIB_DIR}/crtn.o
+                ${CMAKE_BINARY_DIR}/libvulkan.so ${CMAKE_BINARY_DIR}/libc.so
+        COMMENT "Linking test_udmabuf_vulkan_kms.elf")
+    add_custom_target(test_udmabuf_vulkan_kms_elf
+                      DEPENDS ${UDMABUF_VULKAN_KMS_ELF})
+    add_dependencies(test_udmabuf_vulkan_kms_elf musl_libc c_so)
+    os_image_path(test_udmabuf_vulkan_kms_elf test_udmabuf_vulkan_kms.elf
+                  test/udmabuf_vulkan_kms.elf PARTITION 2)
 endif()
 
 # These test ELFs are always part of a TEST image. They remain outside the
@@ -211,6 +278,8 @@ add_user_dyn_elf(drm_test C SOURCES drm_test.c LINK_LIBS c)
 
 # Layer 14: DRM ioctl (GET_MAGIC, AUTH_MAGIC, ADDFB2, GEM_CLOSE, GETFB, caps)
 add_user_dyn_elf(drm_ioctl C SOURCES test_drm_ioctl.c LINK_LIBS c STATIC_LIBS unity)
+add_user_dyn_elf(test_udmabuf C SOURCES test_udmabuf.c LINK_LIBS c STATIC_LIBS unity
+    INCLUDE_DIRS ${CMAKE_SOURCE_DIR}/third_party/drm/include)
 
 # Phase C: DRM property/master/cursor/cleanup tests
 add_user_dyn_elf(drm_phase_c C SOURCES test_drm_mode.c LINK_LIBS c STATIC_LIBS unity)
