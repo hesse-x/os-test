@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: MIT
 
-# user/compositor/ — Wayland compositor, desktop shell and GLES terminal
+# user/compositor/ — Wayland compositor, desktop shell and Vulkan terminal
 #
 # tinywl.c is migrated from the host-side reference compositor (wlroots scene
 # API, layer-shell, SSD decorations). It links the Meson-built libwlroots
@@ -110,9 +110,8 @@ add_third_party_lib(freetype STATIC C
     INTERFACE_INCLUDE_DIRS ${FREETYPE_DIR}/include
     FLAGS "-DFT2_BUILD_LIBRARY")
 
-# Compile C-only protocol and wayland-egl adapters into static archives so the
-# terminal itself can remain C++ without compiling generated C as C++.
-set(WAYLAND_EGL_DIR ${CMAKE_SOURCE_DIR}/third_party/wayland/egl)
+# Compile C-only protocol sources into a static archive so the terminal itself
+# can remain C++ without compiling generated C as C++.
 add_third_party_lib(terminal_protocols STATIC C
     SOURCES
         ${CMAKE_BINARY_DIR}/xdg-shell-protocol.c
@@ -125,30 +124,46 @@ add_third_party_lib(terminal_protocols STATIC C
         ${CMAKE_BINARY_DIR}/xdg-decoration-client-protocol.h)
 add_dependencies(terminal_protocols wayland_scanner_host)
 
-add_third_party_lib(wayland_egl STATIC C
-    SOURCES ${WAYLAND_EGL_DIR}/wayland-egl.c
-    INCLUDE_DIRS
-        ${CMAKE_SOURCE_DIR}/third_party/wayland/src
-        ${WAYLAND_EGL_DIR}
-        ${CMAKE_BINARY_DIR})
+find_program(GLSLANG_VALIDATOR glslangValidator REQUIRED)
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+set(TERMINAL_SHADER_DIR ${CMAKE_SOURCE_DIR}/user/driver/terminal_shader)
+set(TERMINAL_SHADER_HEADERS)
+foreach(_shader terminal_rect.vert terminal_rect.frag
+                terminal_text.vert terminal_text.frag)
+    string(REPLACE "." "_" _symbol ${_shader})
+    set(_spv ${CMAKE_BINARY_DIR}/${_shader}.spv)
+    set(_header ${CMAKE_BINARY_DIR}/${_shader}.spv.h)
+    add_custom_command(
+        OUTPUT ${_spv} ${_header}
+        COMMAND ${GLSLANG_VALIDATOR} -V --target-env vulkan1.0
+                -o ${_spv} ${TERMINAL_SHADER_DIR}/${_shader}
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/build_script/embed_spirv.py
+                ${_spv} ${_header} ${_symbol}_spv
+        DEPENDS ${TERMINAL_SHADER_DIR}/${_shader}
+                ${CMAKE_SOURCE_DIR}/build_script/embed_spirv.py
+        COMMENT "Compiling terminal Vulkan shader ${_shader}"
+        VERBATIM)
+    list(APPEND TERMINAL_SHADER_HEADERS ${_header})
+endforeach()
 
 add_user_dyn_elf(terminal
     SOURCES ${CMAKE_SOURCE_DIR}/user/driver/terminal.cc
-    LINK_LIBS EGL GLESv2 wayland-client xkbcommon z m c
-    STATIC_LIBS freetype wayland_egl terminal_protocols
+            ${CMAKE_SOURCE_DIR}/user/driver/terminal_vulkan.cc
+    LINK_LIBS vulkan wayland-client xkbcommon z m c
+    STATIC_LIBS freetype terminal_protocols
     EXCLUDE_FROM_ALL
-    DEFS WL_EGL_PLATFORM
     FLAGS -Wno-unused-parameter -Wno-missing-field-initializers
     INCLUDE_DIRS
         ${CMAKE_SOURCE_DIR}/third_party/wayland/src
-        ${WAYLAND_EGL_DIR}
-        ${CMAKE_SOURCE_DIR}/third_party/mesa/include
+        ${CMAKE_SOURCE_DIR}/third_party/Vulkan-Headers/include
+        ${CMAKE_SOURCE_DIR}/user/driver
         ${CMAKE_SOURCE_DIR}/third_party/libxkbcommon/include
         ${FREETYPE_DIR}/include
         ${CMAKE_BINARY_DIR}
     GEN_HEADERS
         ${CMAKE_BINARY_DIR}/xdg-shell-client-protocol.h
         ${CMAKE_BINARY_DIR}/xdg-decoration-client-protocol.h
+        ${TERMINAL_SHADER_HEADERS}
     IMAGE_PATH usr/bin/terminal)
 
 if(TEST)
@@ -157,13 +172,11 @@ if(TEST)
         LINK_LIBS c
         STATIC_LIBS unity
         EXCLUDE_FROM_ALL
-        DEFS WL_EGL_PLATFORM TERMINAL_SGR_TEST
+        DEFS TERMINAL_SGR_TEST
         FLAGS -Wno-unused-parameter -Wno-missing-field-initializers
               -Wno-unused-function
         INCLUDE_DIRS
             ${CMAKE_SOURCE_DIR}/third_party/wayland/src
-            ${WAYLAND_EGL_DIR}
-            ${CMAKE_SOURCE_DIR}/third_party/mesa/include
             ${CMAKE_SOURCE_DIR}/third_party/libxkbcommon/include
             ${FREETYPE_DIR}/include
             ${CMAKE_BINARY_DIR}

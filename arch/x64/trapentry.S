@@ -360,6 +360,12 @@ switch_to:
 
     movq %rsp, 8(%rdi)       // prev->k_rsp = RSP
     movq 8(%rsi), %rsp       // RSP = next->k_rsp
+
+    # Publish next only after leaving prev's stack.  Work stealing treats the
+    # CPU-local current task as still executing and must not steal it; publishing
+    # next earlier lets another CPU run prev before this k_rsp save completes.
+    movq %rsi, %gs:16        // current_task = next
+
     movq 24(%rsi), %rax      // rax = next->cr3
     movq %rax, %cr3
 

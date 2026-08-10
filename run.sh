@@ -31,8 +31,8 @@ qemu-system-x86_64 \
     -device usb-mouse,bus=xhci.0 \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
     -vga none \
-    -device virtio-gpu-gl \
-    -display sdl,gl=on \
+    -device virtio-gpu-pci \
+    -display sdl \
     -m 2G -bios /usr/share/ovmf/OVMF.fd \
     -smp 2 \
     $SERIAL_OPTS \

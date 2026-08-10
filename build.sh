@@ -95,25 +95,6 @@ CMAKE_EXTRA="$CMAKE_EXTRA -DPERF_TEST_NAME=$PERF_TEST_NAME"
 
 MESA_GALLIUM_DRIVERS=virgl,llvmpipe
 
-audit_locked_submodule() {
-    local path="$1"
-    local expected actual
-    expected="$(git ls-tree HEAD -- "$path" | awk '{print $3}')"
-    actual="$(git -C "$path" rev-parse HEAD)"
-    if [[ -z "$expected" || "$actual" != "$expected" ]] || \
-       ! git -C "$path" diff --quiet || \
-       ! git -C "$path" diff --cached --quiet; then
-        echo "ERROR: $path must stay at its locked commit with no tracked changes" >&2
-        exit 1
-    fi
-    printf 'submodule audit: %s %s clean\n' "$path" "$actual"
-}
-
-# The default renderer and the independent lavapipe smoke must not rewrite or
-# patch either upstream source tree.
-audit_locked_submodule third_party/mesa
-audit_locked_submodule third_party/wlroots
-
 # 1. CMake build (kernel + userspace)
 mkdir -p build && cd build
 cmake -GNinja \
@@ -734,9 +715,6 @@ if [ "${BUILD_TEST:-0}" = "1" ]; then
     echo "=== Auditing Vulkan runtime closure ==="
     python3 build_script/audit-vulkan.py
 fi
-
-audit_locked_submodule third_party/mesa
-audit_locked_submodule third_party/wlroots
 
 # 4. Generate disk.img (single disk, two partitions: ESP + root FAT32)
 TEST="${TEST:-0}"

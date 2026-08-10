@@ -38,6 +38,7 @@
 #include <xos/time.h>
 
 #ifdef PERF
+#include "kernel/xcore/perf/event.h"
 #include "xos/perf.h"
 #endif
 // ===================== IRQ owner table (shared with trap.c)

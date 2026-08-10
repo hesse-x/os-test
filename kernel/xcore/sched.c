@@ -450,10 +450,11 @@ void sched_try_steal_task(void) {
   ASSERT(cpu_locals[v].run_count > 0);
 
   /* A task may already be on its run queue while it is still executing on the
-     victim CPU: wake_from_wait can win the short BLOCKED -> schedule window.
-     It is READY, but must not migrate until that CPU enters schedule() and
-     consumes its run_node.  Stealing it would run one kernel stack on two
-     CPUs.  Find the last genuinely inactive runnable task instead. */
+     victim CPU: wake_from_wait can win the short BLOCKED -> schedule window,
+     or schedule() can enqueue prev before switch_to saves its RSP.  switch_to
+     publishes next as _cur_proc only after changing stacks, so _cur_proc is the
+     authoritative task whose kernel stack is still active.  Stealing it would
+     run one kernel stack on two CPUs. */
   list_node *head = &cpu_locals[v].run_queue;
   list_node *tail_node = head->prev;
   xtask *victim_current = cpu_locals[v]._cur_proc;
@@ -685,7 +686,6 @@ __attribute__((no_sanitize("kernel-address"))) void schedule() {
       }
       perf_trace_sched_switch(prev->pid, idle->pid, (uint8_t)prev->state,
                               (uint8_t)prev->wait_event, false, true);
-      current_task = idle;
       per_cpu_tss[my_cpu].rsp0 = idle->k_stack_top;
       get_cpu_local()->tss_rsp0 = idle->k_stack_top;
       update_tss_iopm(idle);
@@ -760,7 +760,6 @@ __attribute__((no_sanitize("kernel-address"))) void schedule() {
   perf_trace_sched_switch(prev->pid, next->pid, (uint8_t)prev->state,
                           (uint8_t)prev->wait_event, prev == idle,
                           next == idle);
-  current_task = next;
   per_cpu_tss[my_cpu].rsp0 = next->k_stack_top;
   get_cpu_local()->tss_rsp0 = next->k_stack_top;
   update_tss_iopm(next);

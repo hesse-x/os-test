@@ -12,7 +12,7 @@
 #include "kernel/driver/drm/drm_fence.h"
 
 void dma_resv_init(struct dma_resv *resv) {
-  resv->lock = (spinlock)SPINLOCK_INIT;
+  resv->lock = SPINLOCK_INIT;
   resv->exclusive = NULL;
   resv->shared_count = 0;
   resv->generation = 0;

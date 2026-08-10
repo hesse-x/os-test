@@ -14,6 +14,7 @@ SYSROOT_LIB = os.path.join(BUILD, "sysroot", "usr", "lib")
 MANIFEST = os.path.join(BUILD, "image_manifest.txt")
 TARGETS = [
     os.path.join(BUILD, "test_vulkan_smoke.elf"),
+    os.path.join(BUILD, "terminal.elf"),
     os.path.join(BUILD, "libvulkan.so.1"),
     os.path.join(BUILD, "libvulkan_lvp.so"),
     os.path.join(SYSROOT_LIB, "libLLVM.so.18.1"),
@@ -45,6 +46,7 @@ def main() -> int:
 
     required_destinations = {
         "test/vulkan_smoke.elf",
+        "usr/bin/terminal",
         "lib/libvulkan.so", "lib/libvulkan.so.1",
         "lib/libvulkan_lvp.so", "lib/libLLVM.so.18.1",
         "usr/share/vulkan/icd.d/lvp_icd.x86_64.json",
@@ -96,6 +98,17 @@ def main() -> int:
         raise SystemExit("Vulkan audit: smoke interpreter is not target musl")
     if sha256(os.path.join(BUILD, "libvulkan.so")) != sha256(os.path.join(BUILD, "libvulkan.so.1")):
         raise SystemExit("Vulkan audit: FAT32 Loader aliases are not identical real copies")
+
+    terminal_dynamic = readelf("-dW", os.path.join(BUILD, "terminal.elf"))
+    terminal_needed = set(re.findall(r"\(NEEDED\).*?\[([^]]+)\]", terminal_dynamic))
+    if "libvulkan.so.1" not in terminal_needed:
+        raise SystemExit("Vulkan audit: terminal does not need libvulkan.so.1")
+    forbidden_terminal = {"libEGL.so", "libEGL.so.1", "libGLESv2.so", "libGLESv2.so.2"}
+    if forbidden_terminal.intersection(terminal_needed):
+        raise SystemExit("Vulkan audit: terminal still needs EGL/GLES")
+    symbols = readelf("-Ws", os.path.join(BUILD, "terminal.elf"))
+    if re.search(r"\b(?:egl[A-Za-z0-9_]*|gl[A-Z][A-Za-z0-9_]*|wl_egl_[A-Za-z0-9_]*)\b", symbols):
+        raise SystemExit("Vulkan audit: terminal still contains EGL/GLES/wayland-egl symbols")
     print("Vulkan ELF/manifest closure audit: PASS")
     return 0
 

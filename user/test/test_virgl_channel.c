@@ -170,6 +170,9 @@ void test_context_init_virgl_one_ring(void) {
   uint64_t capsets = 0;
   TEST_ASSERT_EQUAL_INT(
       0, getparam(g_fd, VIRTGPU_PARAM_SUPPORTED_CAPSET_IDs, &capsets));
+  if ((capsets & ((1u << VIRTGPU_DRM_CAPSET_VIRGL) |
+                  (1u << VIRTGPU_DRM_CAPSET_VIRGL2))) == 0)
+    TEST_IGNORE_MESSAGE("host has no virgl capset");
 
   uint32_t capset_id = (capsets & (1u << VIRTGPU_DRM_CAPSET_VIRGL2))
                            ? VIRTGPU_DRM_CAPSET_VIRGL2
@@ -189,6 +192,13 @@ void test_context_init_virgl_one_ring(void) {
 
 /* RESOURCE_CREATE v1 allocates a GEM handle at/above VIRGL_HANDLE_BASE. */
 void test_resource_create_handle_range(void) {
+  uint64_t capsets = 0;
+  TEST_ASSERT_EQUAL_INT(
+      0, getparam(g_fd, VIRTGPU_PARAM_SUPPORTED_CAPSET_IDs, &capsets));
+  if ((capsets & ((1u << VIRTGPU_DRM_CAPSET_VIRGL) |
+                  (1u << VIRTGPU_DRM_CAPSET_VIRGL2))) == 0)
+    TEST_IGNORE_MESSAGE("host has no virgl capset");
+
   struct drm_virtgpu_resource_create rc;
   memset(&rc, 0, sizeof(rc));
   rc.target = 2;  /* PIPE_TEXTURE_2D */
@@ -212,6 +222,13 @@ void test_resource_create_handle_range(void) {
 
 /* GEM_CLOSE reclaims a virgl v1 resource. */
 void test_gem_close_virgl(void) {
+  uint64_t capsets = 0;
+  TEST_ASSERT_EQUAL_INT(
+      0, getparam(g_fd, VIRTGPU_PARAM_SUPPORTED_CAPSET_IDs, &capsets));
+  if ((capsets & ((1u << VIRTGPU_DRM_CAPSET_VIRGL) |
+                  (1u << VIRTGPU_DRM_CAPSET_VIRGL2))) == 0)
+    TEST_IGNORE_MESSAGE("host has no virgl capset");
+
   struct drm_virtgpu_resource_create rc;
   memset(&rc, 0, sizeof(rc));
   rc.target = 2;

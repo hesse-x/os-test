@@ -4,12 +4,11 @@
  * SPDX-License-Identifier: MIT
  */
 
-// gles-term —— GLES 渲染的真终端（Wayland 客户端）。
+// Vulkan WSI 渲染的真终端（Wayland 客户端）。
 //   · forkpty() 起 $SHELL：键盘输入写进 PTY，shell 输出读回来解析
 //   · 内置最小 VT 模拟器：UTF-8、CSI（光标/清屏/滚动/插入删除）、
 //     SGR 16/256/真彩色、备用屏幕（less/htop 可用）、OSC 标题
-//   · 文字用 freetype 光栅化成字形图集纹理，GLES2 直接绘制
-//     （不依赖 cairo：矩形/圆角/圆/字符全在 GPU 上画）
+//   · 文字用 freetype 光栅化成字形图集，Vulkan 直接绘制
 //   · 窗口装饰由 compositor 统一使用 SSD 绘制
 #include <ctype.h>
 #include <errno.h>
@@ -30,13 +29,8 @@
 #include <xos/perf.h>
 #include <xos/syscall_nums.h>
 
-#include <EGL/egl.h>
-#include <EGL/eglext.h>
-#include <GLES2/gl2.h>
-#include <GLES2/gl2ext.h>
 #include <ft2build.h>
 #include <wayland-client.h>
-#include <wayland-egl.h>
 #include <xkbcommon/xkbcommon.h>
 #include FT_FREETYPE_H
 
@@ -46,6 +40,9 @@
 
 #include "xdg-decoration-client-protocol.h"
 #include "xdg-shell-client-protocol.h"
+#ifndef TERMINAL_SGR_TEST
+#include "terminal_vulkan.h"
+#endif
 
 #define FONT_SIZE 14.0
 #define TITLEBAR_H 30.0
@@ -847,13 +844,8 @@ struct app {
   bool configured; // 收到首个 configure 后才能提交 buffer
   char title[256]; // 标题栏文字（OSC 0/2 可改）
 
-  // EGL / GLES
-  struct wl_egl_window *egl_window;
-  EGLDisplay egl_dpy;
-  EGLContext egl_ctx;
-  EGLSurface egl_surf;
-  bool egl_ready;
-  bool gl_ready;
+  TerminalVulkanRenderer *renderer;
+  int buffer_scale;
 
   // 字体度量
   int cell_w, cell_h;
@@ -862,7 +854,6 @@ struct app {
   // PTY / shell
   int pty_fd;
   pid_t shell_pid;
-  struct wl_callback *frame_callback;
   bool needs_render;
 
   // xkb 键盘状态
@@ -874,33 +865,21 @@ struct app {
 static struct app app = {
     .width = 720,
     .height = 460,
-    .title = "gles-term",
+    .title = "vulkan-term",
+    .buffer_scale = 1,
     .pty_fd = -1,
 };
 
 static void spawn_shell(void);
-static void gl_init(void);
 static void render(void);
 
-static void frame_done(void *data, struct wl_callback *callback,
-                       uint32_t time) {
+static void frame_ready(void *data) {
   (void)data;
-  (void)time;
-  wl_callback_destroy(callback);
-  app.frame_callback = NULL;
-  if (!app.closed && !app.gl_ready) {
-    gl_init();
-    app.needs_render = true;
-  }
   if (!app.closed && app.shell_pid <= 0)
     spawn_shell();
   if (!app.closed && app.needs_render)
     render();
 }
-
-static const struct wl_callback_listener frame_listener = {
-    .done = frame_done,
-};
 
 // 按窗口尺寸算出网格列/行数
 static void grid_dims(int *cols, int *rows) {
@@ -931,7 +910,8 @@ struct glyph {
 static FT_Library ft_lib;
 static FT_Face ft_face;
 static double font_pixel_size = FONT_SIZE;
-static GLuint atlas_tex;
+static uint8_t *atlas_pixels;
+static uint64_t atlas_generation;
 // 开放寻址哈希表，避免 Unicode 码点受一个很小的直接索引数组限制。
 static struct glyph atlas_glyphs[GLYPH_CACHE_SIZE];
 static int atlas_count;
@@ -998,33 +978,30 @@ static struct glyph *atlas_add(FT_Face face, uint32_t cp) {
   g.atlas_y = atlas_cursor_y;
   atlas_cursor_x += g.w + ATLAS_PAD;
 
-  // 把单色位图画进图集的 (g.atlas_x, g.atlas_y) 位置。
-  // freetype 输出单通道灰度位图，扩展成 RGBA（R=G=B=0, A=亮度）上传，
-  // 和 GL_RGBA 纹理格式匹配。
-  glBindTexture(GL_TEXTURE_2D, atlas_tex);
-  glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-  size_t npix = (size_t)g.w * g.h;
-  uint8_t *rgba = static_cast<uint8_t *>(calloc(npix, 4));
-  if (!rgba)
+  if (!atlas_pixels || g.w <= 0 || g.h <= 0)
     return NULL;
   FT_Bitmap *bitmap = &face->glyph->bitmap;
+  size_t pitch =
+      bitmap->pitch >= 0 ? (size_t)bitmap->pitch : (size_t)-bitmap->pitch;
+  if (pitch == 0 || pitch > SIZE_MAX / (size_t)g.h)
+    return NULL;
   for (int y = 0; y < g.h; y++) {
-    const uint8_t *src =
-        bitmap->pitch >= 0
-            ? bitmap->buffer + (size_t)y * bitmap->pitch
-            : bitmap->buffer + (size_t)(g.h - 1 - y) * (size_t)-bitmap->pitch;
+    const uint8_t *src = bitmap->pitch >= 0
+                             ? bitmap->buffer + (size_t)y * bitmap->pitch
+                             : bitmap->buffer + (size_t)(g.h - 1 - y) * pitch;
     for (int x = 0; x < g.w; x++) {
       uint8_t coverage;
       if (bitmap->pixel_mode == FT_PIXEL_MODE_MONO)
         coverage = (src[x / 8] & (0x80 >> (x % 8))) ? 255 : 0;
-      else
+      else if (bitmap->pixel_mode == FT_PIXEL_MODE_GRAY)
         coverage = src[x];
-      rgba[((size_t)y * g.w + x) * 4 + 3] = coverage;
+      else
+        return NULL;
+      atlas_pixels[(size_t)(g.atlas_y + y) * ATLAS_W + g.atlas_x + x] =
+          coverage;
     }
   }
-  glTexSubImage2D(GL_TEXTURE_2D, 0, g.atlas_x, g.atlas_y, g.w, g.h, GL_RGBA,
-                  GL_UNSIGNED_BYTE, rgba);
-  free(rgba);
+  ++atlas_generation;
 
   return glyph_insert(g);
 }
@@ -1064,29 +1041,15 @@ static void measure_font(void) {
   app.cell_h = ascent - descent;
   app.ascent = ascent;
 
-  // 字体度量不依赖 GLES；图集必须等 EGL context current 后再创建。
+  // 字体度量与 Vulkan 资源创建相互独立。
 }
 
 static void atlas_init(void) {
-  // 建一张 RGBA 图集纹理，预光栅化 ASCII + 常见标点。
-  // 用 RGBA 而非 GL_ALPHA：现代 GLES 驱动对单通道格式支持参差，RGBA 最稳。
-  glGenTextures(1, &atlas_tex);
-  glBindTexture(GL_TEXTURE_2D, atlas_tex);
-  glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-  uint8_t *empty = static_cast<uint8_t *>(calloc((size_t)ATLAS_W * ATLAS_H, 4));
-  if (!empty) {
+  atlas_pixels = static_cast<uint8_t *>(calloc((size_t)ATLAS_W, ATLAS_H));
+  if (!atlas_pixels) {
     fprintf(stderr, "无法分配字形图集\n");
     exit(1);
   }
-  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, ATLAS_W, ATLAS_H, 0, GL_RGBA,
-               GL_UNSIGNED_BYTE, empty);
-  free(empty);
-  // FreeType 已经生成逐像素灰度覆盖率，1:1 绘制时不再做线性插值，
-  // 避免笔画被二次滤波后显得忽粗忽细。
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
   for (uint32_t c = 0x20; c < 0x7f; c++)
     atlas_add(ft_face, c);
   // 常见非 ASCII：框线/阴影字符（htop、对话框边框用）
@@ -1097,201 +1060,14 @@ static void atlas_init(void) {
       0x2588, 0x258c, 0x2590, 0x2591, 0x2592, 0x2593, 0};
   for (int i = 0; extra[i]; i++)
     atlas_add(ft_face, extra[i]);
+  fprintf(stderr, "[TERM-VK] atlas initialized glyphs=%d generation=%llu\n",
+          atlas_count, (unsigned long long)atlas_generation);
 }
 
 // 取码点对应的字形；不在图集里就按需补一个（终端可能收到任意 Unicode）
 static struct glyph *get_glyph(uint32_t cp) {
   struct glyph *g = glyph_lookup(cp);
   return g ? g : atlas_add(ft_face, cp);
-}
-
-// ---------------------------------------------------------------------------
-// GLES 渲染：矩形着色器（纯色 + 圆角裁剪）+ 字形着色器（采样图集）
-// ---------------------------------------------------------------------------
-// 坐标系：用像素坐标 + 正交投影，避免每个图元都算 NDC。窗口左上角为原点，
-// y 向下（和终端网格、wayland 表面坐标一致）。
-static GLuint rect_prog, text_prog;
-static GLint rect_proj_loc, text_proj_loc, atlas_loc;
-static GLuint vbo;
-static size_t vbo_offset;
-
-static GLuint compile_shader(GLenum type, const char *src) {
-  GLuint shader = glCreateShader(type);
-  glShaderSource(shader, 1, &src, NULL);
-  glCompileShader(shader);
-  GLint ok;
-  glGetShaderiv(shader, GL_COMPILE_STATUS, &ok);
-  if (!ok) {
-    char log[512];
-    glGetShaderInfoLog(shader, sizeof(log), NULL, log);
-    fprintf(stderr, "shader 编译失败: %s\n", log);
-    exit(1);
-  }
-  return shader;
-}
-
-static void egl_init(void) {
-  app.egl_dpy =
-      eglGetPlatformDisplay(EGL_PLATFORM_WAYLAND_EXT, app.display, NULL);
-  if (app.egl_dpy == EGL_NO_DISPLAY) {
-    fprintf(stderr, "eglGetPlatformDisplay 失败: EGL error 0x%04x\n",
-            (unsigned int)eglGetError());
-    exit(1);
-  }
-  if (!eglInitialize(app.egl_dpy, NULL, NULL)) {
-    fprintf(stderr, "eglInitialize 失败: EGL error 0x%04x\n",
-            (unsigned int)eglGetError());
-    exit(1);
-  }
-  if (!eglBindAPI(EGL_OPENGL_ES_API)) {
-    fprintf(stderr, "eglBindAPI 失败: EGL error 0x%04x\n",
-            (unsigned int)eglGetError());
-    exit(1);
-  }
-
-  EGLint config_attrs[] = {
-      EGL_SURFACE_TYPE,
-      EGL_WINDOW_BIT,
-      EGL_RENDERABLE_TYPE,
-      EGL_OPENGL_ES2_BIT,
-      EGL_RED_SIZE,
-      8,
-      EGL_GREEN_SIZE,
-      8,
-      EGL_BLUE_SIZE,
-      8,
-      EGL_ALPHA_SIZE,
-      8,
-      EGL_NONE,
-  };
-  EGLConfig config;
-  EGLint n = 0;
-  if (!eglChooseConfig(app.egl_dpy, config_attrs, &config, 1, &n) || n == 0) {
-    fprintf(stderr, "找不到可用 EGL config: EGL error 0x%04x\n",
-            (unsigned int)eglGetError());
-    exit(1);
-  }
-
-  EGLint ctx_attrs[] = {EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE};
-  app.egl_ctx =
-      eglCreateContext(app.egl_dpy, config, EGL_NO_CONTEXT, ctx_attrs);
-  if (app.egl_ctx == EGL_NO_CONTEXT) {
-    fprintf(stderr, "eglCreateContext 失败: EGL error 0x%04x\n",
-            (unsigned int)eglGetError());
-    exit(1);
-  }
-
-  app.egl_window = wl_egl_window_create(app.surface, app.width, app.height);
-  if (!app.egl_window) {
-    fprintf(stderr, "wl_egl_window_create 失败\n");
-    exit(1);
-  }
-  app.egl_surf =
-      eglCreateWindowSurface(app.egl_dpy, config, app.egl_window, NULL);
-  if (app.egl_surf == EGL_NO_SURFACE) {
-    fprintf(stderr, "eglCreateWindowSurface 失败: EGL error 0x%04x\n",
-            (unsigned int)eglGetError());
-    exit(1);
-  }
-  if (!eglMakeCurrent(app.egl_dpy, app.egl_surf, app.egl_surf, app.egl_ctx)) {
-    fprintf(stderr, "eglMakeCurrent 失败: EGL error 0x%04x\n",
-            (unsigned int)eglGetError());
-    exit(1);
-  }
-  app.egl_ready = true;
-}
-
-static void gl_init(void) {
-  atlas_init();
-
-  glEnable(GL_BLEND);
-  glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA); // 预乘 alpha 混合
-
-  // 矩形着色器：传入像素坐标顶点，fragment 里对到圆角距离做平滑裁剪。
-  // u_color 是预乘后的 RGBA。圆角通过 signed-distance-field 算 alpha：取到
-  // 矩形中心框的距离，减去圆角半径，负值在内部。对边缘做 fwidth 抗锯齿。
-  // （不用 gl_VertexID：GLES2/GLSL ES 1.00 不支持，改用 VBO 传顶点。）
-  static const char *rect_vs =
-      "attribute vec2 a_pos;\n" // 矩形四角的像素坐标
-      "uniform mat4 u_proj;\n"
-      "varying vec2 v_pos;\n"
-      "void main() {\n"
-      "  v_pos = a_pos;\n"
-      "  gl_Position = u_proj * vec4(a_pos, 0.0, 1.0);\n"
-      "}\n";
-  static const char *rect_fs =
-      "#extension GL_OES_standard_derivatives : enable\n" // fwidth 在 GLSL
-                                                          // ES 1.00 需显式启用
-      "precision mediump float;\n"
-      "uniform vec4 u_color;\n" // 预乘 RGBA
-      "uniform vec4 u_rect;\n"  // (x, y, w, h)
-      "uniform float u_radius;\n"
-      "varying vec2 v_pos;\n"
-      "void main() {\n"
-      "  if (u_radius <= 0.0) { gl_FragColor = u_color; return; }\n"
-      "  // 到矩形中心框的距离，r 为圆角半径\n"
-      "  vec2 center = u_rect.xy + u_rect.zw * 0.5;\n"
-      "  vec2 d = max(abs(v_pos - center) - (u_rect.zw * 0.5 - "
-      "vec2(u_radius)), 0.0);\n"
-      "  float dist = length(d) - u_radius;\n"
-      "  float aa = fwidth(dist);\n"
-      "  float a = clamp(0.5 - dist / aa, 0.0, 1.0);\n"
-      "  gl_FragColor = u_color * a;\n"
-      "}\n";
-  rect_prog = glCreateProgram();
-  glAttachShader(rect_prog, compile_shader(GL_VERTEX_SHADER, rect_vs));
-  glAttachShader(rect_prog, compile_shader(GL_FRAGMENT_SHADER, rect_fs));
-  glBindAttribLocation(rect_prog, 0, "a_pos");
-  glLinkProgram(rect_prog);
-  rect_proj_loc = glGetUniformLocation(rect_prog, "u_proj");
-
-  // 字形着色器：四边形覆盖字形位图区域，采样图集纹理，按 u_color 染色。
-  // 图集把 FreeType 灰度覆盖率存在 RGBA 纹理的 alpha 通道。
-  static const char *text_vs =
-      "attribute vec2 a_pos;\n" // 窗口像素坐标
-      "attribute vec2 a_uv;\n"  // 图集纹理坐标（已归一化）
-      "uniform mat4 u_proj;\n"
-      "varying vec2 v_uv;\n"
-      "void main() {\n"
-      "  v_uv = a_uv;\n"
-      "  gl_Position = u_proj * vec4(a_pos, 0.0, 1.0);\n"
-      "}\n";
-  static const char *text_fs = "precision mediump float;\n"
-                               "varying vec2 v_uv;\n"
-                               "uniform sampler2D u_atlas;\n"
-                               "uniform vec4 u_color;\n" // 预乘 RGBA
-                               "void main() {\n"
-                               "  float a = texture2D(u_atlas, v_uv).a;\n"
-                               "  gl_FragColor = u_color * a;\n"
-                               "}\n";
-  text_prog = glCreateProgram();
-  glAttachShader(text_prog, compile_shader(GL_VERTEX_SHADER, text_vs));
-  glAttachShader(text_prog, compile_shader(GL_FRAGMENT_SHADER, text_fs));
-  glBindAttribLocation(text_prog, 0, "a_pos");
-  glBindAttribLocation(text_prog, 1, "a_uv");
-  glLinkProgram(text_prog);
-  text_proj_loc = glGetUniformLocation(text_prog, "u_proj");
-  atlas_loc = glGetUniformLocation(text_prog, "u_atlas");
-
-  glGenBuffers(1, &vbo);
-  app.gl_ready = true;
-}
-
-// 4x4 矩阵存成 16 个 float（列主序，和 GL 一致）
-typedef struct {
-  float m[16];
-} mat4;
-
-static mat4 ortho(float l, float r, float b, float t, float n, float f) {
-  mat4 m = {0};
-  m.m[0] = 2.0f / (r - l);
-  m.m[5] = 2.0f / (t - b);
-  m.m[10] = -2.0f / (f - n);
-  m.m[12] = -(r + l) / (r - l);
-  m.m[13] = -(t + b) / (t - b);
-  m.m[14] = -(f + n) / (f - n);
-  m.m[15] = 1.0f;
-  return m;
 }
 
 // 把 0xRRGGBB + alpha 转成预乘 RGBA 归一化 float
@@ -1305,139 +1081,62 @@ static void color_premul(uint32_t rgb, float alpha, float out[4]) {
   out[3] = alpha;
 }
 
-// 画一个圆角矩形（预乘颜色）。r=0 即直角。
-static void draw_rect(mat4 proj, float x, float y, float w, float h, float r,
-                      const float color[4]) {
-  // 四个顶点的三角形带（与 v_pos attribute 对应）。GLES2 不支持 gl_VertexID。
-  float verts[4][2] = {
-      {x, y},
-      {x + w, y},
-      {x, y + h},
-      {x + w, y + h},
-  };
-  glBindBuffer(GL_ARRAY_BUFFER, vbo);
-  size_t offset = vbo_offset;
-  glBufferSubData(GL_ARRAY_BUFFER, offset, sizeof(verts), verts);
-  vbo_offset += sizeof(verts);
-  glEnableVertexAttribArray(0);
-  glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, (void *)(uintptr_t)offset);
-
-  glUseProgram(rect_prog);
-  glUniformMatrix4fv(rect_proj_loc, 1, GL_FALSE, proj.m);
-  glUniform4f(glGetUniformLocation(rect_prog, "u_rect"), x, y, w, h);
-  glUniform1f(glGetUniformLocation(rect_prog, "u_radius"), r);
-  glUniform4f(glGetUniformLocation(rect_prog, "u_color"), color[0], color[1],
-              color[2], color[3]);
-  glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-
-  glDisableVertexAttribArray(0);
-}
-
-// 画一个字符（窗口像素坐标 (x, baseline)），按 color 染色。
-// baseline 是文本基线的 y 坐标；字形位图相对基线偏移 (bearing_x, -bearing_y)。
-static void draw_glyph_at(mat4 proj, uint32_t cp, float x, float baseline,
-                          const float color[4]) {
+static bool make_glyph_quad(uint32_t cp, float x, float baseline,
+                            const float color[4], TerminalGlyphQuad *quad) {
   struct glyph *g = get_glyph(cp);
-  if (!g)
-    return;
-  float px = x + g->bearing_x;
-  float py = baseline - g->bearing_y;
-  float u0 = (float)g->atlas_x / ATLAS_W;
-  float v0 = (float)g->atlas_y / ATLAS_H;
-  float u1 = (float)(g->atlas_x + g->w) / ATLAS_W;
-  float v1 = (float)(g->atlas_y + g->h) / ATLAS_H;
-  // 两个三角形组成一个矩形：顶点 (pos.x, pos.y, uv.u, uv.v)
-  float verts[6][4] = {
-      {px, py, u0, v0},        {px + g->w, py, u1, v0},
-      {px, py + g->h, u0, v1}, {px, py + g->h, u0, v1},
-      {px + g->w, py, u1, v0}, {px + g->w, py + g->h, u1, v1},
+  if (!g) {
+    static bool glyph_failure_logged;
+    if (!glyph_failure_logged) {
+      fprintf(stderr,
+              "[TERM-VK] glyph lookup failed cp=U+%04X cache=%d "
+              "atlas_generation=%llu\n",
+              cp, atlas_count, (unsigned long long)atlas_generation);
+      glyph_failure_logged = true;
+    }
+    return false;
+  }
+  *quad = {
+      .x = x + g->bearing_x,
+      .y = baseline - g->bearing_y,
+      .width = (float)g->w,
+      .height = (float)g->h,
+      .u0 = (float)g->atlas_x / ATLAS_W,
+      .v0 = (float)g->atlas_y / ATLAS_H,
+      .u1 = (float)(g->atlas_x + g->w) / ATLAS_W,
+      .v1 = (float)(g->atlas_y + g->h) / ATLAS_H,
   };
-  glBindBuffer(GL_ARRAY_BUFFER, vbo);
-  size_t offset = vbo_offset;
-  glBufferSubData(GL_ARRAY_BUFFER, offset, sizeof(verts), verts);
-  vbo_offset += sizeof(verts);
-  glEnableVertexAttribArray(0);
-  glEnableVertexAttribArray(1);
-  glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float),
-                        (void *)(uintptr_t)offset);
-  glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float),
-                        (void *)(uintptr_t)(offset + 2 * sizeof(float)));
-
-  glUseProgram(text_prog);
-  glUniformMatrix4fv(text_proj_loc, 1, GL_FALSE, proj.m);
-  glUniform1i(atlas_loc, 0);
-  glActiveTexture(GL_TEXTURE0);
-  glBindTexture(GL_TEXTURE_2D, atlas_tex);
-  glUniform4f(glGetUniformLocation(text_prog, "u_color"), color[0], color[1],
-              color[2], color[3]);
-  glDrawArrays(GL_TRIANGLES, 0, 6);
-
-  glDisableVertexAttribArray(0);
-  glDisableVertexAttribArray(1);
+  memcpy(quad->color, color, sizeof(quad->color));
+  return true;
 }
 
 static void render_now(void) {
-  if (!app.configured || app.frame_callback != NULL)
-    return; // xdg-shell 要求先 ack 首个 configure 才能提交 buffer
+  if (!app.configured || !app.renderer)
+    return;
   app.needs_render = false;
-  if (!app.egl_ready)
-    egl_init();
-
-  if (!eglMakeCurrent(app.egl_dpy, app.egl_surf, app.egl_surf, app.egl_ctx)) {
-    fprintf(stderr, "render: eglMakeCurrent 失败: EGL error 0x%04x\n",
-            (unsigned int)eglGetError());
+  size_t cells = (size_t)term.cols * term.rows;
+  TerminalRect *backgrounds =
+      static_cast<TerminalRect *>(calloc(cells + 1, sizeof(TerminalRect)));
+  TerminalGlyphQuad *glyphs = static_cast<TerminalGlyphQuad *>(
+      calloc(cells * 2 + 1, sizeof(TerminalGlyphQuad)));
+  TerminalRect *decorations =
+      static_cast<TerminalRect *>(calloc(cells * 2 + 1, sizeof(TerminalRect)));
+  TerminalRect cursor[1]{};
+  TerminalGlyphQuad cursor_glyph[1]{};
+  if (!backgrounds || !glyphs || !decorations) {
+    free(backgrounds);
+    free(glyphs);
+    free(decorations);
+    fprintf(stderr, "[TERM-VK] FATAL draw-list allocation failed\n");
     app.closed = true;
     return;
   }
-  glViewport(0, 0, app.width, app.height);
-  // The lightweight frame has no shaders yet, so clear it directly to the
-  // terminal color. Normal frames draw that color below and must start fully
-  // transparent; otherwise the two 84%-opaque layers compound to 97.4%.
-  if (!app.gl_ready) {
-    glClearColor(0x17 / 255.0f * 0.84f, 0x17 / 255.0f * 0.84f,
-                 0x1a / 255.0f * 0.84f, 0.84f);
-  } else {
-    glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
-  }
-  glClear(GL_COLOR_BUFFER_BIT);
-
-  // Put a lightweight buffer on screen before cold shader compilation and
-  // glyph-atlas construction. The frame callback completes GL setup while the
-  // compositor is already displaying the terminal surface.
-  if (!app.gl_ready) {
-    app.frame_callback = wl_surface_frame(app.surface);
-    wl_callback_add_listener(app.frame_callback, &frame_listener, NULL);
-    if (!eglSwapBuffers(app.egl_dpy, app.egl_surf)) {
-      fprintf(stderr,
-              "render: initial eglSwapBuffers failed: EGL error 0x%04x\n",
-              (unsigned int)eglGetError());
-      app.closed = true;
-    } else {
-      (void)syscall(SYS_PERF, XOS_PERF_COUNTER_MARK,
-                    XOS_PERF_GUI_TERMINAL_FIRST_BUFFER, 0, 0, 0, 0);
-    }
-    return;
-  }
-
-  // Give every primitive a disjoint range for this frame. Rewriting offset 0
-  // for each glyph makes virgl rename the busy 96-byte BO thousands of times.
-  size_t max_primitives = (size_t)term.cols * term.rows * 5 + 8;
-  size_t vbo_size = max_primitives * 6 * 4 * sizeof(float);
-  glBindBuffer(GL_ARRAY_BUFFER, vbo);
-  glBufferData(GL_ARRAY_BUFFER, vbo_size, NULL, GL_STREAM_DRAW);
-  vbo_offset = 0;
-
-  // 正交投影：像素坐标 → NDC。wayland 表面 y 向下，所以 top=0, bottom=h。
-  mat4 proj = ortho(0, app.width, app.height, 0, -1, 1);
-
-  int w = app.width, h = app.height;
-
-  // SSD 由 compositor 绘制；客户端只提交终端内容。
+  size_t background_count = 0, glyph_count = 0, decoration_count = 0;
+  size_t cursor_count = 0, cursor_glyph_count = 0;
   float body[4];
   color_premul(0x17171a, 0.84f, body);
-  draw_rect(proj, 0, 0, w, h, 0, body);
+  backgrounds[background_count] = {0, 0, (float)app.width, (float)app.height};
+  memcpy(backgrounds[background_count++].color, body, sizeof(body));
 
-  // 终端网格
   struct cell *grid = cur_grid();
   for (int y = 0; y < term.rows; y++) {
     float row_y = TERM_PAD + y * app.cell_h;
@@ -1457,7 +1156,9 @@ static void render_now(void) {
       if (bg != COLOR_DEFAULT) {
         float bgc[4];
         color_premul(bg, 1.0f, bgc);
-        draw_rect(proj, px, row_y, app.cell_w, app.cell_h, 0, bgc);
+        TerminalRect *rect = &backgrounds[background_count++];
+        *rect = {px, row_y, (float)app.cell_w, (float)app.cell_h};
+        memcpy(rect->color, bgc, sizeof(bgc));
       }
       float fgc[4];
       if (fg == COLOR_DEFAULT)
@@ -1466,15 +1167,24 @@ static void render_now(void) {
         color_premul(fg, 1.0f, fgc);
       // 字符
       if (c->cp) {
-        draw_glyph_at(proj, c->cp, px, baseline, fgc);
+        if (make_glyph_quad(c->cp, px, baseline, fgc, &glyphs[glyph_count]))
+          ++glyph_count;
         if (bold)
-          draw_glyph_at(proj, c->cp, px + 0.65f, baseline, fgc);
+          if (make_glyph_quad(c->cp, px + 0.65f, baseline, fgc,
+                              &glyphs[glyph_count]))
+            ++glyph_count;
       }
-      if (c->flags & CELL_UNDERLINE)
-        draw_rect(proj, px, baseline + 1.0f, app.cell_w, 1.0f, 0, fgc);
-      if (c->flags & CELL_STRIKE)
-        draw_rect(proj, px, baseline - app.ascent * 0.32f, app.cell_w, 1.0f, 0,
-                  fgc);
+      if (c->flags & CELL_UNDERLINE) {
+        TerminalRect *rect = &decorations[decoration_count++];
+        *rect = {px, baseline + 1.0f, (float)app.cell_w, 1.0f};
+        memcpy(rect->color, fgc, sizeof(fgc));
+      }
+      if (c->flags & CELL_STRIKE) {
+        TerminalRect *rect = &decorations[decoration_count++];
+        *rect = {px, baseline - (float)app.ascent * 0.32f, (float)app.cell_w,
+                 1.0f};
+        memcpy(rect->color, fgc, sizeof(fgc));
+      }
     }
   }
 
@@ -1494,32 +1204,62 @@ static void render_now(void) {
     } else if (term.cursor_shape == CURSOR_BAR) {
       cursor_w = 2.0f;
     }
-    draw_rect(proj, cursor_x, cursor_y, cursor_w, cursor_h, 0, cur);
+    cursor[0] = {cursor_x, cursor_y, cursor_w, cursor_h};
+    memcpy(cursor[0].color, cur, sizeof(cur));
+    cursor_count = 1;
     struct cell *c = cell_at(term.cx, term.cy);
     if (c->cp && term.cursor_shape == CURSOR_BLOCK) {
       float inv[4];
       color_premul(0x17171a, 1.0f, inv);
-      draw_glyph_at(proj, c->cp, px, py + app.ascent, inv);
+      if (make_glyph_quad(c->cp, px, py + app.ascent, inv, cursor_glyph))
+        cursor_glyph_count = 1;
     }
   }
 
-  // 每次提交只挂一个帧回调。回调到来前继续解析 PTY，但不继续 swap，
-  // 避免测试的大量输出耗尽 EGL/Wayland buffer 后反向堵住 PTY。
-  app.frame_callback = wl_surface_frame(app.surface);
-  wl_callback_add_listener(app.frame_callback, &frame_listener, NULL);
-
-  // swap 即提交：wayland-egl 会把渲染结果交给合成器
-  if (!eglSwapBuffers(app.egl_dpy, app.egl_surf)) {
-    fprintf(stderr, "render: eglSwapBuffers 失败: EGL error 0x%04x\n",
-            (unsigned int)eglGetError());
+  TerminalDrawList list = {
+      .backgrounds = {backgrounds, background_count},
+      .glyphs = {glyphs, glyph_count},
+      .decorations = {decorations, decoration_count},
+      .cursor = {cursor, cursor_count},
+      .cursor_glyphs = {cursor_glyph, cursor_glyph_count},
+  };
+  TerminalFrame frame = {
+      .draw_list = &list,
+      .atlas_pixels = atlas_pixels,
+      .atlas_width = ATLAS_W,
+      .atlas_height = ATLAS_H,
+      .atlas_generation = atlas_generation,
+      .logical_width = (uint32_t)app.width,
+      .logical_height = (uint32_t)app.height,
+  };
+  static bool content_attempt_logged;
+  if (!content_attempt_logged && glyph_count) {
+    fprintf(stderr,
+            "[TERM-VK] content draw-list glyphs=%zu atlas_generation=%llu\n",
+            glyph_count, (unsigned long long)atlas_generation);
+    content_attempt_logged = true;
+  }
+  TerminalVkRenderResult result = terminal_vk_render(app.renderer, &frame);
+  free(backgrounds);
+  free(glyphs);
+  free(decorations);
+  if (result == TERMINAL_VK_FATAL) {
     app.closed = true;
+  } else if (result == TERMINAL_VK_RETRY) {
+    app.needs_render = true;
+  } else {
+    static bool perf_marked;
+    if (!perf_marked) {
+      (void)syscall(SYS_PERF, XOS_PERF_COUNTER_MARK,
+                    XOS_PERF_GUI_TERMINAL_FIRST_BUFFER, 0, 0, 0, 0);
+      perf_marked = true;
+    }
   }
 }
 
 static void render(void) {
   app.needs_render = true;
-  if (app.frame_callback == NULL)
-    render_now();
+  render_now();
 }
 
 // ---------------------------------------------------------------------------
@@ -1564,6 +1304,8 @@ static void spawn_shell(void) {
     _exit(127);
   }
   app.shell_pid = pid;
+  fprintf(stderr, "[TERM-VK] shell spawned pid=%d pty_fd=%d\n", (int)pid,
+          app.pty_fd);
   int flags = fcntl(app.pty_fd, F_GETFL, 0);
   if (flags >= 0)
     (void)fcntl(app.pty_fd, F_SETFL, flags | O_NONBLOCK);
@@ -1609,8 +1351,16 @@ static void xsurface_configure(void *data, struct xdg_surface *xsurface,
                               XOS_PERF_GUI_TERMINAL_XDG_READY, 0, 0, 0, 0) == 0)
     perf_marked = true;
   app.configured = true;
-  if (app.egl_window)
-    wl_egl_window_resize(app.egl_window, app.width, app.height, 0, 0);
+  if (!app.renderer &&
+      !terminal_vk_create(&app.renderer, app.display, app.surface,
+                          (uint32_t)app.width, (uint32_t)app.height,
+                          (uint32_t)app.buffer_scale, frame_ready, NULL)) {
+    fprintf(stderr, "[TERM-VK] FATAL renderer initialization failed\n");
+    app.closed = true;
+    return;
+  }
+  terminal_vk_resize(app.renderer, (uint32_t)app.width, (uint32_t)app.height,
+                     (uint32_t)app.buffer_scale);
   int cols, rows;
   grid_dims(&cols, &rows);
   if (term_resize(cols, rows))
@@ -1906,6 +1656,14 @@ static void output_scale(void *data, struct wl_output *output, int32_t scale) {
   (void)data;
   (void)output;
   app.output_scale = scale > 0 ? scale : 1;
+  if (app.surface && app.buffer_scale != app.output_scale) {
+    app.buffer_scale = app.output_scale;
+    wl_surface_set_buffer_scale(app.surface, app.buffer_scale);
+    if (app.renderer)
+      terminal_vk_resize(app.renderer, (uint32_t)app.width,
+                         (uint32_t)app.height, (uint32_t)app.buffer_scale);
+    render();
+  }
 }
 
 static const struct wl_output_listener output_listener = {
@@ -1976,6 +1734,7 @@ extern "C" int main(void) {
     font_pixel_size = CLAMP(screen_height / 43.0, 12.0, 16.0);
   }
   measure_font();
+  atlas_init();
   int cols, rows;
   grid_dims(&cols, &rows);
   term_init(cols, rows);
@@ -1986,6 +1745,8 @@ extern "C" int main(void) {
   }
 
   app.surface = wl_compositor_create_surface(app.compositor);
+  app.buffer_scale = app.output_scale > 0 ? app.output_scale : 1;
+  wl_surface_set_buffer_scale(app.surface, app.buffer_scale);
   app.xsurface = xdg_wm_base_get_xdg_surface(app.wm_base, app.surface);
   xdg_surface_add_listener(app.xsurface, &xsurface_listener, NULL);
   app.toplevel = xdg_surface_get_toplevel(app.xsurface);
@@ -1997,7 +1758,7 @@ extern "C" int main(void) {
         app.decoration, ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
   }
   xdg_toplevel_set_title(app.toplevel, app.title);
-  xdg_toplevel_set_app_id(app.toplevel, "gles-term");
+  xdg_toplevel_set_app_id(app.toplevel, "vulkan-term");
   wl_surface_commit(app.surface); // 空 commit 触发首个 configure
 
   // 事件循环：同时等 Wayland 事件和 PTY 输出
@@ -2038,7 +1799,22 @@ extern "C" int main(void) {
       for (int chunks = 0; chunks < 16; chunks++) {
         ssize_t n = read(app.pty_fd, buf, sizeof(buf));
         if (n > 0) {
+          static bool pty_logged;
+          bool log_this_chunk = !pty_logged;
+          if (log_this_chunk) {
+            fprintf(stderr, "[TERM-VK] first PTY output bytes=%zd\n", n);
+            pty_logged = true;
+          }
           term_feed(buf, (size_t)n);
+          if (log_this_chunk) {
+            size_t occupied = 0;
+            for (int cell = 0; cell < term.cols * term.rows; ++cell)
+              if (cur_grid()[cell].cp)
+                ++occupied;
+            fprintf(stderr,
+                    "[TERM-VK] parser occupied_cells=%zu cursor=%d,%d\n",
+                    occupied, term.cx, term.cy);
+          }
           got_output = true;
           continue;
         }
@@ -2060,6 +1836,12 @@ extern "C" int main(void) {
     close(app.pty_fd);
   if (app.shell_pid > 0)
     kill(app.shell_pid, SIGHUP);
+  terminal_vk_destroy(&app.renderer);
+  free(atlas_pixels);
+  if (ft_face)
+    FT_Done_Face(ft_face);
+  if (ft_lib)
+    FT_Done_FreeType(ft_lib);
   wl_display_disconnect(app.display);
   return 0;
 }
