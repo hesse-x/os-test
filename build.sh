@@ -93,7 +93,7 @@ fi
 # Always set the selector so a cached --perf=<name> does not affect --perf.
 CMAKE_EXTRA="$CMAKE_EXTRA -DPERF_TEST_NAME=$PERF_TEST_NAME"
 
-MESA_DRIVER=virgl
+MESA_GALLIUM_DRIVERS=virgl,llvmpipe
 
 # 1. CMake build (kernel + userspace)
 mkdir -p build && cd build
@@ -125,6 +125,11 @@ bash build_script/install-libs.sh
 echo "=== Building libc++ ==="
 bash build_script/build_libcxx.sh
 
+# LLVM must exist before Mesa configures llvmpipe/lavapipe. The build is
+# incremental and publishes target headers plus the monolithic target DSO.
+echo "=== Building target LLVM/Clang toolchain ==="
+bash build_script/build_llvm.sh
+
 if [ "${BUILD_TEST:-0}" = "1" ]; then
     echo "=== Building libc++ smoke ELF ==="
     ninja -C build libcxx_smoke_elf
@@ -151,7 +156,9 @@ fi
     # wlroots controls its public ABI with wlroots.syms.  Unlike Mesa and the
     # local libraries, its headers do not mark each public function with a
     # visibility attribute, so a hidden default would produce an empty dynsym.
+    LLVM_CONFIG="$(cd build_script && pwd)/llvm-config-target.py"
     sed -e "s#@CC@#$CC_BIN#g" -e "s#@CXX@#$CXX_BIN#g" -e "s#@PYTHON@#$PYTHON_BIN#g" \
+        -e "s#@LLVM_CONFIG@#$LLVM_CONFIG#g" \
         -e "s#@SYSROOT@#$SYSROOT#g" \
         -e "s/-fvisibility=hidden/-fvisibility=default/g" \
         build_script/third_party/mesa/meson-cross-x86_64.txt.in > "$WLROOTS_CROSS"
@@ -381,12 +388,14 @@ if [[ ! -x "$MESA_VENV/bin/meson" ]] || \
 fi
 export PATH="$MESA_VENV/bin:$PATH"
 PYTHON_BIN="$(cd "$MESA_VENV" && pwd)/bin/python3"
+LLVM_CONFIG="$(cd build_script && pwd)/llvm-config-target.py"
 
 # Generate the cross-file (CC/CXX/PYTHON/SYSROOT absolute). venv must exist first (above).
 # SYSROOT is the same build/sysroot install-headers/ls populates; the cross-file uses it
 # for the compiler/linker --sysroot flag AND pkg_config_libdir/sys_root.
 SYSROOT="$(cd build/sysroot && pwd)"
 sed -e "s#@CC@#$CC_BIN#g" -e "s#@CXX@#$CXX_BIN#g" -e "s#@PYTHON@#$PYTHON_BIN#g" \
+    -e "s#@LLVM_CONFIG@#$LLVM_CONFIG#g" \
     -e "s#@SYSROOT@#$SYSROOT#g" \
     build_script/third_party/mesa/meson-cross-x86_64.txt.in > "$CROSS"
 
@@ -420,7 +429,18 @@ EOF
 # Emit libdrm/zlib/expat/ffi .pc into the sysroot so meson dependency() resolves.
 bash build_script/gen-pkgconfig.sh
 
-GALLIUM="${MESA_DRIVER:-softpipe}"
+if [[ ! -f "$SYSROOT/usr/lib/libLLVM.so.18.1" || ! -d "$SYSROOT/usr/include/llvm" ]]; then
+    echo "ERROR: Mesa Vulkan build requires target LLVM headers and libLLVM.so.18.1" >&2
+    exit 1
+fi
+# Mesa's Vulkan display WSI source is compiled on Linux even though the stage-1
+# smoke creates no surface. Publish the project's existing target libudev API.
+install -m 644 user/lib/udev-shim/libudev.h "$SYSROOT/usr/include/libudev.h"
+
+echo "=== Building Vulkan Headers/Loader ==="
+bash build_script/build_vulkan.sh
+
+GALLIUM="${MESA_GALLIUM_DRIVERS:-virgl,llvmpipe}"
 MESA_SETUP=(
     "$MESADIR" third_party/mesa
     --buildtype release -Doptimization=2
@@ -429,10 +449,12 @@ MESA_SETUP=(
     # cannot silently mask the complete values in the cross file.
     "-Dc_args=-m64 -fPIC --sysroot=$SYSROOT -nodefaultlibs -fvisibility=hidden -Wno-macro-redefined"
     "-Dcpp_args=-m64 -fPIC --sysroot=$SYSROOT -nodefaultlibs -stdlib=libc++ -nostdinc++ -I$SYSROOT/usr/include/c++/v1 -fvisibility=hidden -Wno-macro-redefined"
+    -Dcpp_rtti=false
     "-Dgallium-drivers=$GALLIUM"
     -Dglx=disabled -Dopengl=false -Dgles1=disabled -Dgles2=enabled
     -Degl=enabled -Dgbm=enabled
-    -Dplatforms=wayland -Dvulkan-drivers= -Dllvm=disabled
+    -Dplatforms=wayland -Dvulkan-drivers=swrast -Dllvm=enabled
+    -Dshared-llvm=enabled -Ddraw-use-llvm=true
     -Dgallium-va=disabled -Dgallium-rusticl=false -Dvideo-codecs=
     -Dvalgrind=disabled -Dlibunwind=disabled -Dzstd=disabled
     -Dspirv-tools=disabled
@@ -477,6 +499,7 @@ libs = {
     "libgbm.so":    ["libgbm.so",    "libgbm.so.1",    "libgbm.so.1.0.0"],
     "libgallium-26.1.4.so": ["libgallium-26.1.4.so"],
     "dri_gbm.so":           ["dri_gbm.so"],
+    "libvulkan_lvp.so":     ["libvulkan_lvp.so"],
 }
 # Map each wanted real file to the meson target filename that produces it. meson's
 # intro-targets.json `filename` is the real on-disk name (e.g. libEGL.so.1.0.0).
@@ -516,6 +539,41 @@ print(f"  mesa stage: {len(staged)} files -> build/ ({sorted(staged)})")
 missing = [g[0] for g in libs.values() if not any(n in staged for n in g)]
 if missing:
     raise SystemExit(f"ERROR: missing Mesa products: {missing}")
+
+manifest_src = real_files.get("lvp_icd.x86_64.json")
+if manifest_src is None:
+    raise SystemExit("ERROR: Mesa did not produce lvp_icd.x86_64.json")
+with open(manifest_src, encoding="utf-8") as src:
+    manifest = json.load(src)
+library = manifest.get("ICD", {}).get("library_path")
+if not isinstance(library, str):
+    raise SystemExit("ERROR: lvp ICD manifest has no string ICD.library_path")
+manifest["ICD"]["library_path"] = "/lib/libvulkan_lvp.so"
+manifest_dst = os.path.join("build", "lvp_icd.x86_64.json")
+with open(manifest_dst, "w", encoding="utf-8") as dst:
+    json.dump(manifest, dst, indent=2)
+    dst.write("\n")
+os.makedirs(os.path.join("build", "sysroot", "usr", "share", "vulkan", "icd.d"), exist_ok=True)
+shutil.copy2(manifest_dst, os.path.join("build", "sysroot", "usr", "share", "vulkan", "icd.d", "lvp_icd.x86_64.json"))
+shutil.copy2(os.path.join("build", "libvulkan_lvp.so"), os.path.join("build", "sysroot", "usr", "lib", "libvulkan_lvp.so"))
+PY
+
+python3 - "$MESADIR/meson-info/intro-buildoptions.json" <<'PY'
+import json, sys
+options = {entry["name"]: entry["value"] for entry in json.load(open(sys.argv[1]))}
+expected = {
+    "vulkan-drivers": ["swrast"],
+    "gallium-drivers": ["virgl", "llvmpipe"],
+    "llvm": "enabled",
+    "shared-llvm": "enabled",
+    "platforms": ["wayland"],
+    "egl": "enabled",
+    "gles2": "enabled",
+}
+for name, wanted in expected.items():
+    if options.get(name) != wanted:
+        raise SystemExit(f"ERROR: Mesa option {name}={options.get(name)!r}, expected {wanted!r}")
+print("Mesa Vulkan feature audit: PASS")
 PY
 
 # Build the compositor stack after Mesa and the target sysroot are ready.
@@ -628,8 +686,13 @@ PY
 # The EGL test links against staged Mesa .so files, so it must run after the
 # Mesa stage above rather than in the first CMake ninja invocation.
 if echo "$CMAKE_EXTRA" | grep -q "TEST=1"; then
-    echo "=== Building EGL/GLES2 smoke ELF ==="
-    ninja -C build test_egl_smoke_elf
+    echo "=== Building EGL/GLES2 and Vulkan smoke ELFs ==="
+    ninja -C build test_egl_smoke_elf test_vulkan_smoke_elf
+fi
+
+if [ "${BUILD_TEST:-0}" = "1" ]; then
+    echo "=== Auditing Vulkan runtime closure ==="
+    python3 build_script/audit-vulkan.py
 fi
 
 # 4. Generate disk.img (single disk, two partitions: ESP + root FAT32)
@@ -645,10 +708,5 @@ export PERF
 if [ "$PERF" = "1" ]; then
     bash build_script/perf-symbols.sh
 fi
-
-# LLVM/Clang is part of the default OS image. The cross build is incremental;
-# missing compiler or linker artifacts are a hard build failure.
-echo "=== Building target LLVM/Clang toolchain ==="
-bash build_script/build_llvm.sh
 
 ./build_script/mkdisk.sh

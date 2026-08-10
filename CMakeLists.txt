@@ -356,6 +356,11 @@ os_image_path(mesa_gallium      libgallium-26.1.4.so   lib/libgallium-26.1.4.so 
 os_image_path(mesa_gbm          libgbm.so              lib/libgbm.so              PARTITION 2)
 os_image_path(mesa_gbm_soname   libgbm.so.1            lib/libgbm.so.1            PARTITION 2)
 os_image_path(mesa_dri_gbm      dri_gbm.so             lib/dri_gbm.so             PARTITION 2)
+os_image_path(vulkan_loader       libvulkan.so                 lib/libvulkan.so                 PARTITION 2)
+os_image_path(vulkan_loader_so    libvulkan.so.1               lib/libvulkan.so.1               PARTITION 2)
+os_image_path(vulkan_lavapipe     libvulkan_lvp.so             lib/libvulkan_lvp.so             PARTITION 2)
+os_image_path(vulkan_lvp_manifest lvp_icd.x86_64.json          usr/share/vulkan/icd.d/lvp_icd.x86_64.json PARTITION 2)
+os_image_path(vulkan_llvm         sysroot/usr/lib/libLLVM.so.18.1 lib/libLLVM.so.18.1             PARTITION 2)
 
 os_image_path(pixman_lib          libpixman-1.so          lib/libpixman-1.so          PARTITION 2)
 os_image_path(pixman_soname       libpixman-1.so.0        lib/libpixman-1.so.0        PARTITION 2)

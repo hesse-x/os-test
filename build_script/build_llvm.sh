@@ -72,6 +72,7 @@ DESTDIR="$SYSROOT" cmake --install "$BUILD" --strip --component clang
 DESTDIR="$SYSROOT" cmake --install "$BUILD" --strip --component clang-cpp
 DESTDIR="$SYSROOT" cmake --install "$BUILD" --component clang-resource-headers
 DESTDIR="$SYSROOT" cmake --install "$BUILD" --strip --component LLVM
+DESTDIR="$SYSROOT" cmake --install "$BUILD" --component llvm-headers
 DESTDIR="$SYSROOT" cmake --install "$BUILD" --strip --component lld
 
 # Stage-0 compiler-rt supplies the generic ELF crt bookends and full builtins.

@@ -258,8 +258,6 @@ done
 
 mcopy -i "${BUILD_DIR}/part2.img" "${LLVM_ROOT}/bin/clang" "::usr/bin/clang"
 mcopy -i "${BUILD_DIR}/part2.img" "${LLVM_ROOT}/bin/ld.lld" "::usr/bin/ld.lld"
-mcopy -i "${BUILD_DIR}/part2.img" "${LLVM_ROOT}/lib/libLLVM.so.18.1" \
-    "::lib/libLLVM.so.18.1"
 mcopy -i "${BUILD_DIR}/part2.img" "${LLVM_ROOT}/lib/libclang-cpp.so.18.1" \
     "::lib/libclang-cpp.so.18.1"
 for crt in crt1.o Scrt1.o crti.o crtn.o; do

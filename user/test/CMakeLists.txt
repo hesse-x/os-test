@@ -57,6 +57,38 @@ if(TEST)
     os_image_path(test_egl_smoke_elf test_egl_smoke.elf test/test_egl_smoke.elf PARTITION 2)
 endif()
 
+# Vulkan CPU-rendering smoke. The Loader and headers are staged after the first
+# CMake pass, so build.sh requests this target after Mesa/lavapipe is ready.
+if(TEST)
+    set(VULKAN_SMOKE_ELF ${CMAKE_BINARY_DIR}/test_vulkan_smoke.elf)
+    set(VULKAN_SMOKE_OBJ ${CMAKE_BINARY_DIR}/test_vulkan_smoke.elf.0.o)
+    add_custom_command(OUTPUT ${VULKAN_SMOKE_OBJ}
+        COMMAND ${CMAKE_C_COMPILER} ${USER_COMPILE_FLAGS} ${USER_BUILD_FLAGS}
+                -I${CMAKE_SOURCE_DIR}/third_party/Vulkan-Headers/include
+                -I${CMAKE_SOURCE_DIR}/include/uapi -I${CMAKE_SOURCE_DIR}/user/include
+                -I${MUSL_GEN_DIR} ${MUSL_INCLUDE_FLAGS}
+                -c ${CMAKE_CURRENT_SOURCE_DIR}/test_vulkan_smoke.c -o ${VULKAN_SMOKE_OBJ}
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/test_vulkan_smoke.c ${MUSL_GEN_HEADERS}
+        IMPLICIT_DEPENDS C ${CMAKE_CURRENT_SOURCE_DIR}/test_vulkan_smoke.c
+        COMMENT "Compiling test_vulkan_smoke.elf.0.o")
+    add_custom_command(OUTPUT ${VULKAN_SMOKE_ELF}
+        COMMAND ${CMAKE_C_COMPILER} -fno-pie -no-pie
+                -Wl,--dynamic-linker,/lib/ld-musl-x86_64.so.1
+                -Wl,--hash-style=gnu -Wl,--no-as-needed
+                -Wl,-rpath-link,${CMAKE_BINARY_DIR}/sysroot/usr/lib
+                -nostdlib -nodefaultlibs -o ${VULKAN_SMOKE_ELF}
+                ${MUSL_LIB_DIR}/Scrt1.o ${MUSL_LIB_DIR}/crti.o ${VULKAN_SMOKE_OBJ}
+                ${CMAKE_BINARY_DIR}/libvulkan.so ${CMAKE_BINARY_DIR}/libc.so
+                ${MUSL_LIB_DIR}/crtn.o
+        DEPENDS ${VULKAN_SMOKE_OBJ} ${MUSL_LIB_DIR}/Scrt1.o ${MUSL_LIB_DIR}/crti.o
+                ${MUSL_LIB_DIR}/crtn.o ${CMAKE_BINARY_DIR}/libvulkan.so
+                ${CMAKE_BINARY_DIR}/libc.so
+        COMMENT "Linking test_vulkan_smoke.elf")
+    add_custom_target(test_vulkan_smoke_elf DEPENDS ${VULKAN_SMOKE_ELF})
+    add_dependencies(test_vulkan_smoke_elf musl_libc c_so)
+    os_image_path(test_vulkan_smoke_elf test_vulkan_smoke.elf test/vulkan_smoke.elf PARTITION 2)
+endif()
+
 # These test ELFs are always part of a TEST image. They remain outside the
 # first ALL pass only because their external libraries are installed after the
 # sysroot is prepared; build.sh builds these targets immediately afterward.

@@ -96,6 +96,7 @@ static struct test_entry tests[] = {
     {"test_regex", "/test/test_regex.elf"},
     {"test_passwd", "/test/test_passwd.elf"},
     {"egl_smoke", "/test/test_egl_smoke.elf"},
+    {"vulkan_smoke", "/test/vulkan_smoke.elf"},
     {"pixman_smoke", "/test/test_pixman_smoke.elf"},
     {"display_info_smoke", "/test/test_display_info_smoke.elf"},
     {"xkbcommon_smoke", "/test/test_xkbcommon_smoke.elf"},

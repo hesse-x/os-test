@@ -75,6 +75,7 @@ strip = '/usr/bin/strip'
 ld = '/usr/bin/ld'
 pkg-config = '/usr/bin/pkg-config'
 python3.12 = '@PYTHON@'
+llvm-config = '@LLVM_CONFIG@'
 
 [built-in options]
 # --sysroot=<s> in c_args/cpp_args AND c_link_args/cpp_link_args is load-bearing:
