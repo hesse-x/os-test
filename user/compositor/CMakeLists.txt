@@ -205,16 +205,53 @@ set(WLROOTS_SYSROOT_DIR "${CMAKE_BINARY_DIR}/sysroot" CACHE PATH
 set(WLROOTS_MESON_BUILD_DIR "${CMAKE_BINARY_DIR}/wlroots/wlroots" CACHE PATH
     "Meson build directory for wlroots")
 set(WLROOTS_SYSROOT_INCLUDE ${WLROOTS_SYSROOT_DIR}/usr/include)
+set(OS_VK_UPSTREAM_DIR
+    ${CMAKE_CURRENT_SOURCE_DIR}/renderer/vulkan/upstream/wlroots-0.20.2)
+set(OS_VK_SHADER_ROOT ${CMAKE_BINARY_DIR}/compositor-vulkan-generated)
+set(OS_VK_SHADER_DIR ${OS_VK_SHADER_ROOT}/render/vulkan/shaders)
+file(MAKE_DIRECTORY ${OS_VK_SHADER_DIR})
+set(OS_VK_SHADER_HEADERS)
+foreach(_shader common.vert texture.frag quad.frag output.frag)
+    string(REPLACE "." "_" _symbol ${_shader})
+    set(_header ${OS_VK_SHADER_DIR}/${_shader}.h)
+    add_custom_command(
+        OUTPUT ${_header}
+        COMMAND ${GLSLANG_VALIDATOR} -V
+                ${OS_VK_UPSTREAM_DIR}/shaders/${_shader}
+                -o ${_header} --vn ${_symbol}_data --quiet
+        DEPENDS ${OS_VK_UPSTREAM_DIR}/shaders/${_shader}
+        COMMENT "Compiling compositor Vulkan shader ${_shader}"
+        VERBATIM)
+    list(APPEND OS_VK_SHADER_HEADERS ${_header})
+endforeach()
+
 add_user_dyn_elf(tinywl C
     SOURCES app/compositor_main.c core/server.c cursor.c
         core/frame.c core/lifetime.c frame/frame_plan.c frame/scene_adapter.c
+        renderer/vulkan/os_vk_renderer.c renderer/vulkan/prime_probe.c
+        ${OS_VK_UPSTREAM_DIR}/pass.c
+        ${OS_VK_UPSTREAM_DIR}/pixel_format.c
+        ${OS_VK_UPSTREAM_DIR}/renderer.c
+        ${OS_VK_UPSTREAM_DIR}/texture.c
+        ${OS_VK_UPSTREAM_DIR}/util.c
+        ${OS_VK_UPSTREAM_DIR}/vulkan.c
+        ${OS_VK_UPSTREAM_DIR}/support/dmabuf_linux.c
+        ${OS_VK_UPSTREAM_DIR}/support/matrix.c
+        ${OS_VK_UPSTREAM_DIR}/support/pixel_format.c
+        ${OS_VK_UPSTREAM_DIR}/support/rect_union.c
+        ${OS_VK_UPSTREAM_DIR}/support/time.c
         window/window_state.c window/style/theme.c
         window/animation/legacy_genie.c
-    LINK_LIBS wlroots-0.20 wayland-server input xkbcommon pixman-1 png z m c
+    LINK_LIBS wlroots-0.20 vulkan wayland-server input xkbcommon pixman-1 drm png z m c
     EXCLUDE_FROM_ALL
-    DEFS WLR_USE_UNSTABLE
+    DEFS WLR_USE_UNSTABLE WLR_PRIVATE=
+    FLAGS -Wno-unused-parameter -Wno-missing-field-initializers
     INCLUDE_DIRS
         ${CMAKE_CURRENT_SOURCE_DIR}
+        ${OS_VK_UPSTREAM_DIR}/include
+        ${OS_VK_SHADER_ROOT}
+        ${CMAKE_SOURCE_DIR}/third_party/wlroots/include
+        ${CMAKE_SOURCE_DIR}/third_party/Vulkan-Headers/include
         ${WLROOTS_SYSROOT_INCLUDE}
         ${WLROOTS_SYSROOT_INCLUDE}/wlroots-0.20
         ${WLROOTS_SYSROOT_INCLUDE}/pixman-1
@@ -222,6 +259,7 @@ add_user_dyn_elf(tinywl C
         ${CMAKE_SOURCE_DIR}/user/cursor
         ${CMAKE_SOURCE_DIR}/third_party/libpng
         ${CMAKE_BINARY_DIR}
+    GEN_HEADERS ${OS_VK_SHADER_HEADERS}
     IMAGE_PATH usr/bin/tinywl)
 
 if(TEST)

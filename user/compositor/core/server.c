@@ -44,6 +44,8 @@
 #include "core/lifetime.h"
 #include "core/server.h"
 #include "cursor.h"
+#include "renderer/vulkan/os_vk_renderer.h"
+#include "renderer/vulkan/prime_probe.h"
 #include "window/animation/legacy_genie.h"
 #include "window/window_state.h"
 
@@ -59,6 +61,9 @@
 #define SSD_BUTTON_HIT_RIGHT 80
 #define TINYWL_POINTER_ACCEL_DEFAULT 0.15
 #define GENIE_DURATION_MS 250
+
+/* wlroots keeps this allocator constructor private, but exports the symbol. */
+struct wlr_allocator *wlr_udmabuf_allocator_create(void);
 
 /* For brevity's sake, struct members are annotated where they are used. */
 enum tinywl_cursor_mode {
@@ -1686,25 +1691,48 @@ int os_compositor_run(int argc, char *argv[]) {
     return 1;
   }
 
-  /* Autocreates a renderer, either Pixman, GLES2 or Vulkan for us. The user
-   * can also specify a renderer using the WLR_RENDERER env var.
-   * The renderer is responsible for defining the various pixel formats it
-   * supports for shared memory, this configures that for clients. */
-  server.renderer = wlr_renderer_autocreate(server.backend);
+  /* Renderer selection is deliberately not environment-driven: Vulkan is the
+   * sole production data path and capability failures abort startup. */
+  int drm_fd = wlr_backend_get_drm_fd(server.backend);
+  if (drm_fd < 0) {
+    wlr_log(WLR_ERROR, "Vulkan renderer requires a DRM backend FD");
+    wlr_backend_destroy(server.backend);
+    wl_display_destroy(server.wl_display);
+    return 1;
+  }
+  server.renderer = os_vk_renderer_create_with_drm_fd(drm_fd);
   if (server.renderer == NULL) {
-    wlr_log(WLR_ERROR, "failed to create wlr_renderer");
+    wlr_log(WLR_ERROR, "failed to create production Vulkan renderer");
+    wlr_backend_destroy(server.backend);
+    wl_display_destroy(server.wl_display);
     return 1;
   }
 
-  wlr_renderer_init_wl_display(server.renderer, server.wl_display);
+  /* Only wl_shm is public in phase 2. Client linux-dmabuf remains disabled. */
+  if (!wlr_renderer_init_wl_shm(server.renderer, server.wl_display)) {
+    wlr_log(WLR_ERROR, "failed to initialize wl_shm for Vulkan renderer");
+    wlr_renderer_destroy(server.renderer);
+    wlr_backend_destroy(server.backend);
+    wl_display_destroy(server.wl_display);
+    return 1;
+  }
 
-  /* Autocreates an allocator for us.
-   * The allocator is the bridge between the renderer and the backend. It
-   * handles the buffer creation, allowing wlroots to render onto the
-   * screen */
-  server.allocator = wlr_allocator_autocreate(server.backend, server.renderer);
+  /* Use the standard dma-buf bridge: Vulkan imports the udmabuf fd and the
+   * DRM backend imports that same backing into GEM for KMS scanout. */
+  server.allocator = wlr_udmabuf_allocator_create();
   if (server.allocator == NULL) {
-    wlr_log(WLR_ERROR, "failed to create wlr_allocator");
+    wlr_log(WLR_ERROR, "failed to create udmabuf/PRIME allocator");
+    wlr_renderer_destroy(server.renderer);
+    wlr_backend_destroy(server.backend);
+    wl_display_destroy(server.wl_display);
+    return 1;
+  }
+  if (!os_vulkan_prime_probe(server.renderer, server.allocator, drm_fd)) {
+    wlr_log(WLR_ERROR, "Vulkan PRIME capability gate failed");
+    wlr_allocator_destroy(server.allocator);
+    wlr_renderer_destroy(server.renderer);
+    wlr_backend_destroy(server.backend);
+    wl_display_destroy(server.wl_display);
     return 1;
   }
 
@@ -1744,7 +1772,7 @@ int os_compositor_run(int argc, char *argv[]) {
   server.layer_overlay = wlr_scene_tree_create(&server.scene->tree);
   wlr_log(WLR_INFO,
           "phase1.baseline scene=root/background/bottom/toplevel/overlay "
-          "renderer=legacy");
+          "renderer=vulkan full_redraw=true client_dmabuf=false");
 
   server.layer_shell = wlr_layer_shell_v1_create(server.wl_display, 4);
   server.new_layer_surface.notify = server_new_layer_surface;
@@ -1828,16 +1856,19 @@ int os_compositor_run(int argc, char *argv[]) {
   wl_signal_add(&server.seat->events.request_set_selection,
                 &server.request_set_selection);
 
-  /* Add a Unix socket to the Wayland display. */
-  const char *socket = wl_display_add_socket_auto(server.wl_display);
-  if (!socket) {
-    wlr_backend_destroy(server.backend);
-    return 1;
-  }
-
   /* Start the backend. This will enumerate outputs and inputs, become the DRM
    * master, etc */
   if (!wlr_backend_start(server.backend)) {
+    wlr_backend_destroy(server.backend);
+    wl_display_destroy(server.wl_display);
+    return 1;
+  }
+
+  /* Outputs have now exercised primary swapchain creation. Do not expose a
+   * client socket until both the PRIME probe and backend startup succeeded. */
+  const char *socket = wl_display_add_socket_auto(server.wl_display);
+  if (!socket) {
+    wlr_log(WLR_ERROR, "failed to create Wayland socket");
     wlr_backend_destroy(server.backend);
     wl_display_destroy(server.wl_display);
     return 1;

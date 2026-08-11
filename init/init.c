@@ -103,7 +103,6 @@ static int start_tinywl(void) {
                         "SEATD_SOCK=/run/seatd.sock",
                         "XDG_RUNTIME_DIR=/run",
                         "WLR_BACKENDS=drm,libinput",
-                        "WLR_RENDERER=pixman",
                         "GBM_BACKENDS_PATH=/lib",
                         "XKB_CONFIG_ROOT=/usr/share/X11/xkb",
                         "PATH=/usr/local/bin:/usr/bin:/bin",
