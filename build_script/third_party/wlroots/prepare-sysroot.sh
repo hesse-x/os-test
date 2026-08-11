@@ -97,13 +97,18 @@ install -d "$INCLUDE_DIR/linux"
 install -m 644 "$ROOT/include/uapi/linux/input-event-codes.h" \
 	"$INCLUDE_DIR/linux/"
 
-install -d "$INCLUDE_DIR/EGL" "$INCLUDE_DIR/GLES2" "$INCLUDE_DIR/KHR"
+# Keep EGL for GBM/DRI integration, but remove GLESv2 products left by an
+# older incremental build.
+rm -rf "$INCLUDE_DIR/GLES2"
+rm -f "$LIB_DIR/libGLESv2.so" \
+	"$LIB_DIR/libGLESv2.so.2" "$LIB_DIR/libGLESv2.so.2.0.0" \
+	"$PC_DIR/glesv2.pc"
+install -d "$INCLUDE_DIR/EGL" "$INCLUDE_DIR/KHR"
 install -m 644 "$ROOT/third_party/mesa/include/EGL/"*.h "$INCLUDE_DIR/EGL/"
-install -m 644 "$ROOT/third_party/mesa/include/GLES2/"*.h "$INCLUDE_DIR/GLES2/"
 install -m 644 "$ROOT/third_party/mesa/include/KHR/"*.h "$INCLUDE_DIR/KHR/"
 install -m 644 "$ROOT/third_party/mesa/src/gbm/main/gbm.h" "$INCLUDE_DIR/"
 
-for library in wayland-server wayland-client input udev EGL GLESv2 gbm; do
+for library in wayland-server wayland-client input udev EGL gbm; do
 	if [[ ! -f "$BUILD/lib${library}.so" ]]; then
 		echo "ERROR: missing $BUILD/lib${library}.so" >&2
 		exit 1
@@ -173,10 +178,9 @@ Libs: -L\${libdir} -linput
 Cflags: -I\${includedir}
 EOF
 
-for module in egl glesv2 gbm; do
+for module in egl gbm; do
 	case "$module" in
 		egl) library=EGL ;;
-		glesv2) library=GLESv2 ;;
 		gbm) library=gbm ;;
 	esac
 	cat > "$PC_DIR/$module.pc" <<EOF

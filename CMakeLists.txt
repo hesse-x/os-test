@@ -350,8 +350,6 @@ os_image_path(copy_boot BOOTX64.EFI EFI/BOOT/BOOTX64.EFI PARTITION 1)
 
 os_image_path(mesa_egl          libEGL.so              lib/libEGL.so              PARTITION 2)
 os_image_path(mesa_egl_soname   libEGL.so.1            lib/libEGL.so.1            PARTITION 2)
-os_image_path(mesa_gles2        libGLESv2.so           lib/libGLESv2.so           PARTITION 2)
-os_image_path(mesa_gles2_soname libGLESv2.so.2         lib/libGLESv2.so.2         PARTITION 2)
 os_image_path(mesa_gallium      libgallium-26.1.4.so   lib/libgallium-26.1.4.so   PARTITION 2)
 os_image_path(mesa_gbm          libgbm.so              lib/libgbm.so              PARTITION 2)
 os_image_path(mesa_gbm_soname   libgbm.so.1            lib/libgbm.so.1            PARTITION 2)

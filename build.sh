@@ -451,7 +451,7 @@ MESA_SETUP=(
     "-Dcpp_args=-m64 -fPIC --sysroot=$SYSROOT -nodefaultlibs -stdlib=libc++ -nostdinc++ -I$SYSROOT/usr/include/c++/v1 -fvisibility=hidden -Wno-macro-redefined"
     -Dcpp_rtti=false
     "-Dgallium-drivers=$GALLIUM"
-    -Dglx=disabled -Dopengl=false -Dgles1=disabled -Dgles2=enabled
+    -Dglx=disabled -Dopengl=false -Dgles1=disabled -Dgles2=disabled
     -Degl=enabled -Dgbm=enabled
     -Dplatforms=wayland -Dvulkan-drivers=swrast -Dllvm=enabled
     -Dshared-llvm=enabled -Ddraw-use-llvm=true
@@ -479,31 +479,25 @@ else
 fi
 ninja -C "$MESADIR"
 
-# Stage Mesa's .so into build/ root (where the disk-image manifest + mkdisk expect
-# them). meson introspect gives each target's build path. Mesa's versioned libs ship
-# as REAL files named by their full version (e.g. libEGL.so.1.0.0) with soname
-# (libEGL.so.1) and linker name (libEGL.so) normally symlinks — but FAT32 has no
-# symlinks, so we stage all three as REAL copies in build/. mkdisk ships them to /lib/
-# so the runtime loader resolves DT_NEEDED sonames (libEGL.so.1, libGLESv2.so.2, ...).
-# Non-versioned libs (libgallium-26.1.4.so, dri_gbm.so) are single files, copied once.
+# Stage the Mesa EGL, GBM, Gallium and lavapipe products used at runtime. Meson
+# introspection supplies the real output path for each target.
 python3 - "$MESADIR" <<'PY'
 import json, os, shutil, sys
 mesadir = sys.argv[1]
-# Each entry: (output basename prefix the meson filename starts with, [names to stage]).
-# Versioned libs: meson produces <base>.so.<version> as the real file; we stage real +
-# soname (soversion) + linker name. Names verified from meson.build:
-#   EGL   soversion=1 version=1.0.0 ; GLESv2 soversion=2 version=2.0.0
-#   gbm   version=1.0.0 (soversion derived =1) ; gallium/dri_gbm unversioned (single file)
+# EGL and GBM are versioned; Gallium, dri_gbm and lavapipe have one runtime name.
 libs = {
     "libEGL.so":    ["libEGL.so",    "libEGL.so.1",    "libEGL.so.1.0.0"],
-    "libGLESv2.so": ["libGLESv2.so", "libGLESv2.so.2", "libGLESv2.so.2.0.0"],
     "libgbm.so":    ["libgbm.so",    "libgbm.so.1",    "libgbm.so.1.0.0"],
     "libgallium-26.1.4.so": ["libgallium-26.1.4.so"],
     "dri_gbm.so":           ["dri_gbm.so"],
     "libvulkan_lvp.so":     ["libvulkan_lvp.so"],
 }
-# Map each wanted real file to the meson target filename that produces it. meson's
-# intro-targets.json `filename` is the real on-disk name (e.g. libEGL.so.1.0.0).
+# A reconfigure doesn't clean GLESv2 products staged by an older build.
+for name in ("libGLESv2.so", "libGLESv2.so.2", "libGLESv2.so.2.0.0"):
+    path = os.path.join("build", name)
+    if os.path.exists(path):
+        os.remove(path)
+# Map each wanted real file to the Meson target filename that produces it.
 targets = json.load(open(os.path.join(mesadir, "meson-info", "intro-targets.json")))
 real_files = {}  # real basename -> source path
 for t in targets:
@@ -569,7 +563,7 @@ expected = {
     "shared-llvm": "enabled",
     "platforms": ["wayland"],
     "egl": "enabled",
-    "gles2": "enabled",
+    "gles2": "disabled",
 }
 for name, wanted in expected.items():
     if options.get(name) != wanted:
@@ -581,11 +575,8 @@ PY
     echo "=== Building wlroots 0.20.2 ==="
     bash build_script/third_party/wlroots/prepare-sysroot.sh
     SYSROOT="$(cd build/sysroot && pwd)"
-    # libEGL.so's DT_NEEDED includes libgallium-26.1.4.so; the Mesa stage only
-    # stages it to build/ for the image, not into the sysroot. wlroots/tinywl
-    # link -lEGL so its closure needs libgallium, plus dri_gbm.so is part of the
-    # Mesa megadriver triplet the runtime closure resolves. Stage both into the
-    # sysroot or linking -lEGL (and audit closure check) cannot resolve them.
+    # EGL and GBM load the Mesa Gallium backend at runtime, so keep the
+    # megadriver pair in the target sysroot used to link and audit wlroots.
     for gallium_so in libgallium-26.1.4.so dri_gbm.so; do
         if [[ ! -f "build/$gallium_so" ]]; then
             echo "ERROR: missing build/$gallium_so (run Mesa stage first)" >&2
@@ -704,10 +695,9 @@ PY
         fi
     echo "wlroots ELF audit: PASS (tinywl.elf + libwlroots-0.20.so)"
 
-# The EGL test links against staged Mesa .so files, so it must run after the
-# Mesa stage above rather than in the first CMake ninja invocation.
+# Build API smoke targets after their Mesa libraries have been staged.
 if echo "$CMAKE_EXTRA" | grep -q "TEST=1"; then
-    echo "=== Building EGL/GLES2 and Vulkan smoke ELFs ==="
+    echo "=== Building EGL and Vulkan smoke ELFs ==="
     ninja -C build test_egl_smoke_elf test_vulkan_smoke_elf
 fi
 

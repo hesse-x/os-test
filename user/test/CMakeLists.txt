@@ -24,9 +24,8 @@ if(TEST)
     os_image_path(clang_smoke_link_input clang_smoke.o clang_smoke.o PARTITION 2)
 endif()
 
-# EGL/GLES2 end-to-end smoke. Mesa is built and staged by build.sh after the
-# main CMake ninja, so this target deliberately stays out of ALL and is built
-# on demand once build/libEGL.so and build/libGLESv2.so exist.
+# EGL loader/platform smoke. GLESv2 is intentionally disabled, so this checks
+# display initialization and teardown without creating a client API context.
 if(TEST)
     set(EGL_SMOKE_ELF ${CMAKE_BINARY_DIR}/test_egl_smoke.elf)
     set(EGL_SMOKE_OBJ ${CMAKE_BINARY_DIR}/test_egl_smoke.elf.0.o)
@@ -46,11 +45,11 @@ if(TEST)
                 -Wl,--hash-style=gnu -Wl,--no-as-needed -Wl,--allow-shlib-undefined
                 -nostdlib -nodefaultlibs -o ${EGL_SMOKE_ELF}
                 ${MUSL_LIB_DIR}/Scrt1.o ${MUSL_LIB_DIR}/crti.o ${EGL_SMOKE_OBJ}
-                ${CMAKE_BINARY_DIR}/libEGL.so ${CMAKE_BINARY_DIR}/libGLESv2.so
-                ${CMAKE_BINARY_DIR}/libc.so ${MUSL_LIB_DIR}/crtn.o
+                ${CMAKE_BINARY_DIR}/libEGL.so ${CMAKE_BINARY_DIR}/libc.so
+                ${MUSL_LIB_DIR}/crtn.o
         DEPENDS ${EGL_SMOKE_OBJ} ${MUSL_LIB_DIR}/Scrt1.o ${MUSL_LIB_DIR}/crti.o
                 ${MUSL_LIB_DIR}/crtn.o ${CMAKE_BINARY_DIR}/libEGL.so
-                ${CMAKE_BINARY_DIR}/libGLESv2.so ${CMAKE_BINARY_DIR}/libc.so
+                ${CMAKE_BINARY_DIR}/libc.so
         COMMENT "Linking test_egl_smoke.elf")
     add_custom_target(test_egl_smoke_elf DEPENDS ${EGL_SMOKE_ELF})
     add_dependencies(test_egl_smoke_elf musl_libc c_so)
