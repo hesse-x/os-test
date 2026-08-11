@@ -14,6 +14,7 @@ struct os_effect_value {
   int32_t y;
   int32_t width;
   int32_t height;
+  uint32_t tint_rgba8;
 };
 
 struct os_effect_state {

@@ -37,13 +37,17 @@ set(XDG_SHELL_XML
     ${WAYLAND_PROTOCOLS_DIR}/stable/xdg-shell/xdg-shell.xml)
 set(XDG_DECORATION_XML
     ${WAYLAND_PROTOCOLS_DIR}/unstable/xdg-decoration/xdg-decoration-unstable-v1.xml)
+set(OS_EFFECT_XML ${CMAKE_CURRENT_SOURCE_DIR}/protocols/os-effect-v1.xml)
 set(LAYER_SHELL_OUTPUTS
     ${CMAKE_BINARY_DIR}/wlr-layer-shell-client-protocol.h
     ${CMAKE_BINARY_DIR}/wlr-layer-shell-protocol.c
     ${CMAKE_BINARY_DIR}/xdg-shell-client-protocol.h
     ${CMAKE_BINARY_DIR}/xdg-shell-protocol.c
     ${CMAKE_BINARY_DIR}/xdg-decoration-client-protocol.h
-    ${CMAKE_BINARY_DIR}/xdg-decoration-protocol.c)
+    ${CMAKE_BINARY_DIR}/xdg-decoration-protocol.c
+    ${CMAKE_BINARY_DIR}/os-effect-v1-client-protocol.h
+    ${CMAKE_BINARY_DIR}/os-effect-v1-server-protocol.h
+    ${CMAKE_BINARY_DIR}/os-effect-v1-protocol.c)
 add_custom_command(
     OUTPUT ${LAYER_SHELL_OUTPUTS}
     COMMAND ${CMAKE_BINARY_DIR}/wayland-scanner client-header
@@ -64,8 +68,14 @@ add_custom_command(
     COMMAND ${CMAKE_BINARY_DIR}/wayland-scanner private-code
                 ${XDG_DECORATION_XML}
                 ${CMAKE_BINARY_DIR}/xdg-decoration-protocol.c
+    COMMAND ${CMAKE_BINARY_DIR}/wayland-scanner client-header ${OS_EFFECT_XML}
+                ${CMAKE_BINARY_DIR}/os-effect-v1-client-protocol.h
+    COMMAND ${CMAKE_BINARY_DIR}/wayland-scanner server-header ${OS_EFFECT_XML}
+                ${CMAKE_BINARY_DIR}/os-effect-v1-server-protocol.h
+    COMMAND ${CMAKE_BINARY_DIR}/wayland-scanner private-code ${OS_EFFECT_XML}
+                ${CMAKE_BINARY_DIR}/os-effect-v1-protocol.c
     DEPENDS wayland_scanner_host ${LAYER_SHELL_XML} ${XDG_SHELL_XML}
-            ${XDG_DECORATION_XML}
+            ${XDG_DECORATION_XML} ${OS_EFFECT_XML}
     COMMENT "Generating desktop client protocol sources"
     VERBATIM)
 
@@ -77,6 +87,7 @@ add_user_dyn_elf(desktop_shell C
         dock/dock.c dock/dock_layout.c
         ${CMAKE_BINARY_DIR}/wlr-layer-shell-protocol.c
         ${CMAKE_BINARY_DIR}/xdg-shell-protocol.c
+        ${CMAKE_BINARY_DIR}/os-effect-v1-protocol.c
     LINK_LIBS png z wayland-client c
     INCLUDE_DIRS
         ${CMAKE_CURRENT_SOURCE_DIR}
@@ -86,6 +97,7 @@ add_user_dyn_elf(desktop_shell C
     GEN_HEADERS
         ${CMAKE_BINARY_DIR}/wlr-layer-shell-client-protocol.h
         ${CMAKE_BINARY_DIR}/xdg-shell-client-protocol.h
+        ${CMAKE_BINARY_DIR}/os-effect-v1-client-protocol.h
     IMAGE_PATH usr/bin/desktop-shell)
 
 # FreeType is kept deliberately small: the terminal only loads a bundled
@@ -211,7 +223,8 @@ set(OS_VK_SHADER_ROOT ${CMAKE_BINARY_DIR}/compositor-vulkan-generated)
 set(OS_VK_SHADER_DIR ${OS_VK_SHADER_ROOT}/render/vulkan/shaders)
 file(MAKE_DIRECTORY ${OS_VK_SHADER_DIR})
 set(OS_VK_SHADER_HEADERS)
-foreach(_shader common.vert texture.frag quad.frag output.frag)
+foreach(_shader common.vert mesh.vert texture.frag quad.frag output.frag sdf.frag
+                blur.comp blur_composite.frag)
     string(REPLACE "." "_" _symbol ${_shader})
     set(_header ${OS_VK_SHADER_DIR}/${_shader}.h)
     add_custom_command(
@@ -241,7 +254,11 @@ add_user_dyn_elf(tinywl C
         ${OS_VK_UPSTREAM_DIR}/support/rect_union.c
         ${OS_VK_UPSTREAM_DIR}/support/time.c
         window/window_state.c window/style/theme.c
-        window/animation/legacy_genie.c
+        protocols/effect_state.c protocols/trusted_client.c
+        protocols/effect_manager.c protocols/effect_server.c
+        ${CMAKE_BINARY_DIR}/os-effect-v1-protocol.c
+        renderer/mesh/mesh.c window/animation/genie_mesh.c
+        window/animation/genie_runtime.c
     LINK_LIBS wlroots-0.20 vulkan wayland-server input xkbcommon pixman-1 drm png z m c
     EXCLUDE_FROM_ALL
     DEFS WLR_USE_UNSTABLE WLR_PRIVATE=
@@ -260,6 +277,7 @@ add_user_dyn_elf(tinywl C
         ${CMAKE_SOURCE_DIR}/third_party/libpng
         ${CMAKE_BINARY_DIR}
     GEN_HEADERS ${OS_VK_SHADER_HEADERS}
+        ${CMAKE_BINARY_DIR}/os-effect-v1-server-protocol.h
     IMAGE_PATH usr/bin/tinywl)
 
 if(TEST)
@@ -267,9 +285,11 @@ if(TEST)
         SOURCES tests/test_contracts.c
             window/window_state.c window/style/theme.c core/lifetime.c
             dock/dock_layout.c protocols/effect_state.c
+            protocols/effect_manager.c
             protocols/trusted_client.c
             frame/frame_plan.c frame/scene_adapter.c
-            renderer/mesh/mesh.c sdk/osgui.c
+            renderer/mesh/mesh.c renderer/effects/visual.c
+            renderer/effects/blur.c window/animation/genie_mesh.c sdk/osgui.c
         LINK_LIBS m c
         FLAGS -UNDEBUG
         IMAGE_PATH test/test_compositor_contracts.elf)

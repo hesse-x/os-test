@@ -8,9 +8,8 @@
 
 struct wl_client;
 
-/* Phase 1 stores only the wl_client created for the inherited WAYLAND_SOCKET.
- * The effect global remains unpublished until the protocol implementation is
- * enabled in phase 3. */
+/* Only the wl_client created from the inherited WAYLAND_SOCKET may bind the
+ * private effect global. Pointer identity is stable for the client lifetime. */
 struct os_trusted_client {
   const struct wl_client *wayland_socket_client;
 };

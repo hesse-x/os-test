@@ -27,10 +27,15 @@
 #include "render/dmabuf.h"
 #include "render/pixel_format.h"
 #include "render/vulkan.h"
+#include "render/vulkan/shaders/blur.comp.h"
+#include "render/vulkan/shaders/blur_composite.frag.h"
 #include "render/vulkan/shaders/common.vert.h"
+#include "render/vulkan/shaders/mesh.vert.h"
 #include "render/vulkan/shaders/output.frag.h"
 #include "render/vulkan/shaders/quad.frag.h"
+#include "render/vulkan/shaders/sdf.frag.h"
 #include "render/vulkan/shaders/texture.frag.h"
+#include "renderer/mesh/mesh.h"
 #include "types/wlr_buffer.h"
 #include "util/time.h"
 
@@ -302,7 +307,8 @@ struct wlr_vk_buffer_span vulkan_get_stage_span(struct wlr_vk_renderer *r,
       .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
       .size = bsize,
       .usage =
-          VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+          VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+          VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
       .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
   };
   res = vkCreateBuffer(r->dev->dev, &buf_info, NULL, &buf->buffer);
@@ -653,6 +659,13 @@ static void destroy_render_buffer(struct wlr_vk_render_buffer *buffer) {
                    buffer->two_pass.blend_descriptor_set);
   }
 
+  vkDestroyDescriptorPool(dev, buffer->os_blur.descriptor_pool, NULL);
+  for (size_t i = 0; i < 2; ++i) {
+    vkDestroyImageView(dev, buffer->os_blur.views[i], NULL);
+    vkDestroyImage(dev, buffer->os_blur.images[i], NULL);
+    vkFreeMemory(dev, buffer->os_blur.memories[i], NULL);
+  }
+
   vkDestroyImage(dev, buffer->image, NULL);
   for (size_t i = 0u; i < buffer->mem_count; ++i) {
     vkFreeMemory(dev, buffer->memories[i], NULL);
@@ -728,7 +741,8 @@ bool vulkan_setup_two_pass_framebuffer(
       .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
       .extent = (VkExtent3D){dmabuf->width, dmabuf->height, 1},
       .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
-               VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT,
+               VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT |
+               VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT,
   };
 
   res = vkCreateImage(dev, &img_info, NULL, &buffer->two_pass.blend_image);
@@ -1219,9 +1233,19 @@ static void vulkan_destroy(struct wlr_renderer *wlr_renderer) {
   }
 
   vkDestroyShaderModule(dev->dev, renderer->vert_module, NULL);
+  vkDestroyShaderModule(dev->dev, renderer->os_mesh_vert_module, NULL);
   vkDestroyShaderModule(dev->dev, renderer->tex_frag_module, NULL);
   vkDestroyShaderModule(dev->dev, renderer->quad_frag_module, NULL);
+  vkDestroyShaderModule(dev->dev, renderer->os_sdf_frag_module, NULL);
+  vkDestroyShaderModule(dev->dev, renderer->os_blur_comp_module, NULL);
+  vkDestroyShaderModule(dev->dev, renderer->os_blur_composite_frag_module,
+                        NULL);
   vkDestroyShaderModule(dev->dev, renderer->output_module, NULL);
+  vkDestroyPipeline(dev->dev, renderer->os_blur_compute_pipeline, NULL);
+  vkDestroyPipelineLayout(dev->dev, renderer->os_blur_compute_pipe_layout,
+                          NULL);
+  vkDestroyDescriptorSetLayout(dev->dev, renderer->os_blur_compute_ds_layout,
+                               NULL);
 
   struct wlr_vk_pipeline_layout *pipeline_layout, *pipeline_layout_tmp;
   wl_list_for_each_safe(pipeline_layout, pipeline_layout_tmp,
@@ -1794,6 +1818,8 @@ setup_get_or_create_pipeline(struct wlr_vk_render_format_setup *setup,
       .module = renderer->vert_module,
       .pName = "main",
   };
+  if (key->source == WLR_VK_SHADER_SOURCE_OS_MESH_TEXTURE)
+    stages[0].module = renderer->os_mesh_vert_module;
 
   switch (key->source) {
   case WLR_VK_SHADER_SOURCE_SINGLE_COLOR:
@@ -1813,11 +1839,38 @@ setup_get_or_create_pipeline(struct wlr_vk_render_format_setup *setup,
         .pSpecializationInfo = &specialization,
     };
     break;
+  case WLR_VK_SHADER_SOURCE_OS_SDF:
+    stages[1] = (VkPipelineShaderStageCreateInfo){
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+        .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+        .module = renderer->os_sdf_frag_module,
+        .pName = "main",
+    };
+    break;
+  case WLR_VK_SHADER_SOURCE_OS_MESH_TEXTURE:
+    stages[1] = (VkPipelineShaderStageCreateInfo){
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+        .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+        .module = renderer->tex_frag_module,
+        .pName = "main",
+        .pSpecializationInfo = &specialization,
+    };
+    break;
+  case WLR_VK_SHADER_SOURCE_OS_BLUR_COMPOSITE:
+    stages[1] = (VkPipelineShaderStageCreateInfo){
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+        .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+        .module = renderer->os_blur_composite_frag_module,
+        .pName = "main",
+    };
+    break;
   }
 
   VkPipelineInputAssemblyStateCreateInfo assembly = {
       .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
-      .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN,
+      .topology = key->source == WLR_VK_SHADER_SOURCE_OS_MESH_TEXTURE
+                      ? VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST
+                      : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN,
   };
 
   VkPipelineRasterizationStateCreateInfo rasterization = {
@@ -1871,6 +1924,28 @@ setup_get_or_create_pipeline(struct wlr_vk_render_format_setup *setup,
   VkPipelineVertexInputStateCreateInfo vertex = {
       .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
   };
+  VkVertexInputBindingDescription mesh_binding = {
+      .binding = 0,
+      .stride = sizeof(struct os_mesh_vertex),
+      .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
+  };
+  VkVertexInputAttributeDescription mesh_attributes[] = {
+      {.location = 0,
+       .binding = 0,
+       .format = VK_FORMAT_R32G32_SFLOAT,
+       .offset = offsetof(struct os_mesh_vertex, position)},
+      {.location = 1,
+       .binding = 0,
+       .format = VK_FORMAT_R32G32_SFLOAT,
+       .offset = offsetof(struct os_mesh_vertex, uv)},
+  };
+  if (key->source == WLR_VK_SHADER_SOURCE_OS_MESH_TEXTURE) {
+    vertex.vertexBindingDescriptionCount = 1;
+    vertex.pVertexBindingDescriptions = &mesh_binding;
+    vertex.vertexAttributeDescriptionCount =
+        sizeof(mesh_attributes) / sizeof(mesh_attributes[0]);
+    vertex.pVertexAttributeDescriptions = mesh_attributes;
+  }
 
   VkGraphicsPipelineCreateInfo pinfo = {
       .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
@@ -2235,6 +2310,61 @@ static bool init_dummy_images(struct wlr_vk_renderer *renderer) {
   return true;
 }
 
+static bool init_os_blur_compute_pipeline(struct wlr_vk_renderer *renderer) {
+  VkDevice dev = renderer->dev->dev;
+  VkDescriptorSetLayoutBinding bindings[] = {
+      {.binding = 0,
+       .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+       .descriptorCount = 1,
+       .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT},
+      {.binding = 1,
+       .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+       .descriptorCount = 1,
+       .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT},
+  };
+  VkDescriptorSetLayoutCreateInfo ds_info = {
+      .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+      .bindingCount = 2,
+      .pBindings = bindings};
+  VkResult res = vkCreateDescriptorSetLayout(
+      dev, &ds_info, NULL, &renderer->os_blur_compute_ds_layout);
+  if (res != VK_SUCCESS)
+    return false;
+
+  VkPushConstantRange push = {.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+                              .size = 16};
+  VkPipelineLayoutCreateInfo layout_info = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+      .setLayoutCount = 1,
+      .pSetLayouts = &renderer->os_blur_compute_ds_layout,
+      .pushConstantRangeCount = 1,
+      .pPushConstantRanges = &push,
+  };
+  res = vkCreatePipelineLayout(dev, &layout_info, NULL,
+                               &renderer->os_blur_compute_pipe_layout);
+  if (res != VK_SUCCESS)
+    return false;
+
+  VkComputePipelineCreateInfo pipeline_info = {
+      .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+      .layout = renderer->os_blur_compute_pipe_layout,
+      .stage =
+          {
+              .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+              .stage = VK_SHADER_STAGE_COMPUTE_BIT,
+              .module = renderer->os_blur_comp_module,
+              .pName = "main",
+          },
+  };
+  res = vkCreateComputePipelines(dev, VK_NULL_HANDLE, 1, &pipeline_info, NULL,
+                                 &renderer->os_blur_compute_pipeline);
+  if (res != VK_SUCCESS) {
+    wlr_vk_error("Failed to create backdrop blur compute pipeline", res);
+    return false;
+  }
+  return true;
+}
+
 // Creates static render data, such as sampler, layouts and shader modules
 // for the given renderer.
 // Cleanup is done by destroying the renderer.
@@ -2265,6 +2395,17 @@ static bool init_static_render_data(struct wlr_vk_renderer *renderer) {
 
   sinfo = (VkShaderModuleCreateInfo){
       .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+      .codeSize = sizeof(mesh_vert_data),
+      .pCode = mesh_vert_data,
+  };
+  res = vkCreateShaderModule(dev, &sinfo, NULL, &renderer->os_mesh_vert_module);
+  if (res != VK_SUCCESS) {
+    wlr_vk_error("Failed to create mesh vertex shader module", res);
+    return false;
+  }
+
+  sinfo = (VkShaderModuleCreateInfo){
+      .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
       .codeSize = sizeof(texture_frag_data),
       .pCode = texture_frag_data,
   };
@@ -2284,6 +2425,42 @@ static bool init_static_render_data(struct wlr_vk_renderer *renderer) {
     wlr_vk_error("Failed to create quad fragment shader module", res);
     return false;
   }
+
+  sinfo = (VkShaderModuleCreateInfo){
+      .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+      .codeSize = sizeof(sdf_frag_data),
+      .pCode = sdf_frag_data,
+  };
+  res = vkCreateShaderModule(dev, &sinfo, NULL, &renderer->os_sdf_frag_module);
+  if (res != VK_SUCCESS) {
+    wlr_vk_error("Failed to create SDF fragment shader module", res);
+    return false;
+  }
+
+  sinfo = (VkShaderModuleCreateInfo){
+      .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+      .codeSize = sizeof(blur_comp_data),
+      .pCode = blur_comp_data,
+  };
+  res = vkCreateShaderModule(dev, &sinfo, NULL, &renderer->os_blur_comp_module);
+  if (res != VK_SUCCESS) {
+    wlr_vk_error("Failed to create blur compute shader module", res);
+    return false;
+  }
+
+  sinfo = (VkShaderModuleCreateInfo){
+      .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+      .codeSize = sizeof(blur_composite_frag_data),
+      .pCode = blur_composite_frag_data,
+  };
+  res = vkCreateShaderModule(dev, &sinfo, NULL,
+                             &renderer->os_blur_composite_frag_module);
+  if (res != VK_SUCCESS) {
+    wlr_vk_error("Failed to create blur composite shader module", res);
+    return false;
+  }
+  if (!init_os_blur_compute_pipeline(renderer))
+    return false;
 
   sinfo = (VkShaderModuleCreateInfo){
       .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,

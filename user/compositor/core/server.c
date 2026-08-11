@@ -6,12 +6,14 @@
 #include <assert.h>
 #include <drm_fourcc.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <getopt.h>
 #include <linux/input-event-codes.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <time.h>
 #include <unistd.h>
 #include <wayland-server-core.h>
@@ -44,9 +46,12 @@
 #include "core/lifetime.h"
 #include "core/server.h"
 #include "cursor.h"
+#include "protocols/effect_server.h"
+#include "protocols/effect_state.h"
 #include "renderer/vulkan/os_vk_renderer.h"
 #include "renderer/vulkan/prime_probe.h"
-#include "window/animation/legacy_genie.h"
+#include "window/animation/genie_mesh.h"
+#include "window/animation/genie_runtime.h"
 #include "window/window_state.h"
 
 #define SSD_TITLE_HEIGHT 32
@@ -60,7 +65,7 @@
 #define SSD_BUTTON_HIT_MINIMIZE_END 53
 #define SSD_BUTTON_HIT_RIGHT 80
 #define TINYWL_POINTER_ACCEL_DEFAULT 0.15
-#define GENIE_DURATION_MS 250
+#define GENIE_DURATION_MS 300
 
 /* wlroots keeps this allocator constructor private, but exports the symbol. */
 struct wlr_allocator *wlr_udmabuf_allocator_create(void);
@@ -116,8 +121,10 @@ struct tinywl_server {
 
   struct wlr_output_layout *output_layout;
   struct wl_list outputs;
+  struct wl_list layer_surfaces;
   struct wl_listener new_output;
   struct os_lifetime_counters lifetime;
+  struct os_effect_server *effect_server;
 };
 
 struct tinywl_output {
@@ -161,12 +168,158 @@ struct tinywl_toplevel {
 };
 
 struct tinywl_layer_surface {
+  struct wl_list link;
   struct tinywl_server *server;
   struct wlr_layer_surface_v1 *layer_surface;
   struct wlr_scene_layer_surface_v1 *scene_layer;
   struct wl_listener commit;
   struct wl_listener destroy;
+  uint64_t target_generation;
 };
+
+static bool is_output_dock(const struct tinywl_layer_surface *surface,
+                           const struct wlr_output *output) {
+  const struct wlr_layer_surface_v1 *layer = surface->layer_surface;
+  return layer->output == output && layer->namespace != NULL &&
+         strcmp(layer->namespace, "desktop-dock") == 0;
+}
+
+static void set_output_dock_enabled(struct tinywl_output *output,
+                                    bool enabled) {
+  struct tinywl_layer_surface *surface;
+  wl_list_for_each(surface, &output->server->layer_surfaces, link) {
+    if (is_output_dock(surface, output->wlr_output))
+      wlr_scene_node_set_enabled(&surface->scene_layer->tree->node, enabled);
+  }
+}
+
+static bool add_dock_rect(struct wlr_render_pass *pass, float x, float y,
+                          float width, float height, float radius,
+                          const float color[4]) {
+  struct os_vk_rounded_rect rect = {
+      .x = x,
+      .y = y,
+      .width = width,
+      .height = height,
+      .radius = radius,
+  };
+  memcpy(rect.fill, color, sizeof(rect.fill));
+  return os_vk_pass_add_rounded_rect(pass, &rect);
+}
+
+static bool render_terminal_dock_icon(struct wlr_render_pass *pass, float x,
+                                      float y, float width, float height,
+                                      float scale) {
+  const float shell[] = {0.69f, 0.72f, 0.76f, 1.0f};
+  const float screen[] = {0.009f, 0.010f, 0.014f, 1.0f};
+  const float glyph[] = {0.91f, 0.93f, 0.95f, 1.0f};
+  const float indicator[] = {0.023f, 0.025f, 0.030f, 1.0f};
+  float icon = width * 8.0f / 13.0f;
+  float padding = (width - icon) * 0.5f;
+  float top = height / 10.0f;
+  float icon_x = x + padding;
+  float icon_y = y + top + padding;
+  float inset = fmaxf(icon / 16.0f, 2.0f * scale);
+  float mark = fmaxf(icon / 24.0f, scale);
+  if (!add_dock_rect(pass, icon_x, icon_y, icon, icon, icon / 4.0f, shell) ||
+      !add_dock_rect(pass, icon_x + inset, icon_y + inset, icon - 2.0f * inset,
+                     icon - 2.0f * inset, icon / 5.0f, screen))
+    return false;
+
+  float glyph_x = icon_x + icon / 4.0f;
+  float glyph_y = icon_y + icon / 3.0f;
+  int steps = (int)(icon / 6.0f);
+  for (int i = 0; i < steps; ++i) {
+    if (!add_dock_rect(pass, glyph_x + i * mark, glyph_y + i * mark * 0.5f,
+                       mark, mark, mark * 0.25f, glyph) ||
+        !add_dock_rect(pass, glyph_x + i * mark,
+                       glyph_y + icon / 5.0f - i * mark * 0.5f, mark, mark,
+                       mark * 0.25f, glyph))
+      return false;
+  }
+  if (!add_dock_rect(pass, icon_x + icon * 0.5f, icon_y + icon * 0.6f,
+                     icon * 0.25f, mark, mark * 0.5f, glyph))
+    return false;
+  float indicator_h = fmaxf(height / 24.0f, 2.0f * scale);
+  float indicator_w = height / 9.0f;
+  return add_dock_rect(pass, x + (width - indicator_w) * 0.5f,
+                       y + height - indicator_h - 2.0f * scale, indicator_w,
+                       indicator_h, indicator_h * 0.5f, indicator);
+}
+
+static bool render_system_overlays(struct wlr_render_pass *pass, void *data) {
+  struct tinywl_output *output = data;
+  struct tinywl_toplevel *toplevel;
+  wl_list_for_each(toplevel, &output->server->toplevels, link) {
+    if (tinywl_genie_uses_output(toplevel->animation, output->wlr_output) &&
+        !tinywl_genie_render(toplevel->animation, pass))
+      return false;
+  }
+  struct tinywl_layer_surface *surface;
+  wl_list_for_each(surface, &output->server->layer_surfaces, link) {
+    struct wlr_layer_surface_v1 *layer = surface->layer_surface;
+    if (!is_output_dock(surface, output->wlr_output) ||
+        layer->current.actual_width == 0 || layer->current.actual_height == 0)
+      continue;
+    // The scene pass excludes the dock so backdrop blur never samples the
+    // dock's own icon. Re-enable it now for foreground rendering and input.
+    wlr_scene_node_set_enabled(&surface->scene_layer->tree->node, true);
+    int x, y;
+    if (!wlr_scene_node_coords(&surface->scene_layer->tree->node, &x, &y))
+      continue;
+    struct wlr_box output_box;
+    wlr_output_layout_get_box(output->server->output_layout, output->wlr_output,
+                              &output_box);
+    float scale = output->wlr_output->scale;
+    struct os_vk_rounded_rect rect = {
+        .x = (x - output_box.x) * scale,
+        .y = (y - output_box.y) * scale,
+        .width = layer->current.actual_width * scale,
+        .height = layer->current.actual_height * scale,
+        .radius = 18.0f * scale,
+        .border_width = 1.0f * scale,
+        .fill = {0.0f, 0.0f, 0.0f, 0.0f},
+        .border = {0.82f, 0.84f, 0.87f, 0.14f},
+    };
+    struct os_effect_value effect;
+    if (os_effect_server_current(output->server->effect_server, layer->surface,
+                                 &effect)) {
+      if (effect.width > 0 && effect.height > 0) {
+        rect.x += effect.x * scale;
+        rect.y += effect.y * scale;
+        rect.width = effect.width * scale;
+        rect.height = effect.height * scale;
+      }
+      uint32_t tint = effect.tint_rgba8;
+      struct os_vk_backdrop_blur blur = {
+          .x = rect.x,
+          .y = rect.y,
+          .width = rect.width,
+          .height = rect.height,
+          .radius = effect.radius,
+          .downsample = 4,
+          .corner_radius = rect.radius,
+          .tint = {((tint >> 24) & 0xff) / 255.0f,
+                   ((tint >> 16) & 0xff) / 255.0f,
+                   ((tint >> 8) & 0xff) / 255.0f, (tint & 0xff) / 255.0f},
+          .opacity = 0.62f,
+      };
+      if (effect.enabled) {
+        if (!os_vk_pass_add_backdrop_blur(pass, &blur, NULL))
+          return false;
+      }
+    }
+    if (!os_vk_pass_add_rounded_rect(pass, &rect))
+      return false;
+    float dock_x = (x - output_box.x) * scale;
+    float dock_y = (y - output_box.y) * scale;
+    if (!render_terminal_dock_icon(pass, dock_x, dock_y,
+                                   layer->current.actual_width * scale,
+                                   layer->current.actual_height * scale, scale))
+      return false;
+  }
+  return true;
+}
 
 struct tinywl_popup {
   struct tinywl_server *server;
@@ -438,6 +591,36 @@ static void focus_next_visible_toplevel(struct tinywl_server *server) {
   }
 }
 
+static bool dock_target_for_output(struct tinywl_server *server,
+                                   struct wlr_output *output,
+                                   struct os_genie_target *target) {
+  struct tinywl_layer_surface *surface;
+  wl_list_for_each(surface, &server->layer_surfaces, link) {
+    struct wlr_layer_surface_v1 *layer = surface->layer_surface;
+    if (layer->output != output || layer->namespace == NULL ||
+        strcmp(layer->namespace, "desktop-dock") != 0)
+      continue;
+    struct wlr_box output_box;
+    wlr_output_layout_get_box(server->output_layout, output, &output_box);
+    int x, y;
+    if (!wlr_scene_node_coords(&surface->scene_layer->tree->node, &x, &y))
+      return false;
+    float scale = output->scale > 0 ? output->scale : 1;
+    float icon = 48.0f * scale;
+    *target = (struct os_genie_target){
+        .id = (uint64_t)(uintptr_t)surface,
+        .generation = surface->target_generation,
+        .x = (x - output_box.x + layer->current.actual_width * 0.5f) * scale -
+             icon * 0.5f,
+        .y = (y - output_box.y + layer->current.actual_height) * scale - 4,
+        .width = icon,
+        .height = 4,
+    };
+    return true;
+  }
+  return false;
+}
+
 static void genie_finished(void *data, bool minimizing) {
   struct tinywl_toplevel *toplevel = data;
   toplevel->animation = NULL;
@@ -482,6 +665,10 @@ static bool start_genie_animation(struct tinywl_toplevel *toplevel,
   struct wlr_box output_box;
   wlr_output_layout_get_box(toplevel->server->output_layout, output,
                             &output_box);
+  float output_scale = output->scale > 0 ? output->scale : 1.0f;
+  struct os_genie_target dock_target;
+  bool has_dock_target =
+      dock_target_for_output(toplevel->server, output, &dock_target);
   struct wlr_scene_rect *ssd_rects[] = {
       toplevel->titlebar,
       toplevel->border_left,
@@ -490,13 +677,15 @@ static bool start_genie_animation(struct tinywl_toplevel *toplevel,
   };
   struct tinywl_genie_options options = {
       .event_loop = wl_display_get_event_loop(toplevel->server->wl_display),
-      .animation_parent = toplevel->server->layer_toplevel,
+      .renderer = toplevel->server->renderer,
+      .output = output,
       .source = &toplevel->scene_tree->node,
+      /* scene_tree traversal already reports layout-global coordinates. */
       .source_x = 0,
       .source_y = 0,
       .rects = ssd_rects,
       .rect_count = sizeof(ssd_rects) / sizeof(ssd_rects[0]),
-      .window =
+      .snapshot_window =
           {
               .x = tx - SSD_BORDER_WIDTH,
               .y = ty - SSD_TITLE_HEIGHT,
@@ -504,10 +693,28 @@ static bool start_genie_animation(struct tinywl_toplevel *toplevel,
               .height = toplevel->content_height + SSD_TITLE_HEIGHT +
                         SSD_BORDER_WIDTH,
           },
-      .target_x = output_box.x + output_box.width * 0.5,
-      .target_y = output_box.y + output_box.height - 32,
-      .target_width = 48,
-      .target_height = 4,
+      .window =
+          {
+              .x = (int)lroundf((tx - output_box.x - SSD_BORDER_WIDTH) *
+                                output_scale),
+              .y = (int)lroundf((ty - output_box.y - SSD_TITLE_HEIGHT) *
+                                output_scale),
+              .width = (int)lroundf(
+                  (toplevel->content_width + 2 * SSD_BORDER_WIDTH) *
+                  output_scale),
+              .height = (int)lroundf((toplevel->content_height +
+                                      SSD_TITLE_HEIGHT + SSD_BORDER_WIDTH) *
+                                     output_scale),
+          },
+      .target_x = has_dock_target ? dock_target.x + dock_target.width * 0.5
+                                  : output_box.width * output_scale * 0.5,
+      .target_y = has_dock_target ? dock_target.y + dock_target.height * 0.5
+                                  : (output_box.height - 32) * output_scale,
+      .target_width = has_dock_target ? dock_target.width : 48 * output_scale,
+      .target_height = has_dock_target ? dock_target.height : 4 * output_scale,
+      .target_id =
+          has_dock_target ? dock_target.id : (uint64_t)(uintptr_t)output,
+      .target_generation = has_dock_target ? dock_target.generation : 1,
       .minimizing = minimizing,
       .duration_ms = GENIE_DURATION_MS,
       .finished = genie_finished,
@@ -1122,7 +1329,10 @@ static void output_frame(struct wl_listener *listener, void *data) {
       wlr_scene_get_scene_output(scene, output->wlr_output);
 
   /* Render the scene if needed and commit the output */
-  os_core_commit_scene_frame(scene_output);
+  set_output_dock_enabled(output, false);
+  os_core_commit_scene_frame(scene_output, output->server->renderer,
+                             render_system_overlays, output);
+  set_output_dock_enabled(output, true);
 
   struct timespec now;
   clock_gettime(CLOCK_MONOTONIC, &now);
@@ -1170,6 +1380,21 @@ static void configure_layer_surface(struct tinywl_layer_surface *surface) {
   wlr_scene_layer_surface_v1_configure(surface->scene_layer, &full, &usable);
 }
 
+static void cancel_animations_for_target(struct tinywl_layer_surface *surface) {
+  uint64_t id = (uint64_t)(uintptr_t)surface;
+  struct tinywl_toplevel *toplevel;
+  wl_list_for_each(toplevel, &surface->server->toplevels, link) {
+    if (!tinywl_genie_targets(toplevel->animation, id,
+                              surface->target_generation))
+      continue;
+    tinywl_genie_cancel(toplevel->animation);
+    toplevel->animation = NULL;
+    os_window_cancel_animation(&toplevel->state);
+    wlr_scene_node_set_enabled(&toplevel->scene_tree->node,
+                               os_window_is_visible(&toplevel->state));
+  }
+}
+
 static void layer_surface_commit(struct wl_listener *listener, void *data) {
   struct tinywl_layer_surface *surface =
       wl_container_of(listener, surface, commit);
@@ -1181,8 +1406,10 @@ static void layer_surface_destroy(struct wl_listener *listener, void *data) {
   struct tinywl_layer_surface *surface =
       wl_container_of(listener, surface, destroy);
   (void)data;
+  cancel_animations_for_target(surface);
   wl_list_remove(&surface->commit.link);
   wl_list_remove(&surface->destroy.link);
+  wl_list_remove(&surface->link);
   os_lifetime_release(&surface->server->lifetime, OS_LIVE_LAYER_SURFACE);
   free(surface);
 }
@@ -1203,10 +1430,12 @@ static void server_new_layer_surface(struct wl_listener *listener, void *data) {
     return;
   }
   surface->server = server;
+  surface->target_generation = 1;
   surface->layer_surface = layer_surface;
   surface->scene_layer = wlr_scene_layer_surface_v1_create(
       layer_tree_for(server, layer_surface->current.layer), layer_surface);
   layer_surface->data = surface;
+  wl_list_insert(&server->layer_surfaces, &surface->link);
 
   surface->commit.notify = layer_surface_commit;
   wl_signal_add(&layer_surface->surface->events.commit, &surface->commit);
@@ -1218,6 +1447,17 @@ static void server_new_layer_surface(struct wl_listener *listener, void *data) {
 static void output_destroy(struct wl_listener *listener, void *data) {
   struct tinywl_output *output = wl_container_of(listener, output, destroy);
   (void)data;
+
+  struct tinywl_toplevel *toplevel;
+  wl_list_for_each(toplevel, &output->server->toplevels, link) {
+    if (!tinywl_genie_uses_output(toplevel->animation, output->wlr_output))
+      continue;
+    tinywl_genie_cancel(toplevel->animation);
+    toplevel->animation = NULL;
+    os_window_cancel_animation(&toplevel->state);
+    wlr_scene_node_set_enabled(&toplevel->scene_tree->node,
+                               os_window_is_visible(&toplevel->state));
+  }
 
   wl_list_remove(&output->frame.link);
   wl_list_remove(&output->request_state.link);
@@ -1657,7 +1897,7 @@ static void server_new_xdg_popup(struct wl_listener *listener, void *data) {
 }
 
 int os_compositor_run(int argc, char *argv[]) {
-  wlr_log_init(WLR_DEBUG, NULL);
+  wlr_log_init(WLR_INFO, NULL);
   char *startup_cmd = NULL;
 
   int c;
@@ -1754,6 +1994,7 @@ int os_compositor_run(int argc, char *argv[]) {
   /* Configure a listener to be notified when new outputs are available on the
    * backend. */
   wl_list_init(&server.outputs);
+  wl_list_init(&server.layer_surfaces);
   server.new_output.notify = server_new_output;
   wl_signal_add(&server.backend->events.new_output, &server.new_output);
 
@@ -1763,6 +2004,9 @@ int os_compositor_run(int argc, char *argv[]) {
    * positions and then call wlr_scene_output_commit() to render a frame if
    * necessary.
    */
+  /* Clients only expose wl_shm buffers in phase 2, so direct scan-out probes
+   * cannot succeed until the client linux-dmabuf path is enabled. */
+  setenv("WLR_SCENE_DISABLE_DIRECT_SCANOUT", "1", true);
   server.scene = wlr_scene_create();
   server.scene_layout =
       wlr_scene_attach_output_layout(server.scene, server.output_layout);
@@ -1778,6 +2022,11 @@ int os_compositor_run(int argc, char *argv[]) {
   server.new_layer_surface.notify = server_new_layer_surface;
   wl_signal_add(&server.layer_shell->events.new_surface,
                 &server.new_layer_surface);
+  server.effect_server = os_effect_server_create(server.wl_display);
+  if (server.effect_server == NULL) {
+    wlr_log(WLR_ERROR, "failed to create trusted effect global");
+    return 1;
+  }
 
   server.decoration_manager =
       wlr_xdg_decoration_manager_v1_create(server.wl_display);
@@ -1889,9 +2138,37 @@ int os_compositor_run(int argc, char *argv[]) {
   (void)syscall(SYS_PERF, XOS_PERF_COUNTER_MARK, XOS_PERF_GUI_COMPOSITOR_READY,
                 0, 0, 0, 0);
   if (startup_cmd) {
-    if (fork() == 0) {
-      /* No /bin/sh on this system: exec the startup binary directly. */
-      execl(startup_cmd, startup_cmd, (void *)NULL);
+    int sockets[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sockets) == 0) {
+      struct wl_client *trusted =
+          wl_client_create(server.wl_display, sockets[0]);
+      if (trusted != NULL &&
+          os_effect_server_set_trusted_client(server.effect_server, trusted)) {
+        pid_t pid = fork();
+        if (pid == 0) {
+          int flags = fcntl(sockets[1], F_GETFD);
+          if (flags >= 0)
+            fcntl(sockets[1], F_SETFD, flags & ~FD_CLOEXEC);
+          char fd_string[16];
+          snprintf(fd_string, sizeof(fd_string), "%d", sockets[1]);
+          setenv("WAYLAND_SOCKET", fd_string, true);
+          close(sockets[0]);
+          execl(startup_cmd, startup_cmd, (void *)NULL);
+          _exit(127);
+        }
+        close(sockets[1]);
+        if (pid < 0)
+          wl_client_destroy(trusted);
+      } else {
+        close(sockets[1]);
+        if (trusted != NULL)
+          wl_client_destroy(trusted);
+        else
+          close(sockets[0]);
+      }
+    } else {
+      wlr_log(WLR_ERROR, "failed to create trusted WAYLAND_SOCKET: %s",
+              strerror(errno));
     }
   }
   /* Run the Wayland event loop. This does not return until you exit the
@@ -1908,6 +2185,7 @@ int os_compositor_run(int argc, char *argv[]) {
   /* Once wl_display_run returns, we destroy all clients then shut down the
    * server. */
   wl_display_destroy_clients(server.wl_display);
+  os_effect_server_destroy(server.effect_server);
   wlr_scene_node_destroy(&server.scene->tree.node);
   wlr_xcursor_manager_destroy(server.cursor_mgr);
   wlr_cursor_destroy(server.cursor);

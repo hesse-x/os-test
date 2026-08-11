@@ -17,6 +17,7 @@
 #include <unistd.h>
 #include <wayland-client.h>
 
+#include "os-effect-v1-client-protocol.h"
 #include "wlr-layer-shell-client-protocol.h"
 
 #include "dock/desktop_shell.h"
@@ -34,6 +35,7 @@ struct shell_output {
   struct wl_surface *background;
   struct zwlr_layer_surface_v1 *background_layer;
   struct os_dock dock;
+  struct os_surface_effect_v1 *effect;
   int background_width, background_height;
   int mode_width, mode_height;
   int scale;
@@ -44,6 +46,7 @@ struct app {
   struct wl_compositor *compositor;
   struct wl_shm *shm;
   struct zwlr_layer_shell_v1 *layer_shell;
+  struct os_effect_manager_v1 *effect_manager;
   struct wl_seat *seat;
   struct wl_pointer *pointer;
   struct wl_surface *pointer_surface;
@@ -163,13 +166,6 @@ static struct shm_buffer *create_buffer(int width, int height) {
   return buffer;
 }
 
-static uint32_t premul(uint32_t rgb, uint8_t alpha) {
-  uint32_t r = ((rgb >> 16) & 0xff) * alpha / 255;
-  uint32_t g = ((rgb >> 8) & 0xff) * alpha / 255;
-  uint32_t b = (rgb & 0xff) * alpha / 255;
-  return ((uint32_t)alpha << 24) | (r << 16) | (g << 8) | b;
-}
-
 static int clamp_int(int value, int low, int high) {
   if (value < low)
     return low;
@@ -279,76 +275,6 @@ static void draw_wallpaper(struct shell_output *output, int width, int height) {
   wl_surface_commit(output->background);
 }
 
-static void draw_frosted_backdrop(struct shell_output *output, uint32_t *pixels,
-                                  int stride, int canvas_height, int x, int y,
-                                  int width, int height, int radius) {
-  int scale = output->scale > 0 ? output->scale : 1;
-  int screen_width =
-      output->background_width > 0
-          ? output->background_width
-          : (output->mode_width > 0 ? output->mode_width / scale : 1280);
-  int screen_height =
-      output->background_height > 0
-          ? output->background_height
-          : (output->mode_height > 0 ? output->mode_height / scale : 720);
-  int dock_left = (screen_width - output->dock.layout.width) / 2;
-  int dock_top = screen_height - output->dock.layout.height;
-  double wallpaper_scale = 1.0;
-  double offset_x = 0.0, offset_y = 0.0;
-  if (app.wallpaper.pixels != NULL) {
-    double scale_x = (double)screen_width / app.wallpaper.width;
-    double scale_y = (double)screen_height / app.wallpaper.height;
-    wallpaper_scale = scale_x > scale_y ? scale_x : scale_y;
-    offset_x = (app.wallpaper.width * wallpaper_scale - screen_width) / 2.0;
-    offset_y = (app.wallpaper.height * wallpaper_scale - screen_height) / 2.0;
-  }
-
-  for (int py = y; py < y + height; py++) {
-    if (py < 0 || py >= canvas_height)
-      continue;
-    for (int px = x; px < x + width; px++) {
-      if (px < 0 || px >= stride)
-        continue;
-      int coverage = rounded_coverage(px, py, x, y, width, height, radius);
-      if (coverage == 0)
-        continue;
-
-      unsigned int red = 0, green = 0, blue = 0;
-      for (int ky = -2; ky <= 2; ky++) {
-        for (int kx = -2; kx <= 2; kx++) {
-          int gx =
-              clamp_int(dock_left + px / scale + kx * 3, 0, screen_width - 1);
-          int gy =
-              clamp_int(dock_top + py / scale + ky * 3, 0, screen_height - 1);
-          uint32_t sample = 0xff496b83;
-          if (app.wallpaper.pixels != NULL) {
-            int sx = clamp_int((int)((gx + offset_x) / wallpaper_scale), 0,
-                               app.wallpaper.width - 1);
-            int sy = clamp_int((int)((gy + offset_y) / wallpaper_scale), 0,
-                               app.wallpaper.height - 1);
-            sample = app.wallpaper.pixels[sy * app.wallpaper.width + sx];
-          }
-          red += (sample >> 16) & 0xff;
-          green += (sample >> 8) & 0xff;
-          blue += sample & 0xff;
-        }
-      }
-      int r = red / 25, g = green / 25, b = blue / 25;
-      int luminance = (r * 54 + g * 183 + b * 19) / 256;
-      r = clamp_int(luminance + (r - luminance) * 118 / 100 + 7, 0, 255);
-      g = clamp_int(luminance + (g - luminance) * 118 / 100 + 7, 0, 255);
-      b = clamp_int(luminance + (b - luminance) * 118 / 100 + 7, 0, 255);
-      r = (r * 88 + 245 * 12) / 100;
-      g = (g * 88 + 250 * 12) / 100;
-      b = (b * 88 + 252 * 12) / 100;
-      uint32_t color =
-          premul(((uint32_t)r << 16) | ((uint32_t)g << 8) | b, 222);
-      int index = py * stride + px;
-      pixels[index] = blend_coverage(pixels[index], color, coverage);
-    }
-  }
-}
-
 static void draw_dock(struct shell_output *output) {
   int scale = output->scale > 0 ? output->scale : 1;
   int width = output->dock.layout.width * scale;
@@ -360,7 +286,6 @@ static void draw_dock(struct shell_output *output) {
   memset(pixels, 0, buffer->size);
 
   int top = height / 10;
-  int radius = height / 4;
   int icon_size = output->dock.layout.icon_size * scale;
   int icon_x = (width - icon_size) / 2;
   int content_padding = output->dock.layout.padding * scale;
@@ -372,16 +297,6 @@ static void draw_dock(struct shell_output *output) {
   int indicator_x = (width - indicator_w) / 2;
   int indicator_y = height - indicator_h - 2 * scale;
 
-  /* Blur and brighten the real wallpaper crop, then add a thin specular rim. */
-  rounded_rect(pixels, width, height, scale, top - scale, width - 2 * scale,
-               height - top + scale, radius, premul(0x17212a, 20));
-  rounded_rect(pixels, width, height, scale, top, width - 2 * scale,
-               height - top, radius, premul(0xffffff, 104));
-  draw_frosted_backdrop(output, pixels, width, height, 2 * scale, top + scale,
-                        width - 4 * scale, height - top - scale,
-                        radius - scale);
-  rounded_rect(pixels, width, height, 2 * scale, top + scale, width - 4 * scale,
-               height - top - scale, radius - scale, premul(0xf4f8fa, 20));
   rounded_rect(pixels, width, height, icon_x, icon_y, icon_size, icon_size,
                icon_size / 4, 0xffd9dce2);
   rounded_rect(pixels, width, height, icon_x + icon_inset, icon_y + icon_inset,
@@ -463,6 +378,16 @@ static void create_output_surfaces(struct shell_output *output) {
                       output->output, width, height, scale, render_dock,
                       dock_closed, output))
     app.running = false;
+  if (output->dock.surface != NULL && app.effect_manager != NULL) {
+    output->effect = os_effect_manager_v1_get_surface_effect(
+        app.effect_manager, output->dock.surface);
+    int backdrop_top = output->dock.layout.height / 10;
+    os_surface_effect_v1_set_blur(
+        output->effect, 1, backdrop_top, output->dock.layout.width - 2,
+        output->dock.layout.height - backdrop_top, 12);
+    os_surface_effect_v1_set_tint(output->effect, 0xffffff08);
+    wl_surface_commit(output->dock.surface);
+  }
 }
 
 static void output_geometry(void *data, struct wl_output *output, int32_t x,
@@ -627,6 +552,9 @@ static void registry_global(void *data, struct wl_registry *registry,
     app.layer_shell =
         wl_registry_bind(registry, name, &zwlr_layer_shell_v1_interface,
                          version < 4 ? version : 4);
+  } else if (strcmp(interface, os_effect_manager_v1_interface.name) == 0) {
+    app.effect_manager =
+        wl_registry_bind(registry, name, &os_effect_manager_v1_interface, 1);
   } else if (strcmp(interface, wl_seat_interface.name) == 0) {
     app.seat = wl_registry_bind(registry, name, &wl_seat_interface, 1);
     wl_seat_add_listener(app.seat, &seat_listener, NULL);
@@ -667,7 +595,8 @@ int os_desktop_shell_run(int argc, char **argv) {
   struct wl_registry *registry = wl_display_get_registry(app.display);
   wl_registry_add_listener(registry, &registry_listener, NULL);
   wl_display_roundtrip(app.display);
-  if (app.compositor == NULL || app.shm == NULL || app.layer_shell == NULL) {
+  if (app.compositor == NULL || app.shm == NULL || app.layer_shell == NULL ||
+      app.effect_manager == NULL) {
     fprintf(stderr, "desktop-shell: compositor lacks wl_shm or layer-shell\n");
     return 1;
   }
@@ -681,8 +610,13 @@ int os_desktop_shell_run(int argc, char **argv) {
   wl_display_flush(app.display);
   while (app.running && wl_display_dispatch(app.display) >= 0) {
   }
-  for (int i = 0; i < app.output_count; ++i)
+  for (int i = 0; i < app.output_count; ++i) {
+    if (app.outputs[i].effect != NULL)
+      os_surface_effect_v1_destroy(app.outputs[i].effect);
     os_dock_destroy(&app.outputs[i].dock);
+  }
+  if (app.effect_manager != NULL)
+    os_effect_manager_v1_destroy(app.effect_manager);
   free(app.wallpaper.pixels);
   wl_display_disconnect(app.display);
   return 0;

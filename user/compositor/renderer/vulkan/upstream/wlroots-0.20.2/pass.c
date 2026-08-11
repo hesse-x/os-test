@@ -13,6 +13,8 @@
 
 #include "render/color.h"
 #include "render/vulkan.h"
+#include "renderer/mesh/mesh.h"
+#include "renderer/vulkan/os_vk_renderer.h"
 #include "util/matrix.h"
 
 static const struct wlr_render_pass_impl render_pass_impl;
@@ -1017,6 +1019,583 @@ render_pass_add_texture(struct wlr_render_pass *wlr_pass,
         .wait_point = wait_point,
     };
   }
+}
+
+static bool os_vk_create_blur_image(struct wlr_vk_renderer *renderer,
+                                    uint32_t width, uint32_t height,
+                                    VkImage *image, VkImageView *view,
+                                    VkDeviceMemory *memory) {
+  VkDevice dev = renderer->dev->dev;
+  VkImageCreateInfo image_info = {
+      .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+      .imageType = VK_IMAGE_TYPE_2D,
+      .format = VK_FORMAT_R16G16B16A16_SFLOAT,
+      .extent = {width, height, 1},
+      .mipLevels = 1,
+      .arrayLayers = 1,
+      .samples = VK_SAMPLE_COUNT_1_BIT,
+      .tiling = VK_IMAGE_TILING_OPTIMAL,
+      .usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+      .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+  };
+  if (vkCreateImage(dev, &image_info, NULL, image) != VK_SUCCESS)
+    return false;
+  VkMemoryRequirements requirements;
+  vkGetImageMemoryRequirements(dev, *image, &requirements);
+  int memory_type =
+      vulkan_find_mem_type(renderer->dev, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                           requirements.memoryTypeBits);
+  if (memory_type < 0)
+    return false;
+  VkMemoryAllocateInfo memory_info = {
+      .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+      .allocationSize = requirements.size,
+      .memoryTypeIndex = (uint32_t)memory_type,
+  };
+  if (vkAllocateMemory(dev, &memory_info, NULL, memory) != VK_SUCCESS ||
+      vkBindImageMemory(dev, *image, *memory, 0) != VK_SUCCESS)
+    return false;
+  VkImageViewCreateInfo view_info = {
+      .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+      .image = *image,
+      .viewType = VK_IMAGE_VIEW_TYPE_2D,
+      .format = VK_FORMAT_R16G16B16A16_SFLOAT,
+      .subresourceRange =
+          {
+              .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+              .levelCount = 1,
+              .layerCount = 1,
+          },
+  };
+  return vkCreateImageView(dev, &view_info, NULL, view) == VK_SUCCESS;
+}
+
+static bool os_vk_ensure_blur_resources(struct wlr_vk_render_pass *pass,
+                                        uint32_t downsample) {
+  struct wlr_vk_render_buffer *buffer = pass->render_buffer;
+  struct wlr_vk_renderer *renderer = pass->renderer;
+  uint32_t width = (buffer->wlr_buffer->width + downsample - 1) / downsample;
+  uint32_t height = (buffer->wlr_buffer->height + downsample - 1) / downsample;
+  if (buffer->os_blur.images[0] != VK_NULL_HANDLE)
+    return buffer->os_blur.width == width && buffer->os_blur.height == height &&
+           buffer->os_blur.downsample == downsample;
+  if ((uint64_t)width * height * 2 > 2u * 1024u * 1024u) {
+    wlr_log(WLR_ERROR, "backdrop blur transient image budget exceeded");
+    return false;
+  }
+
+  for (size_t i = 0; i < 2; ++i) {
+    if (!os_vk_create_blur_image(
+            renderer, width, height, &buffer->os_blur.images[i],
+            &buffer->os_blur.views[i], &buffer->os_blur.memories[i]))
+      return false;
+  }
+  const struct wlr_vk_pipeline_layout *composite_layout =
+      get_or_create_pipeline_layout(
+          renderer, &(struct wlr_vk_pipeline_layout_key){
+                        .filter_mode = WLR_SCALE_FILTER_BILINEAR});
+  if (composite_layout == NULL)
+    return false;
+
+  VkDescriptorPoolSize sizes[] = {
+      {.type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, .descriptorCount = 2},
+      {.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 3},
+  };
+  VkDescriptorPoolCreateInfo pool_info = {
+      .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+      .maxSets = 3,
+      .poolSizeCount = 2,
+      .pPoolSizes = sizes,
+  };
+  VkDevice dev = renderer->dev->dev;
+  if (vkCreateDescriptorPool(dev, &pool_info, NULL,
+                             &buffer->os_blur.descriptor_pool) != VK_SUCCESS)
+    return false;
+  VkDescriptorSetLayout layouts[] = {
+      renderer->os_blur_compute_ds_layout,
+      renderer->os_blur_compute_ds_layout,
+      composite_layout->ds,
+  };
+  VkDescriptorSet sets[3];
+  VkDescriptorSetAllocateInfo allocate_info = {
+      .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+      .descriptorPool = buffer->os_blur.descriptor_pool,
+      .descriptorSetCount = 3,
+      .pSetLayouts = layouts,
+  };
+  if (vkAllocateDescriptorSets(dev, &allocate_info, sets) != VK_SUCCESS)
+    return false;
+  buffer->os_blur.compute_sets[0] = sets[0];
+  buffer->os_blur.compute_sets[1] = sets[1];
+  buffer->os_blur.composite_set = sets[2];
+  buffer->os_blur.composite_layout = composite_layout;
+
+  VkDescriptorImageInfo image_infos[] = {
+      {.sampler = composite_layout->sampler,
+       .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+      {.imageView = buffer->os_blur.views[0],
+       .imageLayout = VK_IMAGE_LAYOUT_GENERAL},
+      {.sampler = composite_layout->sampler,
+       .imageView = buffer->os_blur.views[0],
+       .imageLayout = VK_IMAGE_LAYOUT_GENERAL},
+      {.imageView = buffer->os_blur.views[1],
+       .imageLayout = VK_IMAGE_LAYOUT_GENERAL},
+      {.imageView = buffer->os_blur.views[1],
+       .sampler = composite_layout->sampler,
+       .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+  };
+  VkWriteDescriptorSet writes[5];
+  for (size_t i = 0; i < 4; ++i) {
+    writes[i] = (VkWriteDescriptorSet){
+        .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+        .dstSet = sets[i / 2],
+        .dstBinding = i % 2,
+        .descriptorCount = 1,
+        .descriptorType = i % 2 == 0 ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER
+                                     : VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+        .pImageInfo = &image_infos[i],
+    };
+  }
+  writes[4] = (VkWriteDescriptorSet){
+      .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+      .dstSet = sets[2],
+      .descriptorCount = 1,
+      .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+      .pImageInfo = &image_infos[4],
+  };
+  vkUpdateDescriptorSets(dev, 5, writes, 0, NULL);
+  buffer->os_blur.width = width;
+  buffer->os_blur.height = height;
+  buffer->os_blur.downsample = downsample;
+  return true;
+}
+
+bool os_vk_pass_add_rounded_rect(struct wlr_render_pass *wlr_pass,
+                                 const struct os_vk_rounded_rect *rect) {
+  if (wlr_pass == NULL || rect == NULL || rect->width <= 0.0f ||
+      rect->height <= 0.0f || rect->radius < 0.0f ||
+      rect->border_width < 0.0f || !isfinite(rect->rotation_radians))
+    return false;
+  struct wlr_vk_render_pass *pass = get_render_pass(wlr_pass);
+  struct wlr_vk_pipeline *pipe = setup_get_or_create_pipeline(
+      pass->render_setup, &(struct wlr_vk_pipeline_key){
+                              .source = WLR_VK_SHADER_SOURCE_OS_SDF,
+                              .layout = {0},
+                              .blend_mode = WLR_RENDER_BLEND_MODE_PREMULTIPLIED,
+                          });
+  if (pipe == NULL) {
+    pass->failed = true;
+    return false;
+  }
+
+  float cosine = cosf(rect->rotation_radians);
+  float sine = sinf(rect->rotation_radians);
+  float cx = rect->x + rect->width * 0.5f;
+  float cy = rect->y + rect->height * 0.5f;
+  float model[9] = {
+      cosine * rect->width,
+      -sine * rect->height,
+      cx - cosine * rect->width * 0.5f + sine * rect->height * 0.5f,
+      sine * rect->width,
+      cosine * rect->height,
+      cy - sine * rect->width * 0.5f - cosine * rect->height * 0.5f,
+      0,
+      0,
+      1,
+  };
+  float matrix[9];
+  wlr_matrix_multiply(matrix, pass->projection, model);
+  struct wlr_vk_vert_pcr_data vertex = {.uv_off = {0, 0}, .uv_size = {1, 1}};
+  encode_proj_matrix(matrix, vertex.mat4);
+  struct {
+    float fill[4];
+    float border[4];
+    float geometry[4];
+  } fragment;
+  memcpy(fragment.fill, rect->fill, sizeof(fragment.fill));
+  memcpy(fragment.border, rect->border, sizeof(fragment.border));
+  fragment.geometry[0] = rect->width;
+  fragment.geometry[1] = rect->height;
+  fragment.geometry[2] = rect->radius;
+  fragment.geometry[3] = rect->border_width;
+
+  bind_pipeline(pass, pipe->vk);
+  vkCmdPushConstants(pass->command_buffer->vk, pipe->layout->vk,
+                     VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(vertex), &vertex);
+  vkCmdPushConstants(pass->command_buffer->vk, pipe->layout->vk,
+                     VK_SHADER_STAGE_FRAGMENT_BIT, sizeof(vertex),
+                     sizeof(fragment), &fragment);
+  VkRect2D scissor = {.extent = {pass->render_buffer->wlr_buffer->width,
+                                 pass->render_buffer->wlr_buffer->height}};
+  vkCmdSetScissor(pass->command_buffer->vk, 0, 1, &scissor);
+  vkCmdDraw(pass->command_buffer->vk, 4, 1, 0, 0);
+  struct wlr_box damage = {
+      .x = floorf(rect->x - rect->height),
+      .y = floorf(rect->y - rect->width),
+      .width = ceilf(rect->width + rect->height * 2),
+      .height = ceilf(rect->height + rect->width * 2),
+  };
+  render_pass_mark_box_updated(pass, &damage);
+  return true;
+}
+
+bool os_vk_pass_add_backdrop_blur(struct wlr_render_pass *wlr_pass,
+                                  const struct os_vk_backdrop_blur *blur,
+                                  struct wlr_texture *backdrop) {
+  if (wlr_pass == NULL || blur == NULL || blur->width <= 0 ||
+      blur->height <= 0 || blur->radius == 0 || blur->radius > 32 ||
+      (blur->downsample != 2 && blur->downsample != 4) ||
+      blur->corner_radius < 0.0f || blur->opacity < 0.0f ||
+      blur->opacity > 1.0f)
+    return false;
+  struct wlr_vk_render_pass *pass = get_render_pass(wlr_pass);
+  if (!pass->two_pass) {
+    wlr_log(WLR_ERROR, "backdrop blur requires the linear two-pass pathway");
+    return false;
+  }
+  if (!os_vk_ensure_blur_resources(pass, blur->downsample)) {
+    pass->failed = true;
+    return false;
+  }
+  struct wlr_vk_render_buffer *buffer = pass->render_buffer;
+  struct wlr_vk_texture *backdrop_texture = NULL;
+  VkDescriptorImageInfo backdrop_info = {
+      .sampler = buffer->os_blur.composite_layout->sampler,
+      .imageView = buffer->two_pass.blend_image_view,
+      .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+  };
+  if (backdrop != NULL) {
+    backdrop_texture = vulkan_get_texture(backdrop);
+    if (backdrop_texture->renderer != pass->renderer)
+      return false;
+    struct wlr_vk_texture_view *backdrop_view =
+        vulkan_texture_get_or_create_view(
+            backdrop_texture, buffer->os_blur.composite_layout, true);
+    if (backdrop_view == NULL) {
+      pass->failed = true;
+      return false;
+    }
+    backdrop_info.imageView = backdrop_view->image_view;
+  }
+  VkWriteDescriptorSet backdrop_write = {
+      .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+      .dstSet = buffer->os_blur.compute_sets[0],
+      .descriptorCount = 1,
+      .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+      .pImageInfo = &backdrop_info,
+  };
+  vkUpdateDescriptorSets(pass->renderer->dev->dev, 1, &backdrop_write, 0, NULL);
+  if (backdrop_texture != NULL)
+    backdrop_texture->last_used_cb = pass->command_buffer;
+  if (backdrop_texture != NULL && backdrop_texture->dmabuf_imported &&
+      !backdrop_texture->owned) {
+    backdrop_texture->owned = true;
+    wl_list_insert(&pass->renderer->foreign_textures,
+                   &backdrop_texture->foreign_link);
+  }
+  if (backdrop_texture != NULL && backdrop_texture->dmabuf_imported) {
+    struct wlr_vk_render_pass_texture *pass_texture =
+        wl_array_add(&pass->textures, sizeof(*pass_texture));
+    if (pass_texture == NULL) {
+      pass->failed = true;
+      return false;
+    }
+    *pass_texture =
+        (struct wlr_vk_render_pass_texture){.texture = backdrop_texture};
+  }
+  struct wlr_vk_pipeline *pipe = setup_get_or_create_pipeline(
+      pass->render_setup,
+      &(struct wlr_vk_pipeline_key){
+          .source = WLR_VK_SHADER_SOURCE_OS_BLUR_COMPOSITE,
+          .layout = {.filter_mode = WLR_SCALE_FILTER_BILINEAR},
+          .blend_mode = WLR_RENDER_BLEND_MODE_PREMULTIPLIED,
+      });
+  if (pipe == NULL) {
+    pass->failed = true;
+    return false;
+  }
+
+  VkCommandBuffer command = pass->command_buffer->vk;
+  vkCmdNextSubpass(command, VK_SUBPASS_CONTENTS_INLINE);
+  vkCmdEndRenderPass(command);
+
+  VkImageMemoryBarrier prepare[] = {
+      {
+          .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+          .srcAccessMask =
+              buffer->os_blur.transitioned ? VK_ACCESS_SHADER_READ_BIT : 0,
+          .dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+          .oldLayout = buffer->os_blur.transitioned ? VK_IMAGE_LAYOUT_GENERAL
+                                                    : VK_IMAGE_LAYOUT_UNDEFINED,
+          .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+          .image = buffer->os_blur.images[0],
+          .subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                               .levelCount = 1,
+                               .layerCount = 1},
+      },
+      {
+          .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+          .srcAccessMask =
+              buffer->os_blur.transitioned ? VK_ACCESS_SHADER_READ_BIT : 0,
+          .dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+          .oldLayout = buffer->os_blur.transitioned
+                           ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+                           : VK_IMAGE_LAYOUT_UNDEFINED,
+          .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+          .image = buffer->os_blur.images[1],
+          .subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                               .levelCount = 1,
+                               .layerCount = 1},
+      },
+  };
+  vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                       VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, NULL, 0,
+                       NULL, 2, prepare);
+
+  vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE,
+                    pass->renderer->os_blur_compute_pipeline);
+  struct {
+    int32_t direction[2];
+    int32_t radius;
+    int32_t source_scale;
+  } compute_data = {{1, 0}, (int32_t)blur->radius, (int32_t)blur->downsample};
+  vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_COMPUTE,
+                          pass->renderer->os_blur_compute_pipe_layout, 0, 1,
+                          &buffer->os_blur.compute_sets[0], 0, NULL);
+  vkCmdPushConstants(command, pass->renderer->os_blur_compute_pipe_layout,
+                     VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(compute_data),
+                     &compute_data);
+  vkCmdDispatch(command, (buffer->os_blur.width + 7) / 8,
+                (buffer->os_blur.height + 7) / 8, 1);
+
+  VkImageMemoryBarrier horizontal_done = {
+      .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+      .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+      .dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
+      .oldLayout = VK_IMAGE_LAYOUT_GENERAL,
+      .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+      .image = buffer->os_blur.images[0],
+      .subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                           .levelCount = 1,
+                           .layerCount = 1},
+  };
+  vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                       VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, NULL, 0,
+                       NULL, 1, &horizontal_done);
+  compute_data.direction[0] = 0;
+  compute_data.direction[1] = 1;
+  compute_data.radius =
+      (blur->radius + blur->downsample - 1) / blur->downsample;
+  compute_data.source_scale = 1;
+  vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_COMPUTE,
+                          pass->renderer->os_blur_compute_pipe_layout, 0, 1,
+                          &buffer->os_blur.compute_sets[1], 0, NULL);
+  vkCmdPushConstants(command, pass->renderer->os_blur_compute_pipe_layout,
+                     VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(compute_data),
+                     &compute_data);
+  vkCmdDispatch(command, (buffer->os_blur.width + 7) / 8,
+                (buffer->os_blur.height + 7) / 8, 1);
+
+  VkImageMemoryBarrier finish = {
+      .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+      .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+      .dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
+      .oldLayout = VK_IMAGE_LAYOUT_GENERAL,
+      .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+      .image = buffer->os_blur.images[1],
+      .subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                           .levelCount = 1,
+                           .layerCount = 1},
+  };
+  vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                       VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+                           VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                       0, 0, NULL, 0, NULL, 1, &finish);
+  buffer->os_blur.transitioned = true;
+
+  VkImageMemoryBarrier resume_blending = {
+      .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+      .srcAccessMask = backdrop == NULL ? VK_ACCESS_SHADER_READ_BIT : 0,
+      .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
+                       VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+      .oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+      .newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+      .image = buffer->two_pass.blend_image,
+      .subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                           .levelCount = 1,
+                           .layerCount = 1},
+  };
+  vkCmdPipelineBarrier(command,
+                       backdrop == NULL
+                           ? VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT
+                           : VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                       VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0,
+                       NULL, 0, NULL, 1, &resume_blending);
+
+  VkRenderPassBeginInfo begin = {
+      .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+      .renderPass = pass->render_setup->render_pass,
+      .framebuffer = pass->render_buffer_out->framebuffer,
+      .renderArea = {.extent = {buffer->wlr_buffer->width,
+                                buffer->wlr_buffer->height}},
+  };
+  vkCmdBeginRenderPass(command, &begin, VK_SUBPASS_CONTENTS_INLINE);
+  pass->bound_pipeline = VK_NULL_HANDLE;
+  bind_pipeline(pass, pipe->vk);
+
+  float model[9] = {
+      blur->width, 0, blur->x, 0, blur->height, blur->y, 0, 0, 1,
+  };
+  float matrix[9];
+  wlr_matrix_multiply(matrix, pass->projection, model);
+  struct wlr_vk_vert_pcr_data vertex = {
+      .uv_off = {(float)blur->x / buffer->wlr_buffer->width,
+                 (float)blur->y / buffer->wlr_buffer->height},
+      .uv_size = {(float)blur->width / buffer->wlr_buffer->width,
+                  (float)blur->height / buffer->wlr_buffer->height},
+  };
+  encode_proj_matrix(matrix, vertex.mat4);
+  struct {
+    float tint[4];
+    float geometry[4];
+    float sample_region[4];
+  } fragment;
+  memcpy(fragment.tint, blur->tint, sizeof(fragment.tint));
+  fragment.geometry[0] = blur->width;
+  fragment.geometry[1] = blur->height;
+  fragment.geometry[2] = blur->corner_radius;
+  fragment.geometry[3] = blur->opacity;
+  fragment.sample_region[0] = vertex.uv_off[0];
+  fragment.sample_region[1] = vertex.uv_off[1];
+  fragment.sample_region[2] = vertex.uv_size[0];
+  fragment.sample_region[3] = vertex.uv_size[1];
+  vkCmdPushConstants(command, pipe->layout->vk, VK_SHADER_STAGE_VERTEX_BIT, 0,
+                     sizeof(vertex), &vertex);
+  vkCmdPushConstants(command, pipe->layout->vk, VK_SHADER_STAGE_FRAGMENT_BIT,
+                     sizeof(vertex), sizeof(fragment), &fragment);
+  vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                          pipe->layout->vk, 0, 1,
+                          &buffer->os_blur.composite_set, 0, NULL);
+  VkRect2D scissor = {.offset = {blur->x, blur->y},
+                      .extent = {blur->width, blur->height}};
+  vkCmdSetScissor(command, 0, 1, &scissor);
+  vkCmdDraw(command, 4, 1, 0, 0);
+  render_pass_mark_box_updated(
+      pass, &(struct wlr_box){blur->x, blur->y, blur->width, blur->height});
+  return true;
+}
+
+bool os_vk_pass_add_mesh(struct wlr_render_pass *wlr_pass,
+                         const struct os_mesh *mesh,
+                         struct wlr_texture *wlr_texture, float opacity) {
+  if (wlr_pass == NULL || mesh == NULL || wlr_texture == NULL ||
+      mesh->vertices == NULL || mesh->indices == NULL ||
+      mesh->vertex_count == 0 || mesh->index_count == 0 ||
+      mesh->index_count % 3 != 0 || !isfinite(opacity) || opacity < 0.0f ||
+      opacity > 1.0f)
+    return false;
+  struct wlr_vk_render_pass *pass = get_render_pass(wlr_pass);
+  struct wlr_vk_renderer *renderer = pass->renderer;
+  struct wlr_vk_texture *texture = vulkan_get_texture(wlr_texture);
+  if (texture->renderer != renderer)
+    return false;
+  for (size_t index = 0; index < mesh->index_count; ++index) {
+    if (mesh->indices[index] >= mesh->vertex_count)
+      return false;
+  }
+  size_t vertex_bytes = mesh->vertex_count * sizeof(*mesh->vertices);
+  size_t index_bytes = mesh->index_count * sizeof(*mesh->indices);
+  if (vertex_bytes > SIZE_MAX - index_bytes)
+    return false;
+  VkDeviceSize index_offset = (vertex_bytes + 3u) & ~(VkDeviceSize)3u;
+  struct wlr_vk_buffer_span span =
+      vulkan_get_stage_span(renderer, index_offset + index_bytes, 16);
+  if (span.buffer == NULL)
+    return false;
+  uint8_t *mapping = span.buffer->cpu_mapping + span.alloc.start;
+  memcpy(mapping, mesh->vertices, vertex_bytes);
+  memcpy(mapping + index_offset, mesh->indices, index_bytes);
+  VkCommandBuffer stage_cb = vulkan_record_stage_cb(renderer);
+  if (stage_cb == VK_NULL_HANDLE) {
+    pass->failed = true;
+    return false;
+  }
+  VkBufferMemoryBarrier barrier = {
+      .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+      .srcAccessMask = VK_ACCESS_HOST_WRITE_BIT,
+      .dstAccessMask =
+          VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_INDEX_READ_BIT,
+      .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+      .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+      .buffer = span.buffer->buffer,
+      .offset = span.alloc.start,
+      .size = span.alloc.size,
+  };
+  vkCmdPipelineBarrier(stage_cb, VK_PIPELINE_STAGE_HOST_BIT,
+                       VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, 0, 0, NULL, 1,
+                       &barrier, 0, NULL);
+  if (texture->dmabuf_imported && !texture->owned) {
+    texture->owned = true;
+    wl_list_insert(&renderer->foreign_textures, &texture->foreign_link);
+  }
+  struct wlr_vk_pipeline *pipe = setup_get_or_create_pipeline(
+      pass->render_setup,
+      &(struct wlr_vk_pipeline_key){
+          .source = WLR_VK_SHADER_SOURCE_OS_MESH_TEXTURE,
+          .layout = {.filter_mode = WLR_SCALE_FILTER_BILINEAR},
+          .texture_transform = WLR_VK_TEXTURE_TRANSFORM_GAMMA22,
+          .blend_mode = WLR_RENDER_BLEND_MODE_PREMULTIPLIED,
+      });
+  if (pipe == NULL) {
+    pass->failed = true;
+    return false;
+  }
+  struct wlr_vk_texture_view *view =
+      vulkan_texture_get_or_create_view(texture, pipe->layout, false);
+  if (view == NULL) {
+    pass->failed = true;
+    return false;
+  }
+  struct wlr_vk_frag_texture_pcr_data fragment = {
+      .matrix = {{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, 0}, {0, 0, 0, 0}},
+      .alpha = opacity,
+      .luminance_multiplier = 1.0f,
+  };
+  struct wlr_vk_vert_pcr_data vertex = {.uv_size = {1.0f, 1.0f}};
+  encode_proj_matrix(pass->projection, vertex.mat4);
+  bind_pipeline(pass, pipe->vk);
+  vkCmdBindDescriptorSets(pass->command_buffer->vk,
+                          VK_PIPELINE_BIND_POINT_GRAPHICS, pipe->layout->vk, 0,
+                          1, &view->ds, 0, NULL);
+  vkCmdPushConstants(
+      pass->command_buffer->vk, pipe->layout->vk, VK_SHADER_STAGE_FRAGMENT_BIT,
+      sizeof(struct wlr_vk_vert_pcr_data), sizeof(fragment), &fragment);
+  vkCmdPushConstants(pass->command_buffer->vk, pipe->layout->vk,
+                     VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(vertex), &vertex);
+  VkRect2D scissor = {.extent = {pass->render_buffer->wlr_buffer->width,
+                                 pass->render_buffer->wlr_buffer->height}};
+  vkCmdSetScissor(pass->command_buffer->vk, 0, 1, &scissor);
+  VkDeviceSize vertex_offset = span.alloc.start;
+  vkCmdBindVertexBuffers(pass->command_buffer->vk, 0, 1, &span.buffer->buffer,
+                         &vertex_offset);
+  vkCmdBindIndexBuffer(pass->command_buffer->vk, span.buffer->buffer,
+                       span.alloc.start + index_offset, VK_INDEX_TYPE_UINT32);
+  vkCmdDrawIndexed(pass->command_buffer->vk, mesh->index_count, 1, 0, 0, 0);
+  render_pass_mark_box_updated(
+      pass,
+      &(struct wlr_box){.width = pass->render_buffer->wlr_buffer->width,
+                        .height = pass->render_buffer->wlr_buffer->height});
+  texture->last_used_cb = pass->command_buffer;
+  if (texture->dmabuf_imported) {
+    struct wlr_vk_render_pass_texture *pass_texture =
+        wl_array_add(&pass->textures, sizeof(*pass_texture));
+    if (pass_texture == NULL) {
+      pass->failed = true;
+      return false;
+    }
+    *pass_texture = (struct wlr_vk_render_pass_texture){.texture = texture};
+  }
+  return true;
 }
 
 static const struct wlr_render_pass_impl render_pass_impl = {

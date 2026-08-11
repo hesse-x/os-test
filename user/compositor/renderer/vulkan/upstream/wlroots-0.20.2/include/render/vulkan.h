@@ -173,6 +173,9 @@ enum wlr_vk_texture_transform {
 enum wlr_vk_shader_source {
   WLR_VK_SHADER_SOURCE_TEXTURE,
   WLR_VK_SHADER_SOURCE_SINGLE_COLOR,
+  WLR_VK_SHADER_SOURCE_OS_SDF,
+  WLR_VK_SHADER_SOURCE_OS_MESH_TEXTURE,
+  WLR_VK_SHADER_SOURCE_OS_BLUR_COMPOSITE,
 };
 
 // Constants used to pick the color transform for the blend-to-output
@@ -271,6 +274,18 @@ struct wlr_vk_render_buffer {
     struct wlr_vk_descriptor_pool *blend_attachment_pool;
     bool blend_transitioned;
   } two_pass;
+
+  struct {
+    uint32_t width, height, downsample;
+    VkImage images[2];
+    VkImageView views[2];
+    VkDeviceMemory memories[2];
+    VkDescriptorPool descriptor_pool;
+    VkDescriptorSet compute_sets[2];
+    VkDescriptorSet composite_set;
+    const struct wlr_vk_pipeline_layout *composite_layout;
+    bool transitioned;
+  } os_blur;
 };
 
 bool vulkan_setup_one_pass_framebuffer(
@@ -308,9 +323,17 @@ struct wlr_vk_renderer {
   VkCommandPool command_pool;
 
   VkShaderModule vert_module;
+  VkShaderModule os_mesh_vert_module;
   VkShaderModule tex_frag_module;
   VkShaderModule quad_frag_module;
+  VkShaderModule os_sdf_frag_module;
+  VkShaderModule os_blur_comp_module;
+  VkShaderModule os_blur_composite_frag_module;
   VkShaderModule output_module;
+
+  VkDescriptorSetLayout os_blur_compute_ds_layout;
+  VkPipelineLayout os_blur_compute_pipe_layout;
+  VkPipeline os_blur_compute_pipeline;
 
   struct wl_list pipeline_layouts; // struct wlr_vk_pipeline_layout.link
 

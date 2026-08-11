@@ -862,9 +862,11 @@ function(add_user_dyn_elf name)
             set(DEP_LANG "CXX")
         endif()
         add_custom_command(OUTPUT ${src_obj}
-            COMMAND ${COMPILE_CMD} ${COMPILE_FLAGS} -c ${src_full} -o ${src_obj}
+            COMMAND ${COMPILE_CMD} ${COMPILE_FLAGS} -MMD -MF ${src_obj}.d
+                    -c ${src_full} -o ${src_obj}
             DEPENDS ${src_full} ${ARG_GEN_HEADERS} ${MUSL_GEN_HEADERS}
-            IMPLICIT_DEPENDS ${DEP_LANG} ${src_full})
+            IMPLICIT_DEPENDS ${DEP_LANG} ${src_full}
+            DEPFILE ${src_obj}.d)
         list(APPEND OBJ_FILES ${src_obj})
         math(EXPR idx "${idx} + 1")
     endforeach()
