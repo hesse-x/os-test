@@ -19,9 +19,10 @@
 
 #include "wlr-layer-shell-client-protocol.h"
 
+#include "dock/desktop_shell.h"
+#include "dock/dock.h"
+
 #define MAX_OUTPUTS 8
-#define DOCK_MIN_HEIGHT 48
-#define DOCK_MAX_HEIGHT 72
 
 struct image {
   uint32_t *pixels;
@@ -32,14 +33,10 @@ struct shell_output {
   struct wl_output *output;
   struct wl_surface *background;
   struct zwlr_layer_surface_v1 *background_layer;
-  struct wl_surface *dock;
-  struct zwlr_layer_surface_v1 *dock_layer;
+  struct os_dock dock;
   int background_width, background_height;
   int mode_width, mode_height;
   int scale;
-  int dock_width, dock_height;
-  int dock_icon_size, dock_padding;
-  bool dock_configured;
 };
 
 struct app {
@@ -248,19 +245,6 @@ static void fill_rect(uint32_t *pixels, int stride, int canvas_height, int x,
         pixels[py * stride + px] = color;
 }
 
-static void update_dock_dimensions(struct shell_output *output) {
-  int scale = output->scale > 0 ? output->scale : 1;
-  int logical_height =
-      output->mode_height > 0 ? output->mode_height / scale : 720;
-  int target_height =
-      clamp_int(logical_height * 3 / 40, DOCK_MIN_HEIGHT, DOCK_MAX_HEIGHT);
-  output->dock_icon_size = target_height * 2 / 3;
-  output->dock_padding = clamp_int(target_height * 2 / 9, 10, 16);
-  int content_size = output->dock_icon_size + 2 * output->dock_padding;
-  output->dock_width = content_size;
-  output->dock_height = (content_size * 10 + 8) / 9;
-}
-
 static void draw_wallpaper(struct shell_output *output, int width, int height) {
   struct shm_buffer *buffer = create_buffer(width, height);
   if (buffer == NULL)
@@ -307,8 +291,8 @@ static void draw_frosted_backdrop(struct shell_output *output, uint32_t *pixels,
       output->background_height > 0
           ? output->background_height
           : (output->mode_height > 0 ? output->mode_height / scale : 720);
-  int dock_left = (screen_width - output->dock_width) / 2;
-  int dock_top = screen_height - output->dock_height;
+  int dock_left = (screen_width - output->dock.layout.width) / 2;
+  int dock_top = screen_height - output->dock.layout.height;
   double wallpaper_scale = 1.0;
   double offset_x = 0.0, offset_y = 0.0;
   if (app.wallpaper.pixels != NULL) {
@@ -367,8 +351,8 @@ static void draw_frosted_backdrop(struct shell_output *output, uint32_t *pixels,
 
 static void draw_dock(struct shell_output *output) {
   int scale = output->scale > 0 ? output->scale : 1;
-  int width = output->dock_width * scale;
-  int height = output->dock_height * scale;
+  int width = output->dock.layout.width * scale;
+  int height = output->dock.layout.height * scale;
   struct shm_buffer *buffer = create_buffer(width, height);
   if (buffer == NULL)
     return;
@@ -377,9 +361,9 @@ static void draw_dock(struct shell_output *output) {
 
   int top = height / 10;
   int radius = height / 4;
-  int icon_size = output->dock_icon_size * scale;
+  int icon_size = output->dock.layout.icon_size * scale;
   int icon_x = (width - icon_size) / 2;
-  int content_padding = output->dock_padding * scale;
+  int content_padding = output->dock.layout.padding * scale;
   int icon_y = top + content_padding;
   int icon_inset = clamp_int(icon_size / 16, 2 * scale, 4 * scale);
   int mark = clamp_int(icon_size / 24, scale, 3 * scale);
@@ -417,9 +401,9 @@ static void draw_dock(struct shell_output *output) {
             icon_y + icon_size * 3 / 5, icon_size / 4, mark, 0xfff4f6f8);
   rounded_rect(pixels, width, height, indicator_x, indicator_y, indicator_w,
                indicator_h, indicator_h / 2, 0xff2a2b30);
-  wl_surface_attach(output->dock, buffer->buffer, 0, 0);
-  wl_surface_damage_buffer(output->dock, 0, 0, width, height);
-  wl_surface_commit(output->dock);
+  wl_surface_attach(output->dock.surface, buffer->buffer, 0, 0);
+  wl_surface_damage_buffer(output->dock.surface, 0, 0, width, height);
+  wl_surface_commit(output->dock.surface);
 }
 
 static void background_configure(void *data,
@@ -436,18 +420,6 @@ static void background_configure(void *data,
   }
 }
 
-static void dock_configure(void *data, struct zwlr_layer_surface_v1 *layer,
-                           uint32_t serial, uint32_t width, uint32_t height) {
-  (void)width;
-  (void)height;
-  struct shell_output *output = data;
-  zwlr_layer_surface_v1_ack_configure(layer, serial);
-  if (!output->dock_configured) {
-    output->dock_configured = true;
-    draw_dock(output);
-  }
-}
-
 static void layer_closed(void *data, struct zwlr_layer_surface_v1 *layer) {
   (void)data;
   (void)layer;
@@ -459,10 +431,12 @@ static const struct zwlr_layer_surface_v1_listener background_listener = {
     .closed = layer_closed,
 };
 
-static const struct zwlr_layer_surface_v1_listener dock_listener = {
-    .configure = dock_configure,
-    .closed = layer_closed,
-};
+static void render_dock(void *data) { draw_dock(data); }
+
+static void dock_closed(void *data) {
+  (void)data;
+  app.running = false;
+}
 
 static void create_output_surfaces(struct shell_output *output) {
   if (output->background != NULL || app.layer_shell == NULL ||
@@ -482,23 +456,13 @@ static void create_output_surfaces(struct shell_output *output) {
                                      &background_listener, output);
   wl_surface_commit(output->background);
 
-  output->dock = wl_compositor_create_surface(app.compositor);
-  wl_surface_set_user_data(output->dock, output);
-  output->dock_layer = zwlr_layer_shell_v1_get_layer_surface(
-      app.layer_shell, output->dock, output->output,
-      ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY, "desktop-dock");
-  update_dock_dimensions(output);
-  wl_surface_set_buffer_scale(output->dock,
-                              output->scale > 0 ? output->scale : 1);
-  zwlr_layer_surface_v1_set_size(output->dock_layer, output->dock_width,
-                                 output->dock_height);
-  zwlr_layer_surface_v1_set_anchor(output->dock_layer,
-                                   ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM);
-  zwlr_layer_surface_v1_set_margin(output->dock_layer, 0, 0, 0, 0);
-  zwlr_layer_surface_v1_set_exclusive_zone(output->dock_layer, 0);
-  zwlr_layer_surface_v1_add_listener(output->dock_layer, &dock_listener,
-                                     output);
-  wl_surface_commit(output->dock);
+  int scale = output->scale > 0 ? output->scale : 1;
+  int width = output->mode_width > 0 ? output->mode_width / scale : 1280;
+  int height = output->mode_height > 0 ? output->mode_height / scale : 720;
+  if (!os_dock_create(&output->dock, app.compositor, app.layer_shell,
+                      output->output, width, height, scale, render_dock,
+                      dock_closed, output))
+    app.running = false;
 }
 
 static void output_geometry(void *data, struct wl_output *output, int32_t x,
@@ -606,7 +570,7 @@ static void pointer_button(void *data, struct wl_pointer *pointer,
   if (button != BTN_LEFT || state != WL_POINTER_BUTTON_STATE_PRESSED)
     return;
   for (int i = 0; i < app.output_count; i++) {
-    if (app.pointer_surface != app.outputs[i].dock)
+    if (!os_dock_owns_surface(&app.outputs[i].dock, app.pointer_surface))
       continue;
     spawn_terminal(false);
     break;
@@ -687,7 +651,7 @@ static const struct wl_registry_listener registry_listener = {
     .global_remove = registry_remove,
 };
 
-int main(int argc, char **argv) {
+int os_desktop_shell_run(int argc, char **argv) {
   (void)argc;
   (void)argv;
   const char *wallpaper = getenv("TINYWL_WALLPAPER");
@@ -717,6 +681,8 @@ int main(int argc, char **argv) {
   wl_display_flush(app.display);
   while (app.running && wl_display_dispatch(app.display) >= 0) {
   }
+  for (int i = 0; i < app.output_count; ++i)
+    os_dock_destroy(&app.outputs[i].dock);
   free(app.wallpaper.pixels);
   wl_display_disconnect(app.display);
   return 0;

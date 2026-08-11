@@ -170,6 +170,7 @@ static struct test_entry tests[] = {
     {"accept_no_timeout", "/test/test_accept_no_timeout.elf"},
     {"pty", "/test/pty.elf"},
     {"terminal_sgr", "/test/test_terminal_sgr.elf"},
+    {"compositor_contracts", "/test/test_compositor_contracts.elf"},
     {"clang_compile", "/usr/bin/clang"},
     {"clang_link", "/usr/bin/clang"},
 };

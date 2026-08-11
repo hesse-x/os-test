@@ -3,7 +3,7 @@
  *
  * SPDX-License-Identifier: MIT
  */
-#include "genie.h"
+#include "legacy_genie.h"
 
 #include <math.h>
 #include <stdlib.h>

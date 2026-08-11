@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="os_effect_v1">
+  <copyright>Copyright (c) 2026 hesse. SPDX-License-Identifier: MIT</copyright>
+  <interface name="os_effect_manager_v1" version="1">
+    <description summary="trusted system surface effects">
+      This global is reserved for the compositor's trusted WAYLAND_SOCKET
+      client. Phase 1 defines the wire contract but does not advertise it.
+    </description>
+    <request name="destroy" type="destructor"/>
+    <request name="get_surface_effect">
+      <arg name="id" type="new_id" interface="os_surface_effect_v1"/>
+      <arg name="surface" type="object" interface="wl_surface"/>
+    </request>
+  </interface>
+  <interface name="os_surface_effect_v1" version="1">
+    <enum name="error">
+      <entry name="invalid_region" value="0" summary="invalid effect region"/>
+      <entry name="budget" value="1" summary="effect exceeds compositor budget"/>
+      <entry name="unauthorized" value="2" summary="client is not trusted"/>
+    </enum>
+    <request name="destroy" type="destructor"/>
+    <request name="set_blur">
+      <arg name="x" type="int"/><arg name="y" type="int"/>
+      <arg name="width" type="int"/><arg name="height" type="int"/>
+      <arg name="radius" type="uint"/>
+    </request>
+    <request name="unset_blur"/>
+  </interface>
+</protocol>

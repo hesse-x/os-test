@@ -4,12 +4,13 @@
 
 # user/compositor/ — Wayland compositor, desktop shell and Vulkan terminal
 #
-# tinywl.c is migrated from the host-side reference compositor (wlroots scene
-# API, layer-shell, SSD decorations). It links the Meson-built libwlroots
+# core/server.c contains the migrated wlroots control plane (scene API,
+# layer-shell and SSD decorations); app/compositor_main.c is assembly only.
+# The target links the Meson-built libwlroots
 # staged at build/libwlroots-0.20.so, so it is EXCLUDE_FROM_ALL and built by
 # build.sh after `meson install` (same pattern as test_pixman_smoke).
 #
-# wallpaper.c owns both the layer-shell wallpaper and Dock surfaces.
+# desktop_shell composes independent wallpaper and Dock modules.
 
 # ===== libpng (third_party/libpng) — build_script/third_party/libpng/libpng.cmake =====
 # Shared `png.so` rules. include() runs after zlib.cmake (parent scope provides
@@ -72,11 +73,13 @@ add_custom_command(
 # ${CMAKE_BINARY_DIR} (generated wayland-client-protocol.h, pnglibconf.h and
 # wlr-layer-shell-client-protocol.h).
 add_user_dyn_elf(desktop_shell C
-    SOURCES wallpaper.c
+    SOURCES app/desktop_shell_main.c dock/desktop_shell.c
+        dock/dock.c dock/dock_layout.c
         ${CMAKE_BINARY_DIR}/wlr-layer-shell-protocol.c
         ${CMAKE_BINARY_DIR}/xdg-shell-protocol.c
     LINK_LIBS png z wayland-client c
     INCLUDE_DIRS
+        ${CMAKE_CURRENT_SOURCE_DIR}
         ${CMAKE_SOURCE_DIR}/third_party/wayland/src
         ${CMAKE_SOURCE_DIR}/third_party/libpng
         ${CMAKE_BINARY_DIR}
@@ -194,7 +197,7 @@ endif()
 # are NOT installed — they only exist in the Meson build tree (protocol/).
 #
 # cursor.c is the only TU including user/cursor/cursors.h (os_cursors[] is
-# static there); tinywl.c only sees cursor.h. libpng (vendored png_so, OUTPUT
+# static there); core/server.c only sees cursor.h. libpng (vendored png_so, OUTPUT
 #_NAME png) decodes the cursor PNGs — same lib the desktop_shell wallpaper
 # client links — and needs its header dir + ${CMAKE_BINARY_DIR} (pnglibconf.h).
 set(WLROOTS_SYSROOT_DIR "${CMAKE_BINARY_DIR}/sysroot" CACHE PATH
@@ -203,11 +206,15 @@ set(WLROOTS_MESON_BUILD_DIR "${CMAKE_BINARY_DIR}/wlroots/wlroots" CACHE PATH
     "Meson build directory for wlroots")
 set(WLROOTS_SYSROOT_INCLUDE ${WLROOTS_SYSROOT_DIR}/usr/include)
 add_user_dyn_elf(tinywl C
-    SOURCES tinywl.c cursor.c effects/genie.c
+    SOURCES app/compositor_main.c core/server.c cursor.c
+        core/frame.c core/lifetime.c frame/frame_plan.c frame/scene_adapter.c
+        window/window_state.c window/style/theme.c
+        window/animation/legacy_genie.c
     LINK_LIBS wlroots-0.20 wayland-server input xkbcommon pixman-1 png z m c
     EXCLUDE_FROM_ALL
     DEFS WLR_USE_UNSTABLE
     INCLUDE_DIRS
+        ${CMAKE_CURRENT_SOURCE_DIR}
         ${WLROOTS_SYSROOT_INCLUDE}
         ${WLROOTS_SYSROOT_INCLUDE}/wlroots-0.20
         ${WLROOTS_SYSROOT_INCLUDE}/pixman-1
@@ -216,6 +223,19 @@ add_user_dyn_elf(tinywl C
         ${CMAKE_SOURCE_DIR}/third_party/libpng
         ${CMAKE_BINARY_DIR}
     IMAGE_PATH usr/bin/tinywl)
+
+if(TEST)
+    add_user_dyn_elf(test_compositor_contracts C
+        SOURCES tests/test_contracts.c
+            window/window_state.c window/style/theme.c core/lifetime.c
+            dock/dock_layout.c protocols/effect_state.c
+            protocols/trusted_client.c
+            frame/frame_plan.c frame/scene_adapter.c
+            renderer/mesh/mesh.c sdk/osgui.c
+        LINK_LIBS m c
+        FLAGS -UNDEBUG
+        IMAGE_PATH test/test_compositor_contracts.elf)
+endif()
 
 # Desktop assets are staged verbatim into the root filesystem.
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/wallpaper.png
