@@ -4,9 +4,11 @@
  * SPDX-License-Identifier: MIT
  */
 #define _GNU_SOURCE
+#include <errno.h>
 #include <fcntl.h>
 #include <linux/input-event-codes.h>
 #include <png.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -14,8 +16,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <time.h>
 #include <unistd.h>
 #include <wayland-client.h>
+
+#include <ft2build.h>
+#include FT_FREETYPE_H
 
 #include "os-effect-v1-client-protocol.h"
 #include "wlr-layer-shell-client-protocol.h"
@@ -24,6 +30,10 @@
 #include "dock/dock.h"
 
 #define MAX_OUTPUTS 8
+#define TOP_BAR_HEIGHT 28
+#define TOP_BAR_FONT_SIZE 14
+#define TOP_BAR_RIGHT_PADDING 18
+#define TOP_BAR_UTC_OFFSET_SECONDS (8 * 60 * 60)
 
 struct image {
   uint32_t *pixels;
@@ -36,6 +46,10 @@ struct shell_output {
   struct zwlr_layer_surface_v1 *background_layer;
   struct os_dock dock;
   struct os_surface_effect_v1 *effect;
+  struct wl_surface *top_bar;
+  struct zwlr_layer_surface_v1 *top_bar_layer;
+  struct os_surface_effect_v1 *top_bar_effect;
+  int top_bar_width;
   int background_width, background_height;
   int mode_width, mode_height;
   int scale;
@@ -63,6 +77,8 @@ struct shm_buffer {
 };
 
 static struct app app = {.running = true};
+static FT_Library font_library;
+static FT_Face top_bar_font;
 
 static bool load_png(const char *path, struct image *image) {
   FILE *fp = fopen(path, "rb");
@@ -241,6 +257,88 @@ static void fill_rect(uint32_t *pixels, int stride, int canvas_height, int x,
         pixels[py * stride + px] = color;
 }
 
+static void draw_text(uint32_t *pixels, int width, int height, int x,
+                      int baseline, const char *text, uint32_t color) {
+  for (const unsigned char *cursor = (const unsigned char *)text; *cursor;
+       ++cursor) {
+    if (FT_Load_Char(top_bar_font, *cursor,
+                     FT_LOAD_RENDER | FT_LOAD_TARGET_LIGHT))
+      continue;
+    FT_GlyphSlot glyph = top_bar_font->glyph;
+    FT_Bitmap *bitmap = &glyph->bitmap;
+    int glyph_x = x + glyph->bitmap_left;
+    int glyph_y = baseline - glyph->bitmap_top;
+    for (int row = 0; row < (int)bitmap->rows; ++row) {
+      int py = glyph_y + row;
+      if (py < 0 || py >= height)
+        continue;
+      const uint8_t *source = bitmap->buffer + row * bitmap->pitch;
+      for (int column = 0; column < (int)bitmap->width; ++column) {
+        int px = glyph_x + column;
+        if (px < 0 || px >= width || source[column] == 0)
+          continue;
+        int coverage = (source[column] * 16 + 127) / 255;
+        pixels[py * width + px] =
+            blend_coverage(pixels[py * width + px], color, coverage);
+      }
+    }
+    x += glyph->advance.x >> 6;
+  }
+}
+
+static int measure_text(const char *text) {
+  int width = 0;
+  for (const unsigned char *cursor = (const unsigned char *)text; *cursor;
+       ++cursor) {
+    if (!FT_Load_Char(top_bar_font, *cursor, FT_LOAD_TARGET_LIGHT))
+      width += top_bar_font->glyph->advance.x >> 6;
+  }
+  return width;
+}
+
+static void format_clock(char *text, size_t capacity) {
+  static const char *months[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                                 "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+  time_t now = time(NULL) + TOP_BAR_UTC_OFFSET_SECONDS;
+  struct tm local;
+  if (gmtime_r(&now, &local) == NULL) {
+    snprintf(text, capacity, "--- -- --:--");
+    return;
+  }
+  snprintf(text, capacity, "%s %d %02d:%02d", months[local.tm_mon],
+           local.tm_mday, local.tm_hour, local.tm_min);
+}
+
+static void draw_top_bar(struct shell_output *output) {
+  if (output->top_bar == NULL || output->top_bar_width <= 0)
+    return;
+  int scale = output->scale > 0 ? output->scale : 1;
+  int width = output->top_bar_width * scale;
+  int height = TOP_BAR_HEIGHT * scale;
+  struct shm_buffer *buffer = create_buffer(width, height);
+  if (buffer == NULL)
+    return;
+  memset(buffer->data, 0, buffer->size);
+  if (FT_Set_Pixel_Sizes(top_bar_font, 0, TOP_BAR_FONT_SIZE * scale)) {
+    wl_buffer_destroy(buffer->buffer);
+    munmap(buffer->data, buffer->size);
+    free(buffer);
+    return;
+  }
+  char clock_text[32];
+  format_clock(clock_text, sizeof(clock_text));
+  int text_width = measure_text(clock_text);
+  int ascent = top_bar_font->size->metrics.ascender >> 6;
+  int descent = top_bar_font->size->metrics.descender >> 6;
+  int baseline = (height - (ascent - descent)) / 2 + ascent;
+  draw_text(buffer->data, width, height,
+            width - TOP_BAR_RIGHT_PADDING * scale - text_width, baseline,
+            clock_text, 0xfff4f6f8);
+  wl_surface_attach(output->top_bar, buffer->buffer, 0, 0);
+  wl_surface_damage_buffer(output->top_bar, 0, 0, width, height);
+  wl_surface_commit(output->top_bar);
+}
+
 static void draw_wallpaper(struct shell_output *output, int width, int height) {
   struct shm_buffer *buffer = create_buffer(width, height);
   if (buffer == NULL)
@@ -347,6 +445,23 @@ static const struct zwlr_layer_surface_v1_listener background_listener = {
     .closed = layer_closed,
 };
 
+static void top_bar_configure(void *data, struct zwlr_layer_surface_v1 *layer,
+                              uint32_t serial, uint32_t width,
+                              uint32_t height) {
+  struct shell_output *output = data;
+  (void)height;
+  zwlr_layer_surface_v1_ack_configure(layer, serial);
+  if ((int)width != output->top_bar_width) {
+    output->top_bar_width = width;
+    draw_top_bar(output);
+  }
+}
+
+static const struct zwlr_layer_surface_v1_listener top_bar_listener = {
+    .configure = top_bar_configure,
+    .closed = layer_closed,
+};
+
 static void render_dock(void *data) { draw_dock(data); }
 
 static void dock_closed(void *data) {
@@ -375,6 +490,32 @@ static void create_output_surfaces(struct shell_output *output) {
   int scale = output->scale > 0 ? output->scale : 1;
   int width = output->mode_width > 0 ? output->mode_width / scale : 1280;
   int height = output->mode_height > 0 ? output->mode_height / scale : 720;
+  output->top_bar = wl_compositor_create_surface(app.compositor);
+  if (output->top_bar == NULL) {
+    app.running = false;
+    return;
+  }
+  output->top_bar_layer = zwlr_layer_shell_v1_get_layer_surface(
+      app.layer_shell, output->top_bar, output->output,
+      ZWLR_LAYER_SHELL_V1_LAYER_TOP, "desktop-top-bar");
+  if (output->top_bar_layer == NULL) {
+    wl_surface_destroy(output->top_bar);
+    output->top_bar = NULL;
+    app.running = false;
+    return;
+  }
+  wl_surface_set_buffer_scale(output->top_bar, scale);
+  zwlr_layer_surface_v1_set_size(output->top_bar_layer, 0, TOP_BAR_HEIGHT);
+  zwlr_layer_surface_v1_set_anchor(output->top_bar_layer,
+                                   ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP |
+                                       ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT |
+                                       ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT);
+  zwlr_layer_surface_v1_set_exclusive_zone(output->top_bar_layer,
+                                           TOP_BAR_HEIGHT);
+  zwlr_layer_surface_v1_add_listener(output->top_bar_layer, &top_bar_listener,
+                                     output);
+  wl_surface_commit(output->top_bar);
+
   if (!os_dock_create(&output->dock, app.compositor, app.layer_shell,
                       output->output, width, height, scale, render_dock,
                       dock_closed, output))
@@ -388,6 +529,14 @@ static void create_output_surfaces(struct shell_output *output) {
         output->dock.layout.height - backdrop_top, 12);
     os_surface_effect_v1_set_tint(output->effect, 0xffffff08);
     wl_surface_commit(output->dock.surface);
+  }
+  if (output->top_bar != NULL && app.effect_manager != NULL) {
+    output->top_bar_effect = os_effect_manager_v1_get_surface_effect(
+        app.effect_manager, output->top_bar);
+    os_surface_effect_v1_set_blur(output->top_bar_effect, 0, 0, width,
+                                  TOP_BAR_HEIGHT, 12);
+    os_surface_effect_v1_set_tint(output->top_bar_effect, 0xffffff08);
+    wl_surface_commit(output->top_bar);
   }
 }
 
@@ -589,6 +738,12 @@ int os_desktop_shell_run(int argc, char **argv) {
   if (!load_png(wallpaper, &app.wallpaper))
     fprintf(stderr, "desktop-shell: cannot load %s, using fallback\n",
             wallpaper);
+  if (FT_Init_FreeType(&font_library) ||
+      FT_New_Face(font_library, "/usr/share/fonts/NotoMono-Regular.ttf", 0,
+                  &top_bar_font)) {
+    fprintf(stderr, "desktop-shell: cannot load top bar font\n");
+    return 1;
+  }
   signal(SIGCHLD, SIG_IGN);
   app.display = wl_display_connect(NULL);
   if (app.display == NULL)
@@ -609,16 +764,51 @@ int os_desktop_shell_run(int argc, char **argv) {
   // terminals are ordinary interactive sessions, even in a TEST image.
   spawn_terminal(true);
   wl_display_flush(app.display);
-  while (app.running && wl_display_dispatch(app.display) >= 0) {
+  int display_fd = wl_display_get_fd(app.display);
+  while (app.running) {
+    while (wl_display_prepare_read(app.display) != 0)
+      wl_display_dispatch_pending(app.display);
+    if (wl_display_flush(app.display) < 0 && errno != EAGAIN) {
+      wl_display_cancel_read(app.display);
+      break;
+    }
+    struct pollfd ready = {.fd = display_fd, .events = POLLIN};
+    int result = poll(&ready, 1, 1000);
+    if (result > 0 && (ready.revents & POLLIN))
+      wl_display_read_events(app.display);
+    else
+      wl_display_cancel_read(app.display);
+    if (result < 0 && errno == EINTR)
+      continue;
+    if (result < 0 || (ready.revents & (POLLERR | POLLHUP)))
+      break;
+    wl_display_dispatch_pending(app.display);
+    static int previous_minute = -1;
+    time_t now = time(NULL);
+    struct tm local;
+    now += TOP_BAR_UTC_OFFSET_SECONDS;
+    if (gmtime_r(&now, &local) != NULL && local.tm_min != previous_minute) {
+      previous_minute = local.tm_min;
+      for (int i = 0; i < app.output_count; ++i)
+        draw_top_bar(&app.outputs[i]);
+    }
   }
   for (int i = 0; i < app.output_count; ++i) {
     if (app.outputs[i].effect != NULL)
       os_surface_effect_v1_destroy(app.outputs[i].effect);
+    if (app.outputs[i].top_bar_effect != NULL)
+      os_surface_effect_v1_destroy(app.outputs[i].top_bar_effect);
+    if (app.outputs[i].top_bar_layer != NULL)
+      zwlr_layer_surface_v1_destroy(app.outputs[i].top_bar_layer);
+    if (app.outputs[i].top_bar != NULL)
+      wl_surface_destroy(app.outputs[i].top_bar);
     os_dock_destroy(&app.outputs[i].dock);
   }
   if (app.effect_manager != NULL)
     os_effect_manager_v1_destroy(app.effect_manager);
   free(app.wallpaper.pixels);
+  FT_Done_Face(top_bar_font);
+  FT_Done_FreeType(font_library);
   wl_display_disconnect(app.display);
   return 0;
 }

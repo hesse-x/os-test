@@ -4,10 +4,7 @@
  * SPDX-License-Identifier: MIT
  *
  * Capability identifiers (aligned with Linux uapi/linux/capability.h numbers).
- * This OS has no capability bitmap today: capable() only checks euid==0, so
- * every cap is equivalent to root. Numbers align with Linux so libcap/capget
- * can be wired up later with zero friction; a real bitmap would dispatch per
- * cap. See doc/design/todo.md.
+ * Capability identifiers and the bounded XOS service-profile representation.
  */
 #ifndef _XOS_CAPABILITY_H
 #define _XOS_CAPABILITY_H
@@ -23,5 +20,15 @@
 #define CAP_SETUID 7 // setuid ladder (same as above)
 #define CAP_SYS_ADMIN 21 // sys_mount
 #define CAP_SYS_TIME 25  // sys_clock_settime
+
+#define XOS_CAP_LAST CAP_SYS_TIME
+#define XOS_CAP_VALID_MASK ((1ULL << (XOS_CAP_LAST + 1)) - 1ULL)
+#define XOS_CAP_BIT(cap) (1ULL << (cap))
+
+struct xos_cap_state {
+  unsigned long long permitted;
+  unsigned long long effective;
+  unsigned long long inheritable;
+};
 
 #endif /* _XOS_CAPABILITY_H */

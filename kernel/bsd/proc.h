@@ -63,6 +63,10 @@ typedef struct proc {
   uint32_t sgid;  // saved-set GID (Linux permission ladder)
   uint32_t umask; // file creation mask (default 0022)
 
+  uint64_t cap_permitted;
+  uint64_t cap_effective;
+  uint64_t cap_inheritable;
+
   // === clone exit signal (S19) ===
   // Low byte of clone flags. The thread group leader's exit notifies the parent
   // with this signal (do_exit step 7). 0 = do not notify (CLONE_THREAD forces
@@ -118,7 +122,7 @@ STATIC_ASSERT(
     offsetof(proc, signal) == 176,
     "proc.signal must be a POINTER to a separately-allocated signal_struct, "
     "not an inline struct — inlining shifts the offset of files");
-STATIC_ASSERT(sizeof(proc) == 552,
+STATIC_ASSERT(sizeof(proc) == 584,
               "proc size changed — update kernel/driver/bsd_types.h to match");
 #undef STATIC_ASSERT
 
@@ -154,9 +158,7 @@ xtask *process_create_elf(const uint8_t *elf_data, uint64_t elf_size);
 uint64_t build_kstack_from_tf(uint64_t k_stack_top, trapframe *parent_tf,
                               uint64_t new_rax);
 
-// capable(cap): single chokepoint for privilege checks (CAP_* in
-// xos/capability.h). Today equivalent to euid==0; future per-cap routing to a
-// capability bitmap changes only the implementation, not call sites.
+// capable(cap): effective bits bound which root privileges a service retains.
 bool capable(int cap);
 
 // sys_clone (Phase 3b)

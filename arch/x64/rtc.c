@@ -115,7 +115,7 @@ static uint64_t rtc_to_epoch(const struct rtc_time *t) {
     m += 12;
   }
   int days = 365 * y + y / 4 - y / 100 + y / 400 + (153 * (m - 3) + 2) / 5 + d -
-             719499;
+             719469;
   return (uint64_t)days * 86400ULL + (uint64_t)t->hour * 3600ULL +
          (uint64_t)t->min * 60ULL + (uint64_t)t->sec;
 }

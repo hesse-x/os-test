@@ -372,6 +372,7 @@ add_user_elf(netd C
         netd/main.c
         netd/net_config.c
         netd/diagnostics.c
+        netd/sntp_exchange.c
         netd/port/xos_netif.c
     LINK_LIBS lwip c
     INCLUDE_DIRS
@@ -380,9 +381,15 @@ add_user_elf(netd C
     IMAGE_PATH usr/bin/netd)
 add_user_elf(netctl C SOURCES netctl/main.c LINK_LIBS c
     IMAGE_PATH usr/bin/netctl)
+add_user_elf(timesync C
+    SOURCES timesync/main.c timesync/sntp.c timesync/config.c
+    LINK_LIBS c IMAGE_PATH usr/bin/timesync)
 configure_file(${CMAKE_SOURCE_DIR}/user/netd/netd.conf
                ${CMAKE_BINARY_DIR}/netd.conf COPYONLY)
 os_image_path(netd_config netd.conf etc/netd.conf PARTITION 2)
+configure_file(${CMAKE_SOURCE_DIR}/user/timesync/timesync.conf
+               ${CMAKE_BINARY_DIR}/timesync.conf COPYONLY)
+os_image_path(timesync_config timesync.conf etc/timesync.conf PARTITION 2)
 
 # ===== ld.so multi-dependency unit tests (ld.md §8 / plan_ld phase D) =====
 # Fully decoupled from drm: use stub .so topologies + a dynamic main ELF to

@@ -8,6 +8,7 @@
 #include "net_config.h"
 #include "netd_config.h"
 #include "port/xos_netif.h"
+#include "sntp_exchange.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -241,12 +242,33 @@ static void control_client(struct daemon *d) {
         }
       }
     }
+  } else if (!response.status && request.op == NETD_CTL_SNTP4_EXCHANGE) {
+    if (request.payload_len != sizeof(struct netd_sntp4_request))
+      response.status = NETD_CTL_BAD_REQUEST;
+    else if (d->state != STATE_ONLINE)
+      response.status = NETD_CTL_OFFLINE;
+    else {
+      struct netd_sntp4_result result;
+      if (netd_sntp4_exchange(&d->diagnostics, (const void *)payload, &result) <
+          0) {
+        response.status = errno == ETIMEDOUT  ? NETD_CTL_TIMEOUT
+                          : errno == EMSGSIZE ? NETD_CTL_BAD_RESPONSE
+                                              : NETD_CTL_LOCAL_ERROR;
+      } else {
+        size_t result_length =
+            offsetof(struct netd_sntp4_result, response) + result.response_len;
+        memcpy(payload, &result, result_length);
+        text_length = (unsigned)result_length;
+      }
+    }
   } else if (!response.status)
     response.status = NETD_CTL_BAD_REQUEST;
   response.header.payload_len = text_length;
   (void)write_exact(fd, &response, sizeof(response));
   if (text_length)
-    (void)write_exact(fd, text, text_length);
+    (void)write_exact(
+        fd, request.op == NETD_CTL_SNTP4_EXCHANGE ? payload : (void *)text,
+        text_length);
   close(fd);
 }
 

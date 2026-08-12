@@ -40,7 +40,10 @@ set(MUSL_SOCKET_SOURCES
     ${MUSL_DIR}/src/network/sendto.c
     ${MUSL_DIR}/src/network/recvfrom.c
     ${MUSL_DIR}/src/network/sendmsg.c
-    ${MUSL_DIR}/src/network/recvmsg.c)
+    ${MUSL_DIR}/src/network/recvmsg.c
+    ${MUSL_DIR}/src/network/htons.c
+    ${MUSL_DIR}/src/network/ntohl.c
+    ${MUSL_DIR}/src/network/inet_pton.c)
 
 add_library(musl_socket_objs OBJECT ${MUSL_SOCKET_SOURCES})
 target_include_directories(musl_socket_objs PRIVATE

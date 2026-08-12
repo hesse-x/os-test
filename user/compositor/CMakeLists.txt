@@ -79,27 +79,6 @@ add_custom_command(
     COMMENT "Generating desktop client protocol sources"
     VERBATIM)
 
-# wayland-client headers: third_party/wayland/src (wayland-client.h) +
-# ${CMAKE_BINARY_DIR} (generated wayland-client-protocol.h, pnglibconf.h and
-# wlr-layer-shell-client-protocol.h).
-add_user_dyn_elf(desktop_shell C
-    SOURCES app/desktop_shell_main.c dock/desktop_shell.c
-        dock/dock.c dock/dock_layout.c
-        ${CMAKE_BINARY_DIR}/wlr-layer-shell-protocol.c
-        ${CMAKE_BINARY_DIR}/xdg-shell-protocol.c
-        ${CMAKE_BINARY_DIR}/os-effect-v1-protocol.c
-    LINK_LIBS png z wayland-client c
-    INCLUDE_DIRS
-        ${CMAKE_CURRENT_SOURCE_DIR}
-        ${CMAKE_SOURCE_DIR}/third_party/wayland/src
-        ${CMAKE_SOURCE_DIR}/third_party/libpng
-        ${CMAKE_BINARY_DIR}
-    GEN_HEADERS
-        ${CMAKE_BINARY_DIR}/wlr-layer-shell-client-protocol.h
-        ${CMAKE_BINARY_DIR}/xdg-shell-client-protocol.h
-        ${CMAKE_BINARY_DIR}/os-effect-v1-client-protocol.h
-    IMAGE_PATH usr/bin/desktop-shell)
-
 # FreeType is kept deliberately small: the terminal only loads a bundled
 # TrueType font and only needs the sfnt driver and smooth renderer.
 set(FREETYPE_DIR ${CMAKE_SOURCE_DIR}/third_party/freetype)
@@ -124,6 +103,29 @@ add_third_party_lib(freetype STATIC C
         ${FREETYPE_DIR}/include
     INTERFACE_INCLUDE_DIRS ${FREETYPE_DIR}/include
     FLAGS "-DFT2_BUILD_LIBRARY")
+
+# wayland-client headers: third_party/wayland/src (wayland-client.h) +
+# ${CMAKE_BINARY_DIR} (generated wayland-client-protocol.h, pnglibconf.h and
+# wlr-layer-shell-client-protocol.h).
+add_user_dyn_elf(desktop_shell C
+    SOURCES app/desktop_shell_main.c dock/desktop_shell.c
+        dock/dock.c dock/dock_layout.c
+        ${CMAKE_BINARY_DIR}/wlr-layer-shell-protocol.c
+        ${CMAKE_BINARY_DIR}/xdg-shell-protocol.c
+        ${CMAKE_BINARY_DIR}/os-effect-v1-protocol.c
+    LINK_LIBS png z wayland-client c
+    STATIC_LIBS freetype
+    INCLUDE_DIRS
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/third_party/wayland/src
+        ${CMAKE_SOURCE_DIR}/third_party/libpng
+        ${FREETYPE_DIR}/include
+        ${CMAKE_BINARY_DIR}
+    GEN_HEADERS
+        ${CMAKE_BINARY_DIR}/wlr-layer-shell-client-protocol.h
+        ${CMAKE_BINARY_DIR}/xdg-shell-client-protocol.h
+        ${CMAKE_BINARY_DIR}/os-effect-v1-client-protocol.h
+    IMAGE_PATH usr/bin/desktop-shell)
 
 # Compile C-only protocol sources into a static archive so the terminal itself
 # can remain C++ without compiling generated C as C++.

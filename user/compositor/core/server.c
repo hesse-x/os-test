@@ -178,18 +178,25 @@ struct tinywl_layer_surface {
   uint64_t target_generation;
 };
 
-static bool is_output_dock(const struct tinywl_layer_surface *surface,
-                           const struct wlr_output *output) {
+static bool is_output_overlay(const struct tinywl_layer_surface *surface,
+                              const struct wlr_output *output) {
   const struct wlr_layer_surface_v1 *layer = surface->layer_surface;
   return layer->output == output && layer->namespace != NULL &&
-         strcmp(layer->namespace, "desktop-dock") == 0;
+         (strcmp(layer->namespace, "desktop-dock") == 0 ||
+          strcmp(layer->namespace, "desktop-top-bar") == 0);
 }
 
-static void set_output_dock_enabled(struct tinywl_output *output,
-                                    bool enabled) {
+static bool is_output_dock(const struct tinywl_layer_surface *surface,
+                           const struct wlr_output *output) {
+  return is_output_overlay(surface, output) &&
+         strcmp(surface->layer_surface->namespace, "desktop-dock") == 0;
+}
+
+static void set_output_overlays_enabled(struct tinywl_output *output,
+                                        bool enabled) {
   struct tinywl_layer_surface *surface;
   wl_list_for_each(surface, &output->server->layer_surfaces, link) {
-    if (is_output_dock(surface, output->wlr_output))
+    if (is_output_overlay(surface, output->wlr_output))
       wlr_scene_node_set_enabled(&surface->scene_layer->tree->node, enabled);
   }
 }
@@ -257,11 +264,11 @@ static bool render_system_overlays(struct wlr_render_pass *pass, void *data) {
   struct tinywl_layer_surface *surface;
   wl_list_for_each(surface, &output->server->layer_surfaces, link) {
     struct wlr_layer_surface_v1 *layer = surface->layer_surface;
-    if (!is_output_dock(surface, output->wlr_output) ||
+    if (!is_output_overlay(surface, output->wlr_output) ||
         layer->current.actual_width == 0 || layer->current.actual_height == 0)
       continue;
-    // The scene pass excludes the dock so backdrop blur never samples the
-    // dock's own icon. Re-enable it now for foreground rendering and input.
+    // The scene pass excludes shell overlays so blur never samples their own
+    // foreground. Re-enable each one now for explicit rendering and input.
     wlr_scene_node_set_enabled(&surface->scene_layer->tree->node, true);
     int x, y;
     if (!wlr_scene_node_coords(&surface->scene_layer->tree->node, &x, &y))
@@ -270,13 +277,14 @@ static bool render_system_overlays(struct wlr_render_pass *pass, void *data) {
     wlr_output_layout_get_box(output->server->output_layout, output->wlr_output,
                               &output_box);
     float scale = output->wlr_output->scale;
+    bool dock = is_output_dock(surface, output->wlr_output);
     struct os_vk_rounded_rect rect = {
         .x = (x - output_box.x) * scale,
         .y = (y - output_box.y) * scale,
         .width = layer->current.actual_width * scale,
         .height = layer->current.actual_height * scale,
-        .radius = 18.0f * scale,
-        .border_width = 1.0f * scale,
+        .radius = dock ? 18.0f * scale : 0.0f,
+        .border_width = dock ? 1.0f * scale : 0.0f,
         .fill = {0.0f, 0.0f, 0.0f, 0.0f},
         .border = {0.82f, 0.84f, 0.87f, 0.14f},
     };
@@ -310,6 +318,21 @@ static bool render_system_overlays(struct wlr_render_pass *pass, void *data) {
     }
     if (!os_vk_pass_add_rounded_rect(pass, &rect))
       return false;
+    if (!dock) {
+      struct wlr_texture *texture = wlr_surface_get_texture(layer->surface);
+      if (texture != NULL) {
+        wlr_render_pass_add_texture(
+            pass, &(struct wlr_render_texture_options){
+                      .texture = texture,
+                      .dst_box = {.x = (int)rect.x,
+                                  .y = (int)rect.y,
+                                  .width = (int)rect.width,
+                                  .height = (int)rect.height},
+                      .filter_mode = WLR_SCALE_FILTER_BILINEAR,
+                  });
+      }
+      continue;
+    }
     float dock_x = (x - output_box.x) * scale;
     float dock_y = (y - output_box.y) * scale;
     double pointer_x = output->server->cursor->x - x;
@@ -1349,10 +1372,10 @@ static void output_frame(struct wl_listener *listener, void *data) {
       wlr_scene_get_scene_output(scene, output->wlr_output);
 
   /* Render the scene if needed and commit the output */
-  set_output_dock_enabled(output, false);
+  set_output_overlays_enabled(output, false);
   os_core_commit_scene_frame(scene_output, output->server->renderer,
                              render_system_overlays, output);
-  set_output_dock_enabled(output, true);
+  set_output_overlays_enabled(output, true);
 
   struct timespec now;
   clock_gettime(CLOCK_MONOTONIC, &now);

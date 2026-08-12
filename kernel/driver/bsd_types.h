@@ -168,6 +168,9 @@ typedef struct proc {
   uint32_t egid;
   uint32_t sgid; // S19: saved-set GID (mirror kernel/bsd/proc.h)
   uint32_t umask;
+  uint64_t cap_permitted;
+  uint64_t cap_effective;
+  uint64_t cap_inheritable;
   uint8_t exit_signal; // S19: clone exit signal (mirror kernel/bsd/proc.h)
   uint8_t did_exec;    // M2-A: set at exec commit (mirror kernel/bsd/proc.h)
 
@@ -193,7 +196,7 @@ DRV_STATIC_ASSERT(offsetof(proc, files) == 184,
                   "driver proc.files offset drift");
 DRV_STATIC_ASSERT(offsetof(proc, signal) == 176,
                   "driver proc.signal must be POINTER not inline");
-DRV_STATIC_ASSERT(sizeof(proc) == 552, "driver proc size drift");
+DRV_STATIC_ASSERT(sizeof(proc) == 584, "driver proc size drift");
 #undef DRV_STATIC_ASSERT
 
 #endif /* KERNEL_BSD_PROC_H */

@@ -22,4 +22,8 @@
 #define PR_SET_VMA 0x53564d41
 #define PR_SET_VMA_ANON_NAME 0
 
+/* XOS service profiles: GET reads xos_cap_state; SET can only remove bits. */
+#define PR_XOS_CAP_GET 0x58504301
+#define PR_XOS_CAP_SET 0x58504302
+
 #endif /* COMMON_PRCTL_H */

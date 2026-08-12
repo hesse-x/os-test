@@ -4486,19 +4486,19 @@ int64_t sys_clock_settime(int64_t a1, int64_t a2, int64_t a3, int64_t a4,
   const struct timespec __user *ts_u =
       (const struct timespec __user *)(uintptr_t)a2;
 
-  // Only CLOCK_REALTIME / CLOCK_TAI may be set (Linux likewise); others -EPERM.
-  if (clk != CLOCK_REALTIME && clk != CLOCK_TAI)
-    return -EPERM;
-
-  // CAP_SYS_TIME via capable() 收口(今天等价 euid==0;Linux 要求 CAP_SYS_TIME)。
-  if (!capable(CAP_SYS_TIME))
+  if (clk == CLOCK_TAI)
+    return -EOPNOTSUPP;
+  if (clk != CLOCK_REALTIME)
     return -EPERM;
 
   struct timespec kts;
   if (copy_from_user(&kts, ts_u, sizeof(kts)))
     return -EFAULT;
-  if (kts.tv_nsec < 0 || kts.tv_nsec >= 1000000000L)
+  if (kts.tv_sec < 0 || kts.tv_nsec < 0 || kts.tv_nsec >= 1000000000L ||
+      (uint64_t)kts.tv_sec > UINT64_MAX / 1000000000ULL)
     return -EINVAL;
+  if (!capable(CAP_SYS_TIME))
+    return -EPERM;
 
   // Adjust the in-memory offset so the next CLOCK_REALTIME read returns new_ns
   // at this instant: wall_clock_boot_ns = new_ns - sched_clock().  CMOS is not
@@ -7045,6 +7045,31 @@ int64_t sys_prctl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   case PR_SET_VMA:
     // stub: PR_SET_VMA_ANON_NAME is a no-op (no /proc/self/maps support)
     return 0;
+  case PR_XOS_CAP_GET: {
+    struct xos_cap_state state = {.permitted = current_proc->cap_permitted,
+                                  .effective = current_proc->cap_effective,
+                                  .inheritable = current_proc->cap_inheritable};
+    return copy_to_user((void __user *)arg2, &state, sizeof(state))
+               ? (int64_t)-EFAULT
+               : 0;
+  }
+  case PR_XOS_CAP_SET: {
+    struct xos_cap_state state;
+    if (copy_from_user(&state, (const void __user *)arg2, sizeof(state)))
+      return (int64_t)-EFAULT;
+    if ((state.permitted | state.effective | state.inheritable) &
+            ~XOS_CAP_VALID_MASK ||
+        (state.permitted & ~current_proc->cap_permitted) ||
+        (state.effective & ~current_proc->cap_effective) ||
+        (state.inheritable & ~current_proc->cap_inheritable) ||
+        (state.effective & ~state.permitted) ||
+        (state.inheritable & ~state.permitted))
+      return (int64_t)-EPERM;
+    current_proc->cap_permitted = state.permitted;
+    current_proc->cap_effective = state.effective;
+    current_proc->cap_inheritable = state.inheritable;
+    return 0;
+  }
   default:
     return (int64_t)-EINVAL;
   }

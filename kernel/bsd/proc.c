@@ -149,6 +149,9 @@ proc *proc_create(void) {
   bp->egid = 0;
   bp->sgid = 0;
   bp->umask = 0022;
+  bp->cap_permitted = XOS_CAP_VALID_MASK;
+  bp->cap_effective = XOS_CAP_VALID_MASK;
+  bp->cap_inheritable = XOS_CAP_VALID_MASK;
   bp->exit_signal = SIGCHLD;
   // Working directory: default to root
   bp->cwd[0] = '/';
@@ -221,15 +224,9 @@ void proc_reap_idle(void) {
   // in sched_task_reap, but provides defense-in-depth)
 }
 
-/* capable(cap):特权检查单一收口。今天无 capability bitmap——所有 cap 等价
- * euid==0(root 放行)。(void)cap 预留分流钩子:未来加 cap_effective/inheritable/
- * permitted bitmap + secbits 时,按 cap 分流只改本函数,所有调用点零改动。
- * 各特权点(inode_permission/kill_permitted/sys_mount/clock_settime/chmod/chown)
- * 统一经此函数,而非各自判 euid==0。CAP_* 编号对齐 Linux(见 xos/capability.h)。
- */
 bool capable(int cap) {
-  (void)cap; /* 未来按 cap 分流到 bitmap/secbits */
-  return current_proc->euid == 0;
+  return current_proc->euid == 0 && cap >= 0 && cap <= XOS_CAP_LAST &&
+         (current_proc->cap_effective & XOS_CAP_BIT(cap)) != 0;
 }
 
 // ===================== files lifecycle =====================
@@ -1526,6 +1523,9 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   child_bp->egid = parent->proc->egid;
   child_bp->sgid = parent->proc->sgid;
   child_bp->umask = parent->proc->umask;
+  child_bp->cap_permitted = parent->proc->cap_permitted;
+  child_bp->cap_effective = parent->proc->cap_effective;
+  child_bp->cap_inheritable = parent->proc->cap_inheritable;
   child_bp->exit_signal = (uint8_t)exit_signal; // 0 for CLONE_THREAD (forced)
 
   // RLIMIT_NOFILE is inherited (POSIX: child gets a copy of the parent's

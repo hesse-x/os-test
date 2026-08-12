@@ -22,6 +22,7 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+#include <xos/capability.h>
 #include <xos/ipc.h>
 #include <xos/perf.h>
 #include <xos/syscall_ext.h>
@@ -36,6 +37,15 @@ static int spawn_process(const char *path, char *const argv[],
   if (pid < 0)
     return -1;
   if (pid == 0) {
+    uint64_t mask = 0;
+    if (!strcmp(path, "/usr/bin/timesync"))
+      mask = XOS_CAP_BIT(CAP_SYS_TIME);
+    else if (!strcmp(path, "/usr/bin/tinywl"))
+      mask = XOS_CAP_VALID_MASK;
+    struct xos_cap_state caps = {
+        .permitted = mask, .effective = mask, .inheritable = 0};
+    if (sys_prctl(PR_XOS_CAP_SET, (uint64_t)(uintptr_t)&caps, 0, 0, 0) < 0)
+      _exit(127);
     if (child_umask != (mode_t)-1)
       umask(child_umask);
     if (pass_fd >= 0 && pass_fd != child_fd && dup2(pass_fd, child_fd) < 0)
@@ -202,9 +212,14 @@ int main(int argc, char **argv, char **envp) {
     usleep(10 * 1000);
 
   unlink("/run/netd/ready");
+  mkdir("/run/timesync", 0755);
+  unlink("/run/timesync/ready");
+  unlink("/run/timesync/status");
   int netd_pid = spawn_service("/usr/bin/netd");
   unsigned netd_crashes = 0;
   time_t netd_started = monotonic_seconds();
+  int timesync_pid = spawn_service("/usr/bin/timesync");
+  unsigned timesync_failures = 0;
 
   // 2. Spawn evdev (keyboard event source + EVIOCG* ioctl query), wait for
   //    /dev/input/event0. Replaces the old kbd driver.
@@ -323,6 +338,24 @@ int main(int argc, char **argv, char **envp) {
       sleep(delay);
       netd_pid = spawn_service("/usr/bin/netd");
       netd_started = monotonic_seconds();
+      continue;
+    }
+
+    if (ret == timesync_pid) {
+      if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+        timesync_pid = -1;
+        continue;
+      }
+      if (timesync_failures >= 5) {
+        printf("init: timesync failed status=%d; giving up this boot\n",
+               status);
+        timesync_pid = -1;
+        continue;
+      }
+      unsigned delay = restart_delay(timesync_failures++);
+      printf("init: timesync failed status=%d; retry in %us\n", status, delay);
+      sleep(delay);
+      timesync_pid = spawn_service("/usr/bin/timesync");
       continue;
     }
 
