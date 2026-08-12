@@ -32,6 +32,8 @@ qemu-system-x86_64 \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
     -vga none \
     -device virtio-gpu-pci \
+    -netdev user,id=net0 \
+    -device virtio-net-pci,netdev=net0,disable-legacy=on,mac=52:54:00:12:34:56 \
     -display sdl \
     -m 2G -bios /usr/share/ovmf/OVMF.fd \
     -smp 2 \

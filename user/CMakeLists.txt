@@ -365,6 +365,25 @@ add_user_dyn_elf(udev_drm_smoke C
     IMAGE_PATH usr/bin/udev-drm-smoke)
 add_user_elf(syslogd C SOURCES syslogd.c LINK_LIBS c IMAGE_PATH usr/bin/syslogd)
 
+# M2 IPv4 service: lwIP remains a private static dependency of netd.
+include(${CMAKE_SOURCE_DIR}/build_script/third_party/lwip/lwip.cmake)
+add_user_elf(netd C
+    SOURCES
+        netd/main.c
+        netd/net_config.c
+        netd/diagnostics.c
+        netd/port/xos_netif.c
+    LINK_LIBS lwip c
+    INCLUDE_DIRS
+        ${CMAKE_SOURCE_DIR}/third_party/lwip/src/include
+        ${CMAKE_SOURCE_DIR}/user/netd/port/include
+    IMAGE_PATH usr/bin/netd)
+add_user_elf(netctl C SOURCES netctl/main.c LINK_LIBS c
+    IMAGE_PATH usr/bin/netctl)
+configure_file(${CMAKE_SOURCE_DIR}/user/netd/netd.conf
+               ${CMAKE_BINARY_DIR}/netd.conf COPYONLY)
+os_image_path(netd_config netd.conf etc/netd.conf PARTITION 2)
+
 # ===== ld.so multi-dependency unit tests (ld.md §8 / plan_ld phase D) =====
 # Fully decoupled from drm: use stub .so topologies + a dynamic main ELF to
 # cover the loading layer (recursive load / dedup / cycle detection).

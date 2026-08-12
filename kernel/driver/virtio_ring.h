@@ -10,6 +10,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#define VRING_MAX_SIZE 1024
+
 /* ===== split virtqueue ring sizes ===== */
 #define VRING_DESC_F_NEXT 0x01
 #define VRING_DESC_F_WRITE 0x02
@@ -58,6 +60,10 @@ struct virtqueue {
   uint16_t free_head;  /* index of next free desc */
   uint16_t free_cnt;   /* number of free descs */
   uint16_t *next_free; /* free chain: next_free[i] = next free desc after i */
+  uint8_t *desc_state;
+  uint16_t desc_pages;
+  uint16_t avail_pages;
+  uint16_t used_pages;
 
   /* producer/consumer indices */
   uint16_t avail_idx; /* next avail index to fill (shadow of avail->idx) */
@@ -74,6 +80,15 @@ struct virtqueue {
 
   /* MSI-X vector assigned */
   int msix_vector;
+
+  /* Set when a device completion violates queue ownership. */
+  bool broken;
+};
+
+enum vring_desc_state {
+  VRING_DESC_FREE = 0,
+  VRING_DESC_BUILDING,
+  VRING_DESC_AVAILABLE,
 };
 
 /* ===== API ===== */
@@ -90,7 +105,7 @@ void vring_destroy(struct virtqueue *vq);
 int vring_alloc_desc(struct virtqueue *vq);
 
 /* Free a descriptor (chain head) back to the free list. */
-void vring_free_desc(struct virtqueue *vq, int idx);
+int vring_free_desc(struct virtqueue *vq, int idx);
 
 /* Enqueue a buffer described by an array of (addr, len, flags) tuples.
    Returns the head desc index or -1 if no space. */
@@ -103,8 +118,11 @@ void vring_kick(struct virtqueue *vq);
 /* Process used ring: for each used element, call callback and free desc.
    Returns number of completed buffers. */
 int vring_poll_used(struct virtqueue *vq);
+int vring_poll_used_budget(struct virtqueue *vq, uint16_t budget);
 
 /* Check if the virtqueue has pending used entries to consume. */
 bool vring_has_used(struct virtqueue *vq);
+
+void virtio_ring_selftest(void);
 
 #endif /* KERNEL_DRIVER_VIRTIO_RING_H */

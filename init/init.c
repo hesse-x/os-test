@@ -20,6 +20,7 @@
 #include <sys/types.h>
 #include <sys/un.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 #include <xos/ipc.h>
 #include <xos/perf.h>
@@ -58,6 +59,16 @@ static int spawn_process(const char *path, char *const argv[],
 static int spawn_service(const char *path) {
   char *const argv[] = {(char *)path, NULL};
   return spawn_process(path, argv, NULL, -1, -1, (mode_t)-1);
+}
+
+static unsigned restart_delay(unsigned crashes) {
+  unsigned delay = 1u << (crashes > 5u ? 5u : crashes);
+  return delay > 30u ? 30u : delay;
+}
+
+static time_t monotonic_seconds(void) {
+  struct timespec now;
+  return clock_gettime(CLOCK_MONOTONIC, &now) == 0 ? now.tv_sec : 0;
 }
 
 // spawn_with_fd: fork+exec passes fd to the child as fd 3 (socket activation).
@@ -190,6 +201,11 @@ int main(int argc, char **argv, char **envp) {
   for (int i = 0; i < 200 && access("/run/syslogd.ready", F_OK) < 0; i++)
     usleep(10 * 1000);
 
+  unlink("/run/netd/ready");
+  int netd_pid = spawn_service("/usr/bin/netd");
+  unsigned netd_crashes = 0;
+  time_t netd_started = monotonic_seconds();
+
   // 2. Spawn evdev (keyboard event source + EVIOCG* ioctl query), wait for
   //    /dev/input/event0. Replaces the old kbd driver.
   printf("init: spawning evdev\n");
@@ -293,6 +309,20 @@ int main(int argc, char **argv, char **envp) {
       sleep(RESTART_SEC);
       unlink("/run/syslogd.ready");
       syslogd_pid = spawn_service("/usr/bin/syslogd");
+      continue;
+    }
+
+    if (ret == netd_pid) {
+      time_t now = monotonic_seconds();
+      if (now - netd_started >= 60)
+        netd_crashes = 0;
+      unlink("/run/netd/ready");
+      unlink("/run/netd/control.sock");
+      unsigned delay = restart_delay(netd_crashes++);
+      printf("init: netd exited status=%d; respawn in %us\n", status, delay);
+      sleep(delay);
+      netd_pid = spawn_service("/usr/bin/netd");
+      netd_started = monotonic_seconds();
       continue;
     }
 

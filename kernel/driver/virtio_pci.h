@@ -12,7 +12,8 @@
 
 /* ===== virtio PCI vendor/device IDs ===== */
 #define VIRTIO_PCI_VENDOR_ID 0x1AF4
-#define VIRTIO_PCI_DEVICE_ID 0x1050 /* transitional device id range base */
+#define VIRTIO_PCI_DEVICE_NET 0x1041
+#define VIRTIO_PCI_DEVICE_GPU 0x1050
 
 /* QEMU virtio-gpu-pci is a non-transitional device:
      vendor_id=0x1AF4, device_id=0x1050 (virtio-gpu non-transitional ID).
@@ -98,9 +99,11 @@ struct virtio_pci_dev {
   /* capability regions (mapped via BAR vaddr + offset) */
   struct virtio_pci_common_cfg __iomem *common;
   void __iomem *notify_base;
+  uint32_t notify_length;
   uint32_t notify_off_multiplier;
   uint8_t __iomem *isr;
   void __iomem *dev_cfg; /* device-specific config (virtio-gpu config) */
+  uint32_t dev_cfg_length;
 
   /* negotiated features */
   uint64_t features;
@@ -113,6 +116,7 @@ struct virtio_pci_dev {
 /* Initialize virtio-pci modern transport for given PCI device.
    Returns 0 on success, negative errno on failure. */
 int virtio_pci_init(struct virtio_pci_dev *vdev, struct pci_device *pdev);
+int virtio_pci_reset(struct virtio_pci_dev *vdev);
 
 /* Negotiate features (mask device features with want). Returns 0 on success. */
 int virtio_pci_negotiate_features(struct virtio_pci_dev *vdev, uint64_t want);
@@ -126,10 +130,11 @@ void virtio_pci_write_features(struct virtio_pci_dev *vdev, uint32_t select,
 uint8_t virtio_pci_read_isr(struct virtio_pci_dev *vdev);
 
 /* Notify (kick) a queue: write to notify_base + notify_off * multiplier */
-void virtio_pci_notify(struct virtio_pci_dev *vdev, uint16_t notify_off);
+int virtio_pci_notify(struct virtio_pci_dev *vdev, uint16_t queue_index,
+                      uint16_t notify_off);
 
 /* Config space access for device-specific config */
-void virtio_pci_read_dev_cfg(struct virtio_pci_dev *vdev, int offset, void *buf,
-                             int len);
+int virtio_pci_read_dev_cfg(struct virtio_pci_dev *vdev, uint32_t offset,
+                            void *buf, uint32_t len);
 
 #endif /* KERNEL_DRIVER_VIRTIO_PCI_H */

@@ -281,7 +281,7 @@ static int virtio_gpu_send_cmd(struct virtio_gpu_device *vgpu, void *cmd_buf,
       return -1;
     }
     vring_kick(&vgpu->ctrlq);
-    virtio_pci_notify(&vgpu->vpci, vgpu->ctrlq.notify_off);
+    virtio_pci_notify(&vgpu->vpci, vgpu->ctrlq.index, vgpu->ctrlq.notify_off);
     while (!vring_has_used(&vgpu->ctrlq)) {
       __asm__ volatile("pause" ::: "memory");
     }
@@ -315,7 +315,7 @@ static int virtio_gpu_send_cmd(struct virtio_gpu_device *vgpu, void *cmd_buf,
   spin_unlock(&cpu_locals[wait_cpu].scheduler_lock);
 
   vring_kick(&vgpu->ctrlq);
-  virtio_pci_notify(&vgpu->vpci, vgpu->ctrlq.notify_off);
+  virtio_pci_notify(&vgpu->vpci, vgpu->ctrlq.index, vgpu->ctrlq.notify_off);
 
   /* Release cmd_lock before sleeping; the ISR completes this exact context
      and wakes only its submitter. */
@@ -428,7 +428,7 @@ static int virtio_gpu_send_cmd_3d_async(struct virtio_gpu_device *vgpu,
     return -ENOMEM;
   }
   vring_kick(&vgpu->ctrlq);
-  virtio_pci_notify(&vgpu->vpci, vgpu->ctrlq.notify_off);
+  virtio_pci_notify(&vgpu->vpci, vgpu->ctrlq.index, vgpu->ctrlq.notify_off);
   spin_unlock_irqrestore(&vgpu->cmd_lock, cflags);
   return 0;
 }
@@ -3242,7 +3242,12 @@ static int virtio_gpu_probe(pci_device *pdev, const struct pci_device_id *id) {
   __atomic_store_n(&backend->accepting_commands, true, __ATOMIC_RELEASE);
 
   /* Read device config (num_scanouts) */
-  virtio_pci_read_dev_cfg(&vgpu->vpci, 0, &vgpu->config, sizeof(vgpu->config));
+  rc = virtio_pci_read_dev_cfg(&vgpu->vpci, 0, &vgpu->config,
+                               sizeof(vgpu->config));
+  if (rc < 0) {
+    stage = "device-config-read";
+    goto fail;
+  }
   printk(LOG_INFO, "virtio_gpu: num_scanouts=%u num_capsets=%u\n",
          vgpu->config.num_scanouts, vgpu->config.num_capsets);
 
@@ -3535,7 +3540,7 @@ static void virtio_gpu_remove(pci_device *pdev) {
 
 static const struct pci_device_id virtio_gpu_pci_ids[] = {
     {.vendor = VIRTIO_PCI_VENDOR_ID,
-     .device = VIRTIO_PCI_DEVICE_ID,
+     .device = VIRTIO_PCI_DEVICE_GPU,
      .subsystem_vendor = PCI_ANY_ID,
      .subsystem_device = PCI_ANY_ID},
     {0},

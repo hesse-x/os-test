@@ -14,6 +14,8 @@
 #include "kernel/driver/pci.h"
 #include "kernel/driver/udmabuf.h"
 #include "kernel/driver/virtio_gpu.h"
+#include "kernel/driver/virtio_net.h"
+#include "kernel/driver/virtio_ring.h"
 #include "kernel/driver/xhci.h"
 #include "kernel/xcore/log.h"
 #include "kernel/xcore/perf/phase.h"
@@ -46,6 +48,9 @@ void driver_init(void) {
   if (virtio_gpu_register_driver() != 0)
     printk(LOG_ERROR,
            "driver_init: virtio-gpu PCI driver registration failed\n");
+  if (virtio_net_register_driver() != 0)
+    printk(LOG_ERROR,
+           "driver_init: virtio-net PCI driver registration failed\n");
   if (i915_probe_register() != 0)
     printk(LOG_ERROR, "driver_init: i915 probe-only registration failed\n");
   driver_register(&serial_driver);
@@ -53,6 +58,7 @@ void driver_init(void) {
   // PCI class/vendor auto-match: calls init() for matched drivers
   driver_pci_match();
   pci_lifecycle_selftest();
+  virtio_ring_selftest();
   i915_probe_selftest();
   drm_mock_register_test_device();
 

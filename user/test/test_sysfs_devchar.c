@@ -28,6 +28,27 @@ static void assert_file_contents(const char *path, const char *expected) {
   close(fd);
 }
 
+static void assert_pci_slot_uevent(const char *path) {
+  char buf[64] = {0};
+  unsigned int domain, bus, device, function;
+  int consumed = 0;
+  int fd = open(path, O_RDONLY);
+  TEST_ASSERT_TRUE_MESSAGE(fd >= 0, path);
+  ssize_t n = read(fd, buf, sizeof(buf) - 1);
+  close(fd);
+  TEST_ASSERT_TRUE_MESSAGE(n > 0, path);
+  buf[n] = '\0';
+
+  TEST_ASSERT_EQUAL_INT_MESSAGE(4,
+                                sscanf(buf, "PCI_SLOT_NAME=%x:%x:%x.%x\n%n",
+                                       &domain, &bus, &device, &function,
+                                       &consumed),
+                                path);
+  TEST_ASSERT_EQUAL_INT_MESSAGE(n, consumed, path);
+  TEST_ASSERT_TRUE_MESSAGE(
+      domain <= 0xffff && bus <= 0xff && device <= 0x1f && function <= 7, path);
+}
+
 static void assert_devchar_node(const char *node, const char *devname) {
   char path[128];
   char buf[256] = {0};
@@ -86,7 +107,7 @@ static void assert_devchar_node(const char *node, const char *devname) {
   assert_file_contents(path, "0x1100\n");
 
   snprintf(path, sizeof(path), "/sys/dev/char/%s/device/uevent", node);
-  assert_file_contents(path, "PCI_SLOT_NAME=0000:00:03.0\n");
+  assert_pci_slot_uevent(path);
 }
 
 static void test_card0_reverse_topology(void) {

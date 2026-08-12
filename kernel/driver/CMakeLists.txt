@@ -5,7 +5,7 @@
 add_kernel_object(driver_obj
     SOURCES init.c registry.c dma_buf.c dma_resv.c udmabuf.c
             ahci.c xhci.c pci.c serial.c blk_dev.c
-            virtio_pci.c virtio_ring.c virtio_gpu.c
+            virtio_pci.c virtio_ring.c virtio_gpu.c virtio_net.c
             intel/i915_probe.c intel/i915_uncore.c intel/i915_stolen.c
             intel/i915_irq.c
             drm/drm_core.c drm/drm_fence.c drm/drm_mock.c
