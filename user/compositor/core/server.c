@@ -46,6 +46,7 @@
 #include "core/lifetime.h"
 #include "core/server.h"
 #include "cursor.h"
+#include "dock/dock_layout.h"
 #include "protocols/effect_server.h"
 #include "protocols/effect_state.h"
 #include "renderer/vulkan/os_vk_renderer.h"
@@ -214,11 +215,9 @@ static bool render_terminal_dock_icon(struct wlr_render_pass *pass, float x,
   const float screen[] = {0.009f, 0.010f, 0.014f, 1.0f};
   const float glyph[] = {0.91f, 0.93f, 0.95f, 1.0f};
   const float indicator[] = {0.023f, 0.025f, 0.030f, 1.0f};
-  float icon = width * 8.0f / 13.0f;
-  float padding = (width - icon) * 0.5f;
-  float top = height / 10.0f;
-  float icon_x = x + padding;
-  float icon_y = y + top + padding;
+  float icon = width;
+  float icon_x = x;
+  float icon_y = y;
   float inset = fmaxf(icon / 16.0f, 2.0f * scale);
   float mark = fmaxf(icon / 24.0f, scale);
   if (!add_dock_rect(pass, icon_x, icon_y, icon, icon, icon / 4.0f, shell) ||
@@ -313,10 +312,31 @@ static bool render_system_overlays(struct wlr_render_pass *pass, void *data) {
       return false;
     float dock_x = (x - output_box.x) * scale;
     float dock_y = (y - output_box.y) * scale;
-    if (!render_terminal_dock_icon(pass, dock_x, dock_y,
-                                   layer->current.actual_width * scale,
-                                   layer->current.actual_height * scale, scale))
+    double pointer_x = output->server->cursor->x - x;
+    bool pointer_active =
+        output->server->cursor->x >= x &&
+        output->server->cursor->x < x + layer->current.actual_width &&
+        output->server->cursor->y >= y &&
+        output->server->cursor->y < y + layer->current.actual_height;
+    struct os_dock_layout layout;
+    if (!os_dock_layout_init(&layout, output_box.width, output_box.height,
+                             (int32_t)scale))
       return false;
+    double logical_width = layer->current.actual_width;
+    double slot = layout.icon_size + 2.0 * layout.padding;
+    size_t count = (size_t)fmax(1.0, round(logical_width / slot));
+    if (count > OS_DOCK_MAX_TARGETS)
+      count = OS_DOCK_MAX_TARGETS;
+    struct os_dock_icon_geometry icons[OS_DOCK_MAX_TARGETS];
+    os_dock_magnify_icons(logical_width, layer->current.actual_height,
+                          layout.icon_size, layout.padding, count, pointer_x,
+                          pointer_active, icons);
+    for (size_t i = 0; i < count; ++i) {
+      if (!render_terminal_dock_icon(
+              pass, dock_x + icons[i].x * scale, dock_y + icons[i].y * scale,
+              icons[i].size * scale, icons[i].size * scale, scale))
+        return false;
+    }
   }
   return true;
 }

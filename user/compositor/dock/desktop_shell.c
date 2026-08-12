@@ -285,37 +285,38 @@ static void draw_dock(struct shell_output *output) {
   uint32_t *pixels = buffer->data;
   memset(pixels, 0, buffer->size);
 
-  int top = height / 10;
-  int icon_size = output->dock.layout.icon_size * scale;
-  int icon_x = (width - icon_size) / 2;
-  int content_padding = output->dock.layout.padding * scale;
-  int icon_y = top + content_padding;
-  int icon_inset = clamp_int(icon_size / 16, 2 * scale, 4 * scale);
-  int mark = clamp_int(icon_size / 24, scale, 3 * scale);
-  int indicator_h = clamp_int(height / 24, 2 * scale, 3 * scale);
-  int indicator_w = height / 9;
-  int indicator_x = (width - indicator_w) / 2;
-  int indicator_y = height - indicator_h - 2 * scale;
-
-  rounded_rect(pixels, width, height, icon_x, icon_y, icon_size, icon_size,
-               icon_size / 4, 0xffd9dce2);
-  rounded_rect(pixels, width, height, icon_x + icon_inset, icon_y + icon_inset,
-               icon_size - 2 * icon_inset, icon_size - 2 * icon_inset,
-               icon_size / 5, 0xff17191f);
-
-  int glyph_x = icon_x + icon_size / 4;
-  int glyph_y = icon_y + icon_size / 3;
-  int glyph_steps = icon_size / 6;
-  for (int i = 0; i < glyph_steps; i++) {
-    fill_rect(pixels, width, height, glyph_x + i * mark, glyph_y + i * mark / 2,
-              mark, mark, 0xfff4f6f8);
-    fill_rect(pixels, width, height, glyph_x + i * mark,
-              glyph_y + icon_size / 5 - i * mark / 2, mark, mark, 0xfff4f6f8);
+  size_t count = output->dock.layout.target_count == 0
+                     ? 1
+                     : output->dock.layout.target_count;
+  struct os_dock_icon_geometry icons[OS_DOCK_MAX_TARGETS];
+  os_dock_layout_icons(&output->dock.layout, 0, false, icons);
+  for (size_t index = 0; index < count; ++index) {
+    int icon_size = (int)(icons[index].size * scale + 0.5);
+    int icon_x = (int)(icons[index].x * scale + 0.5);
+    int icon_y = (int)(icons[index].y * scale + 0.5);
+    int icon_inset = clamp_int(icon_size / 16, 2 * scale, 4 * scale);
+    int mark = clamp_int(icon_size / 24, scale, 3 * scale);
+    rounded_rect(pixels, width, height, icon_x, icon_y, icon_size, icon_size,
+                 icon_size / 4, 0xffd9dce2);
+    rounded_rect(pixels, width, height, icon_x + icon_inset,
+                 icon_y + icon_inset, icon_size - 2 * icon_inset,
+                 icon_size - 2 * icon_inset, icon_size / 5, 0xff17191f);
+    int glyph_x = icon_x + icon_size / 4;
+    int glyph_y = icon_y + icon_size / 3;
+    for (int i = 0; i < icon_size / 6; i++) {
+      fill_rect(pixels, width, height, glyph_x + i * mark,
+                glyph_y + i * mark / 2, mark, mark, 0xfff4f6f8);
+      fill_rect(pixels, width, height, glyph_x + i * mark,
+                glyph_y + icon_size / 5 - i * mark / 2, mark, mark, 0xfff4f6f8);
+    }
+    fill_rect(pixels, width, height, icon_x + icon_size / 2,
+              icon_y + icon_size * 3 / 5, icon_size / 4, mark, 0xfff4f6f8);
+    int indicator_h = clamp_int(height / 24, 2 * scale, 3 * scale);
+    int indicator_w = height / 9;
+    rounded_rect(pixels, width, height, icon_x + (icon_size - indicator_w) / 2,
+                 height - indicator_h - 2 * scale, indicator_w, indicator_h,
+                 indicator_h / 2, 0xff2a2b30);
   }
-  fill_rect(pixels, width, height, icon_x + icon_size / 2,
-            icon_y + icon_size * 3 / 5, icon_size / 4, mark, 0xfff4f6f8);
-  rounded_rect(pixels, width, height, indicator_x, indicator_y, indicator_w,
-               indicator_h, indicator_h / 2, 0xff2a2b30);
   wl_surface_attach(output->dock.surface, buffer->buffer, 0, 0);
   wl_surface_damage_buffer(output->dock.surface, 0, 0, width, height);
   wl_surface_commit(output->dock.surface);

@@ -3,6 +3,7 @@
  */
 #include "dock_layout.h"
 
+#include <math.h>
 #include <string.h>
 
 #define DOCK_MIN_HEIGHT 48
@@ -72,11 +73,11 @@ bool os_dock_layout_target(const struct os_dock_layout *layout,
   } else if (target_id != 1) {
     return false;
   }
-  int32_t slot = layout->width / (int32_t)count;
+  int32_t slot = layout->icon_size + 2 * layout->padding;
   out->dock_target_id = target_id;
-  out->geometry.x = (layout->output_width - layout->width) / 2.0 +
+  out->geometry.x = (layout->output_width - slot * (double)count) / 2.0 +
                     index * slot + layout->padding;
-  out->geometry.y = layout->output_height - layout->height + layout->padding;
+  out->geometry.y = layout->output_height - layout->padding - layout->icon_size;
   out->geometry.width = layout->icon_size;
   out->geometry.height = layout->icon_size;
   out->geometry.scale = layout->scale;
@@ -92,9 +93,53 @@ bool os_dock_layout_hit_test(const struct os_dock_layout *layout, double x,
       x >= layout->width || y >= layout->height)
     return false;
   size_t count = layout->target_count == 0 ? 1 : layout->target_count;
-  size_t index = (size_t)(x / (layout->width / (double)count));
+  double slot = layout->icon_size + 2.0 * layout->padding;
+  double start = (layout->width - slot * count) * 0.5;
+  if (x < start || x >= start + slot * count)
+    return false;
+  size_t index = (size_t)((x - start) / slot);
   if (index >= count)
     return false;
   *target_id = layout->target_count == 0 ? 1 : layout->target_ids[index];
   return true;
+}
+
+void os_dock_magnify_icons(double width, double height, double icon_size,
+                           double padding, size_t count, double pointer_x,
+                           bool pointer_active,
+                           struct os_dock_icon_geometry *icons) {
+  if (icons == NULL || count == 0)
+    return;
+
+  double slot = icon_size + 2.0 * padding;
+  double occupied = 0.0;
+  for (size_t i = 0; i < count; ++i) {
+    double center = (width - slot * count) * 0.5 + (i + 0.5) * slot;
+    double distance = fabs(pointer_x - center) / slot;
+    double influence = pointer_active ? fmax(0.0, 1.0 - distance / 2.0) : 0.0;
+    // Smoothstep gives the hovered icon a soft magnetic falloff across peers.
+    influence = influence * influence * (3.0 - 2.0 * influence);
+    icons[i].size = icon_size * (1.0 + (OS_DOCK_HOVER_SCALE - 1.0) * influence);
+    occupied += icons[i].size + 2.0 * padding;
+  }
+
+  double cursor = (width - occupied) * 0.5;
+  double bottom = height - padding;
+  for (size_t i = 0; i < count; ++i) {
+    cursor += padding;
+    icons[i].x = cursor;
+    icons[i].y = bottom - icons[i].size;
+    cursor += icons[i].size + padding;
+  }
+}
+
+void os_dock_layout_icons(const struct os_dock_layout *layout, double pointer_x,
+                          bool pointer_active,
+                          struct os_dock_icon_geometry *icons) {
+  if (layout == NULL)
+    return;
+  size_t count = layout->target_count == 0 ? 1 : layout->target_count;
+  os_dock_magnify_icons(layout->width, layout->height, layout->icon_size,
+                        layout->padding, count, pointer_x, pointer_active,
+                        icons);
 }

@@ -239,7 +239,7 @@ foreach(_shader common.vert mesh.vert texture.frag quad.frag output.frag sdf.fra
 endforeach()
 
 add_user_dyn_elf(tinywl C
-    SOURCES app/compositor_main.c core/server.c cursor.c
+    SOURCES app/compositor_main.c core/server.c cursor.c dock/dock_layout.c
         core/frame.c core/lifetime.c frame/frame_plan.c frame/scene_adapter.c
         renderer/vulkan/os_vk_renderer.c renderer/vulkan/prime_probe.c
         ${OS_VK_UPSTREAM_DIR}/pass.c

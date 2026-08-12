@@ -69,6 +69,10 @@ static void test_dock_layout(void) {
   assert(os_dock_layout_init(&layout, 1280, 720, 2));
   const uint64_t ids[] = {11, 12, 13};
   assert(os_dock_layout_set_targets(&layout, ids, 3));
+  assert(layout.width ==
+         (layout.icon_size + 2 * layout.padding) * (int)layout.target_count);
+  assert(layout.height ==
+         ((layout.icon_size + 2 * layout.padding) * 10 + 8) / 9);
   struct os_dock_target target;
   assert(os_dock_layout_target(&layout, 12, &target));
   assert(target.dock_target_id == 12 && target.geometry.scale == 2);
@@ -77,6 +81,14 @@ static void test_dock_layout(void) {
   assert(os_dock_layout_hit_test(&layout, layout.width / 2.0,
                                  layout.height / 2.0, &hit));
   assert(hit == 12);
+  struct os_dock_icon_geometry idle[3], hovered[3];
+  os_dock_layout_icons(&layout, 0, false, idle);
+  os_dock_layout_icons(&layout, layout.width / 2.0, true, hovered);
+  assert(hovered[1].size > idle[1].size);
+  assert(fabs(hovered[1].size - idle[1].size * OS_DOCK_HOVER_SCALE) < 0.001);
+  assert(hovered[0].x < idle[0].x);
+  assert(hovered[2].x > idle[2].x);
+  assert(hovered[0].size > idle[0].size && hovered[0].size < hovered[1].size);
   const uint64_t duplicate[] = {4, 4};
   assert(!os_dock_layout_set_targets(&layout, duplicate, 2));
 }
