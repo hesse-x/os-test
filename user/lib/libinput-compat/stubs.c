@@ -4,33 +4,29 @@
  * SPDX-License-Identifier: MIT
  */
 
-/*
- * Comprehensive stubs for libinput/linker dependencies not available in our
- * minimal libc or evdev shim.  libinput's keyboard-subset pulls in pointer-
- * acceleration filter code and tablet/touchpad dispatch paths even for
- * keyboard-only devices; these stubs provide the missing symbols so the link
- * succeeds.  They are never called at runtime for keyboard operation.
- *
- * NOTE: do NOT #include <math.h> — our math.h defines static inline wrappers
- * that conflict with the real function definitions needed here.  The math
- * stubs forward-declare their own signatures.
- */
+// Comprehensive stubs for libinput/linker dependencies not available in our
+// minimal libc or evdev shim.  libinput's keyboard-subset pulls in pointer-
+// acceleration filter code and tablet/touchpad dispatch paths even for
+// keyboard-only devices; these stubs provide the missing symbols so the link
+// succeeds.  They are never called at runtime for keyboard operation.
+//
+// NOTE: do NOT #include <math.h> — our math.h defines static inline wrappers
+// that conflict with the real function definitions needed here.  The math
+// stubs forward-declare their own signatures.
 
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
-/* ===================== filter stubs ===================== */
-/*
- * Pointer-acceleration filters for mouse devices (flat/linear/low-dpi/custom)
- * are compiled from the real third_party/libinput/src/filter-*.c sources — see
- * libinput.cmake — so the mouse is accepted by evdev_init_accel(). Only the
- * touchpad/tablet/trackpoint filter factories remain stubbed here: those device
- * classes are never instantiated on this system, and all callers check for
- * NULL. Do NOT re-add linear/flat/low_dpi/custom stubs, or the link will pick
- * the NULL stub over the real implementation and silently break the mouse
- * again.
- */
+// ===================== filter stubs =====================
+// Pointer-acceleration filters for mouse devices (flat/linear/low-dpi/custom)
+// are compiled from the real third_party/libinput/src/filter-*.c sources — see
+// libinput.cmake — so the mouse is accepted by evdev_init_accel(). Only the
+// touchpad/tablet/trackpoint filter factories remain stubbed here: those device
+// classes are never instantiated on this system, and all callers check for
+// NULL. Do NOT re-add linear/flat/low_dpi/custom stubs, or the link will pick
+// the NULL stub over the real implementation and silently break the mouse
+// again.
 
 struct motion_filter *create_pointer_accelerator_filter_touchpad(
     int dpi, uint64_t event_delta_smooth_threshold,
@@ -71,11 +67,9 @@ struct motion_filter *create_pointer_accelerator_filter_tablet(int xres,
   return NULL;
 }
 
-/* ===================== evdev dispatch stubs ===================== */
-/*
- * Tablet/touchpad/totem dispatchers that libinput's evdev_configure_device
- * may reference but are never instantiated for a keyboard-only device.
- */
+// ===================== evdev dispatch stubs =====================
+// Tablet/touchpad/totem dispatchers that libinput's evdev_configure_device
+// may reference but are never instantiated for a keyboard-only device.
 
 struct evdev_device;
 struct evdev_dispatch *evdev_mt_touchpad_create(struct evdev_device *device) {
@@ -123,7 +117,7 @@ int evdev_device_tablet_pad_get_mode_group(struct evdev_device *device) {
   return 0;
 }
 
-/* ===================== libevdev stubs ===================== */
+// ===================== libevdev stubs =====================
 
 struct libevdev;
 

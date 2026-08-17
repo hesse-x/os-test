@@ -60,7 +60,7 @@ int main(int argc, char **argv) {
     tcsetpgrp(0, getpgrp());
     pid_t bg = fork();
     if (bg == 0) {
-      setpgid(0, 0); /* own group = background */
+      setpgid(0, 0); // own group = background
       char c = 0;
       ssize_t n = read(0, &c, 1);
       if (n == 1)
@@ -71,8 +71,8 @@ int main(int argc, char **argv) {
     int st = 0;
     waitpid(bg, &st, WUNTRACED);
     dprintf(2, "BGSTOPPED:%d\n", WIFSTOPPED(st) ? WSTOPSIG(st) : -1);
-    tcsetpgrp(0, bg);  /* make the bg child foreground */
-    kill(bg, SIGCONT); /* resume its -ERESTART'd read */
+    tcsetpgrp(0, bg);  // make the bg child foreground
+    kill(bg, SIGCONT); // resume its -ERESTART'd read
     int st2 = 0;
     waitpid(bg, &st2, 0);
     tcsetpgrp(0, getpgrp());
@@ -91,11 +91,11 @@ int main(int argc, char **argv) {
       tcsetattr(0, TCSANOW, &t);
     }
     tcsetpgrp(0,
-              getpgrp()); /* foreground; SIGTTOU stays default so the bg
-                             child inherits default and is stopped by TOSTOP*/
+              getpgrp()); // foreground; SIGTTOU stays default so the bg
+                          // child inherits default and is stopped by TOSTOP
     pid_t bg = fork();
     if (bg == 0) {
-      setpgid(0, 0); /* background; SIGTTOU default (stop) */
+      setpgid(0, 0); // background; SIGTTOU default (stop)
       ssize_t n = write(1, "BGWROTE\n", 8);
       if (n < 0)
         dprintf(2, "BGWRITE_ERR:%d\n", errno);

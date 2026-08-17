@@ -83,4 +83,4 @@ void rcu_init(void);
     __atomic_store_n(&(p), (v), __ATOMIC_RELEASE);                             \
   } while (0)
 
-#endif /* KERNEL_RCU_H */
+#endif // KERNEL_RCU_H

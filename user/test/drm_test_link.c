@@ -2,10 +2,10 @@
  * Copyright (c) 2026 hesse
  *
  * SPDX-License-Identifier: MIT
- *
- * libdrm.a link verification (libdrm.md §3.4):
- * calls drmOpen + drmModeGetResources to prove libdrm.a links + runs.
  */
+// libdrm.a link verification (libdrm.md §3.4):
+// calls drmOpen + drmModeGetResources to prove libdrm.a links + runs.
+//
 
 #include "drm/drm.h"
 #include "xf86drm.h"

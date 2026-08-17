@@ -2,29 +2,28 @@
  * Copyright (c) 2026 hesse
  *
  * SPDX-License-Identifier: MIT
- *
- * Parked stdlib subset that musl upstream cannot yet replace in this OS
- * (stdlib.md). Everything else (abs/labs/llabs/imaxabs/imaxdiv/div/ldiv/lldiv,
- * atoi/atol/atoll, strtol/strtoul/strtoll/strtoull/strtoimax/strtoumax,
- * strtod/strtof/strtold/atof, qsort/bsearch, rand/srand/rand_r, exit/atexit/
- * abort/quick_exit/at_quick_exit/_Exit, environ/getenv/setenv/putenv/unsetenv/
- * clearenv, __libc_start_main + the .init/.fini-array + env startup chain) now
- * comes from musl upstream via musl_stdlib_objs.
- *
- * Remaining here:
- *   mknod/chmod — wrap sys_mknod / sys_chmod (kernel has these syscalls;
- *                 musl's wrappers route through the same numbers, but kept
- *                 here to avoid pulling src/misc/sysm.c machinery).
- *
- * Moved OUT to musl:
- *   stdio.md   — remove/getline/getdelim/fscanf/scanf/sscanf/vfscanf (were
- *                ENOSYS stubs; musl src/stdio now supplies them).
- *   stdlib.md  — mkstemp/mktemp/mkostemp (src/temp), realpath (src/misc).
- *   this batch — getpagesize (src/legacy/getpagesize.c) + sysconf
- *                (src/conf/sysconf.c), backed by the now-implemented
- * SYS_sysinfo / SYS_prlimit64 / SYS_sched_getaffinity. The OS-private
- *                sys_sysconf syscall stays (test_mprotect.c calls it directly).
  */
+// Parked stdlib subset that musl upstream cannot yet replace in this OS
+// (stdlib.md). Everything else (abs/labs/llabs/imaxabs/imaxdiv/div/ldiv/lldiv,
+// atoi/atol/atoll, strtol/strtoul/strtoll/strtoull/strtoimax/strtoumax,
+// strtod/strtof/strtold/atof, qsort/bsearch, rand/srand/rand_r, exit/atexit/
+// abort/quick_exit/at_quick_exit/_Exit, environ/getenv/setenv/putenv/unsetenv/
+// clearenv, __libc_start_main + the .init/.fini-array + env startup chain) now
+// comes from musl upstream via musl_stdlib_objs.
+//
+// Remaining here:
+//   mknod/chmod — wrap sys_mknod / sys_chmod (kernel has these syscalls;
+//                 musl's wrappers route through the same numbers, but kept
+//                 here to avoid pulling src/misc/sysm.c machinery).
+//
+// Moved OUT to musl:
+//   stdio.md   — remove/getline/getdelim/fscanf/scanf/sscanf/vfscanf (were
+//                ENOSYS stubs; musl src/stdio now supplies them).
+//   stdlib.md  — mkstemp/mktemp/mkostemp (src/temp), realpath (src/misc).
+//   this batch — getpagesize (src/legacy/getpagesize.c) + sysconf
+//                (src/conf/sysconf.c), backed by the now-implemented
+// SYS_sysinfo / SYS_prlimit64 / SYS_sched_getaffinity. The OS-private
+//                sys_sysconf syscall stays (test_mprotect.c calls it directly).
 
 #include <errno.h> // IWYU pragma: keep
 #include <stdint.h>

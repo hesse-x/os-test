@@ -44,51 +44,51 @@ wait_queue_head *file_wq_get(struct file *f) {
     if (ops && ops->wait_queue_file)
       return ops->wait_queue_file(f);
   }
-  /* epoll fd: ep->wq, woken by ep_poll_callback's __wake_up(&ep->wq). */
+  // epoll fd: ep->wq, woken by ep_poll_callback's __wake_up(&ep->wq).
   if (f->type == FD_EPOLL && f->epoll) {
     return &f->epoll->wq;
   }
-  /* pipe: p->wq (eager-allocated), woken by pipe close/read/write paths. */
+  // pipe: p->wq (eager-allocated), woken by pipe close/read/write paths.
   if (f->type == FD_PIPE && f->pipe) {
     return f->pipe->wq;
   }
-  /* AF_UNIX socket: sock->wq, woken by sendmsg/recvmsg/shutdown. */
+  // AF_UNIX socket: sock->wq, woken by sendmsg/recvmsg/shutdown.
   if (f->type == FD_SOCKET && f->sock) {
     if (f->sock->wq)
       return f->sock->wq;
     return wq_alloc(&f->sock->wq);
   }
-  /* pty/tty: pty->wq, woken by pty master/slave read/write. */
+  // pty/tty: pty->wq, woken by pty master/slave read/write.
   if (f->type == FD_TTY && f->pty) {
     if (f->pty->wq)
       return f->pty->wq;
     return wq_alloc(&f->pty->wq);
   }
-  /* AF_NETLINK: nlsock->wq, woken by nl_group_broadcast. */
+  // AF_NETLINK: nlsock->wq, woken by nl_group_broadcast.
   if (f->type == FD_NETLINK && f->nlsock) {
     if (f->nlsock->wq)
       return f->nlsock->wq;
     return wq_alloc(&f->nlsock->wq);
   }
-  /* FD_IPC: per-file f->wq, woken by sys_req/notify/resp/msg_to/msg_resp
-   * enqueue paths (evdev_refact.md §5.6). */
+  // FD_IPC: per-file f->wq, woken by sys_req/notify/resp/msg_to/msg_resp
+  // enqueue paths (evdev_refact.md §5.6).
   if (f->type == FD_IPC) {
     if (f->wq)
       return f->wq;
     return wq_alloc(&f->wq);
   }
-  /* FD_INOTIFY: embedded wq inside the instance (NOT f->wq lazy). The trigger
-   * side reaches it directly via &inst->wq with no inst→file back-ref, which
-   * avoids a UAF across close (inotify.md §2.4/§6.3). Must precede the generic
-   * f->wq fallback below. */
+  // FD_INOTIFY: embedded wq inside the instance (NOT f->wq lazy). The trigger
+  // side reaches it directly via &inst->wq with no inst→file back-ref, which
+  // avoids a UAF across close (inotify.md §2.4/§6.3). Must precede the generic
+  // f->wq fallback below.
   if (f->type == FD_INOTIFY && f->private_data)
     return &((inotify *)f->private_data)->wq;
-  /* sync_file readiness is driven by drm_fence_signal(), which wakes the
-   * fence queue. Polling on a per-file queue would miss that completion and
-   * leave the waiter asleep even though file_poll() sees signaled=true. */
+  // sync_file readiness is driven by drm_fence_signal(), which wakes the
+  // fence queue. Polling on a per-file queue would miss that completion and
+  // leave the waiter asleep even though file_poll() sees signaled=true.
   if (f->type == FD_SYNC_FILE && f->sync_file_fence)
     return &f->sync_file_fence->wq;
-  /* Generic per-file wq (eventfd/timerfd/signalfd/other). */
+  // Generic per-file wq (eventfd/timerfd/signalfd/other).
   if (f->wq)
     return f->wq;
   return wq_alloc(&f->wq);

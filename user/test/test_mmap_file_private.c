@@ -6,17 +6,17 @@
 
 #define _GNU_SOURCE
 
-/* test_mmap_file_private.c — S12: MAP_PRIVATE+fd file-backed mmap + COW.
- *
- * Validates the demand-fault page-in path (file_fault_handler) for regular
- * files on the FAT32 root: mmap(MAP_PRIVATE, fd) reads the file's contents
- * (not zero pages), writes are COW-private and do not mutate the backing file,
- * multi-page and offset mappings fault independently, the mapping survives
- * close(fd) via the region's inode reference, memfd MAP_PRIVATE COWs from the
- * shm page list, and fork gives parent/child independent private copies.
- *
- * Scratch files live in /local (FAT32 root, writable at runtime — same idiom as
- * test_fcntl). Unity freestanding: setUp/tearDown are empty. */
+// test_mmap_file_private.c — S12: MAP_PRIVATE+fd file-backed mmap + COW.
+//
+// Validates the demand-fault page-in path (file_fault_handler) for regular
+// files on the FAT32 root: mmap(MAP_PRIVATE, fd) reads the file's contents
+// (not zero pages), writes are COW-private and do not mutate the backing file,
+// multi-page and offset mappings fault independently, the mapping survives
+// close(fd) via the region's inode reference, memfd MAP_PRIVATE COWs from the
+// shm page list, and fork gives parent/child independent private copies.
+//
+// Scratch files live in /local (FAT32 root, writable at runtime — same idiom as
+// test_fcntl). Unity freestanding: setUp/tearDown are empty.
 
 #include <errno.h>
 #include <fcntl.h>
@@ -35,10 +35,9 @@ void tearDown(void) {}
 
 #define PAGE 4096
 
-/* Create /local/<name> with the given bytes and return an O_RDONLY fd, or -1.
- * The file is written via the FAT32 FD_REGULAR write path (fat32_write through
- * the page cache), so page_cache_fill will read the same bytes back on fault.
- */
+// Create /local/<name> with the given bytes and return an O_RDONLY fd, or -1.
+// The file is written via the FAT32 FD_REGULAR write path (fat32_write through
+// the page cache), so page_cache_fill will read the same bytes back on fault.
 static int make_file(const char *name, const void *buf, size_t len) {
   char path[64];
   strcpy(path, "/local/");
@@ -61,8 +60,8 @@ static void unlink_file(const char *name) {
   unlink(path);
 }
 
-/* TC1: basic read — mmap'd memory reflects file contents (the S12 bug this
- * fixes: MAP_PRIVATE+fd previously returned a zero page). */
+// TC1: basic read — mmap'd memory reflects file contents (the S12 bug this
+// fixes: MAP_PRIVATE+fd previously returned a zero page).
 void test_mmap_file_private_basic_read(void) {
   int fd = make_file("mfp_basic", "hello", 5);
   TEST_ASSERT_TRUE(fd >= 0);
@@ -75,8 +74,8 @@ void test_mmap_file_private_basic_read(void) {
   unlink_file("mfp_basic");
 }
 
-/* TC2: write COW does not mutate the backing file — write in-memory, munmap,
- * remap, and confirm the file still holds the original bytes. */
+// TC2: write COW does not mutate the backing file — write in-memory, munmap,
+// remap, and confirm the file still holds the original bytes.
 void test_mmap_file_private_write_cow(void) {
   int fd = make_file("mfp_cow", "hello", 5);
   TEST_ASSERT_TRUE(fd >= 0);
@@ -99,7 +98,7 @@ void test_mmap_file_private_write_cow(void) {
   unlink_file("mfp_cow");
 }
 
-/* TC3: multi-page read — an 8KB file faults in two pages independently. */
+// TC3: multi-page read — an 8KB file faults in two pages independently.
 void test_mmap_file_private_multi_page(void) {
   char data[8192];
   memcpy(data, "page0", 5);
@@ -117,7 +116,7 @@ void test_mmap_file_private_multi_page(void) {
   unlink_file("mfp_multi");
 }
 
-/* TC4: offset mapping — mmap at offset=PAGE maps the second page's contents. */
+// TC4: offset mapping — mmap at offset=PAGE maps the second page's contents.
 void test_mmap_file_private_offset(void) {
   char data[8192];
   memcpy(data, "page0", 5);
@@ -134,8 +133,8 @@ void test_mmap_file_private_offset(void) {
   unlink_file("mfp_off");
 }
 
-/* TC5: the mapping survives close(fd) — the region holds an inode reference, so
- * page-in works after the fd is closed (Linux semantics). */
+// TC5: the mapping survives close(fd) — the region holds an inode reference, so
+// page-in works after the fd is closed (Linux semantics).
 void test_mmap_file_private_survives_close(void) {
   int fd = make_file("mfp_close", "hello", 5);
   TEST_ASSERT_TRUE(fd >= 0);
@@ -148,8 +147,8 @@ void test_mmap_file_private_survives_close(void) {
   unlink_file("mfp_close");
 }
 
-/* TC6: mprotect must accept an unfaulted file-backed page. Dynamic loaders do
- * this for PT_GNU_RELRO before every page in the protected interval is read. */
+// TC6: mprotect must accept an unfaulted file-backed page. Dynamic loaders do
+// this for PT_GNU_RELRO before every page in the protected interval is read.
 void test_mprotect_unfaulted_file_page(void) {
   int fd = make_file("mfp_relro", "hello", 5);
   TEST_ASSERT_TRUE(fd >= 0);
@@ -164,8 +163,8 @@ void test_mprotect_unfaulted_file_page(void) {
   unlink_file("mfp_relro");
 }
 
-/* TC7: memfd MAP_PRIVATE — ftruncate sizes the memfd, data is written through a
- * MAP_SHARED mapping, then a MAP_PRIVATE mapping reads a private COW copy. */
+// TC7: memfd MAP_PRIVATE — ftruncate sizes the memfd, data is written through a
+// MAP_SHARED mapping, then a MAP_PRIVATE mapping reads a private COW copy.
 void test_mmap_memfd_private_cow(void) {
   int fd = memfd_create("mfp_memfd", 0);
   TEST_ASSERT_TRUE(fd >= 0);
@@ -187,8 +186,8 @@ void test_mmap_memfd_private_cow(void) {
   close(fd);
 }
 
-/* wlroots opens one POSIX shm object twice, writes through a shared producer
- * mapping, then sends the read-only fd to Mesa, which maps it MAP_PRIVATE. */
+// wlroots opens one POSIX shm object twice, writes through a shared producer
+// mapping, then sends the read-only fd to Mesa, which maps it MAP_PRIVATE.
 void test_tmpfs_shared_mapping_cross_fd(void) {
   const char *name = "/mfp_tmpfs_shared";
   shm_unlink(name);
@@ -215,13 +214,13 @@ void test_tmpfs_shared_mapping_cross_fd(void) {
   close(rw_fd);
 }
 
-/* TC8: fork independence. fork copies the parent's address space, so the child
- * inherits the parent's in-flight MAP_PRIVATE write ('P') — that is NOT a write
- * to the backing file, it is private memory, and fork snapshots it. The
- * invariant that MAP_PRIVATE guarantees is post-fork isolation: the child's
- * write is invisible to the parent, and the parent's later write is invisible
- * to the child. (Verified against host Linux: child sees the parent's private
- * 'P', not the original 'h'.) */
+// TC8: fork independence. fork copies the parent's address space, so the child
+// inherits the parent's in-flight MAP_PRIVATE write ('P') — that is NOT a write
+// to the backing file, it is private memory, and fork snapshots it. The
+// invariant that MAP_PRIVATE guarantees is post-fork isolation: the child's
+// write is invisible to the parent, and the parent's later write is invisible
+// to the child. (Verified against host Linux: child sees the parent's private
+// 'P', not the original 'h'.)
 void test_mmap_file_private_fork_independent(void) {
   int fd = make_file("mfp_fork", "hello", 5);
   TEST_ASSERT_TRUE(fd >= 0);
@@ -233,7 +232,7 @@ void test_mmap_file_private_fork_independent(void) {
 
   pid_t pid = fork();
   if (pid == 0) {
-    /* Child inherits the parent's private copy (p[0]=='P'), not the file. */
+    // Child inherits the parent's private copy (p[0]=='P'), not the file.
     int child_ok = (p[0] == 'P');
     p[0] = 'C'; // child's private write — must not reach the parent
     _exit(child_ok ? 0 : 1);
@@ -250,14 +249,14 @@ void test_mmap_file_private_fork_independent(void) {
   } else {
     munmap(p, PAGE);
     close(fd);
-    TEST_ASSERT_TRUE(1); /* fork unavailable — skip */
+    TEST_ASSERT_TRUE(1); // fork unavailable — skip
   }
   unlink_file("mfp_fork");
 }
 
-/* Mirror musl map_library's topology: it first maps an entire ELF image from
- * the lowest PT_LOAD, then MAP_FIXED replaces later file segments and the BSS
- * tail. Every retained/replaced page must still fault from its own VMA. */
+// Mirror musl map_library's topology: it first maps an entire ELF image from
+// the lowest PT_LOAD, then MAP_FIXED replaces later file segments and the BSS
+// tail. Every retained/replaced page must still fault from its own VMA.
 void test_mmap_file_fixed_segment_replacement(void) {
   char data[3 * PAGE];
   memset(data, 'A', PAGE);

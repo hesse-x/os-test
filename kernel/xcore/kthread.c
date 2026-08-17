@@ -54,8 +54,8 @@ static void kthread_entry(void) {
   sti();
   thread->result = thread->fn(thread->arg);
 
-  /* Publish completion with IRQs disabled so join cannot observe completion
-   * before the task has made itself reapable. */
+  // Publish completion with IRQs disabled so join cannot observe completion
+  // before the task has made itself reapable.
   cli();
   if (thread->detached) {
     current_task->state = ZOMBIE;

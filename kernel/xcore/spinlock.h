@@ -29,7 +29,7 @@ typedef struct spinlock {
 
 #ifdef NDEBUG
 
-/* Release: identical performance to original — no owner tracking */
+// Release: identical performance to original — no owner tracking
 static inline void spin_lock(spinlock *lk) __acquires(lk) {
   while (__atomic_exchange_n(&lk->locked, 1, __ATOMIC_ACQUIRE) == 1)
     __asm__ volatile("pause");
@@ -41,16 +41,16 @@ static inline void spin_unlock(spinlock *lk) __releases(lk) {
 
 #else
 
-/* Debug: track owner + recursive deadlock detection
- * Uses rdmsr(MSR_GS_BASE) + 8 to read cpu_local.cpu_id
- * (offset 8: after saved_r10 uint64_t). rdmsr is a serializing
- * instruction (~30 cycles) — acceptable in debug builds only.
- * Cannot use get_cpu_local() here due to circular dependency
- * (smp.h -> spinlock.h -> smp.h). */
+// Debug: track owner + recursive deadlock detection
+// Uses rdmsr(MSR_GS_BASE) + 8 to read cpu_local.cpu_id
+// (offset 8: after saved_r10 uint64_t). rdmsr is a serializing
+// instruction (~30 cycles) — acceptable in debug builds only.
+// Cannot use get_cpu_local() here due to circular dependency
+// (smp.h -> spinlock.h -> smp.h).
 #define MSR_GS_BASE 0xC0000101
 
 static inline int current_cpu_id_debug(void) {
-  /* cpu_local layout: offset 0=saved_r10(uint64_t), offset 8=cpu_id(int) */
+  // cpu_local layout: offset 0=saved_r10(uint64_t), offset 8=cpu_id(int)
   return *(int *)(rdmsr(MSR_GS_BASE) + 8);
 }
 

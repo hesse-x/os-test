@@ -18,49 +18,48 @@
 void setUp(void) {}
 void tearDown(void) {}
 
-/* 1. spawn basic — create child process */
+// 1. spawn basic — create child process
 void test_spawn_basic(void) {
   pid_t pid = spawn_elf("/test/pipe.elf");
-  /* spawn may succeed or fail depending on fs availability */
+  // spawn may succeed or fail depending on fs availability
   if (pid > 0) {
     int status;
     waitpid(pid, &status, 0);
     TEST_ASSERT_TRUE(1);
   } else {
-    /* spawn failed — filesystem may not be ready */
+    // spawn failed — filesystem may not be ready
     TEST_ASSERT_TRUE(1);
   }
 }
 
-/* 2. waitpid reaps child with correct exit code */
+// 2. waitpid reaps child with correct exit code
 void test_waitpid_child(void) {
   pid_t pid = spawn_elf("/test/string.elf");
   if (pid > 0) {
     int status;
     pid_t r = waitpid(pid, &status, 0);
     TEST_ASSERT_EQUAL_INT(pid, r);
-    /* string test should pass (exit 0) */
+    // string test should pass (exit 0)
     TEST_ASSERT_EQUAL_INT(0, status);
   } else {
     TEST_ASSERT_TRUE(1);
   }
 }
 
-/* 3. waitpid with no children returns -ECHILD */
+// 3. waitpid with no children returns -ECHILD
 void test_waitpid_no_child(void) {
-  /* This process has no children at this point (previous children were reaped)
-   */
+  // This process has no children at this point (previous children were reaped)
   int status;
   pid_t r = waitpid(-1, &status, 0);
-  /* Should return -1 if no children, or block */
+  // Should return -1 if no children, or block
   (void)r;
   TEST_ASSERT_TRUE(1);
 }
 
-/* 4. spawn inherits fd 0/1 */
+// 4. spawn inherits fd 0/1
 void test_spawn_inherit_fd(void) {
-  /* Child inherits stdin/stdout — verified by child being able to
-   * write to stdout (serial output visible) */
+  // Child inherits stdin/stdout — verified by child being able to
+  // write to stdout (serial output visible)
   pid_t pid = spawn_elf("/local/hello.elf");
   if (pid > 0) {
     int status;
@@ -69,10 +68,10 @@ void test_spawn_inherit_fd(void) {
   TEST_ASSERT_TRUE(1);
 }
 
-/* 5. exit code: child _exit(42) → parent gets 42 */
+// 5. exit code: child _exit(42) → parent gets 42
 void test_exit_code(void) {
-  /* We can't easily make a child exit with 42 without a custom ELF.
-   * Test that the existing test ELFs return 0 on success. */
+  // We can't easily make a child exit with 42 without a custom ELF.
+  // Test that the existing test ELFs return 0 on success.
   pid_t pid = spawn_elf("/test/string.elf");
   if (pid > 0) {
     int status;
@@ -83,28 +82,28 @@ void test_exit_code(void) {
   }
 }
 
-/* 6. orphan process adopted by init */
+// 6. orphan process adopted by init
 void test_spawn_orphan(void) {
-  /* Would need a multi-level spawn — deferred to integration test */
+  // Would need a multi-level spawn — deferred to integration test
   TEST_ASSERT_TRUE(1);
 }
 
-/* 7. WNOHANG returns 0 when no child has exited yet, then reaps after exit */
+// 7. WNOHANG returns 0 when no child has exited yet, then reaps after exit
 void test_waitpid_wnohang(void) {
   pid_t pid = spawn_elf("/test/string.elf");
   if (pid <= 0) {
     TEST_ASSERT_TRUE(1);
     return;
   }
-  /* Probe before the child finishes: WNOHANG must not block. The child may
-   * have already exited by the time we get here, so 0 (still running) and pid
-   * (already zombie) are both acceptable; only a block/real error fails. */
+  // Probe before the child finishes: WNOHANG must not block. The child may
+  // have already exited by the time we get here, so 0 (still running) and pid
+  // (already zombie) are both acceptable; only a block/real error fails.
   int status = -1;
   pid_t r = waitpid(pid, &status, WNOHANG);
   TEST_ASSERT_TRUE(r == 0 || r == pid);
 
-  /* Drain: if the first probe returned 0, the child is still running — wait
-   * for it (blocking) then reap. If it returned pid, already reaped. */
+  // Drain: if the first probe returned 0, the child is still running — wait
+  // for it (blocking) then reap. If it returned pid, already reaped.
   if (r == 0) {
     pid_t r2 = waitpid(pid, &status, 0);
     TEST_ASSERT_EQUAL_INT(pid, r2);
@@ -113,7 +112,7 @@ void test_waitpid_wnohang(void) {
   TEST_ASSERT_EQUAL_INT(0, WEXITSTATUS(status));
 }
 
-/* 8. POSIX identity getters — single-user system, all default to 0 */
+// 8. POSIX identity getters — single-user system, all default to 0
 void test_identity_getters(void) {
   TEST_ASSERT_EQUAL_INT(0, getuid());
   TEST_ASSERT_EQUAL_INT(0, geteuid());
@@ -122,12 +121,12 @@ void test_identity_getters(void) {
   TEST_ASSERT_EQUAL_INT(getpgrp(), getpgid(0));
 }
 
-/* 9. getppid in a forked child equals the parent's getpid */
+// 9. getppid in a forked child equals the parent's getpid
 void test_getppid_after_fork(void) {
   pid_t parent = getpid();
   pid_t pid = fork();
   if (pid == 0) {
-    /* child: ppid must be the parent pid */
+    // child: ppid must be the parent pid
     _exit(getppid() == parent ? 0 : 1);
   } else if (pid > 0) {
     int status;
@@ -135,45 +134,45 @@ void test_getppid_after_fork(void) {
     TEST_ASSERT_TRUE(WIFEXITED(status));
     TEST_ASSERT_EQUAL_INT(0, WEXITSTATUS(status));
   } else {
-    TEST_ASSERT_TRUE(1); /* fork unavailable — skip */
+    TEST_ASSERT_TRUE(1); // fork unavailable — skip
   }
 }
 
-/* 10. umask getter/setter round-trip (effect on created files needs inode-mode
- * memoryization, not in this wave) */
+// 10. umask getter/setter round-trip (effect on created files needs inode-mode
+// memoryization, not in this wave)
 void test_umask_roundtrip(void) {
   mode_t old = umask(0077);
   TEST_ASSERT_EQUAL_INT(0022, old);
-  mode_t cur = umask(old); /* restore */
+  mode_t cur = umask(old); // restore
   TEST_ASSERT_EQUAL_INT(0077, cur);
-  TEST_ASSERT_EQUAL_INT(0022, umask(0022)); /* back to default, return cur */
+  TEST_ASSERT_EQUAL_INT(0022, umask(0022)); // back to default, return cur
 }
 
-/* 11. setuid/setgid update real+effective. Saved-set ladder (S19 §6): root
- * setuid writes real+effective+saved-set all to the target, so after dropping
- * to a non-root id you cannot climb back to root — setuid(0) must fail EPERM.
- * Restoring to the dropped id is allowed (== real/saved-set). */
+// 11. setuid/setgid update real+effective. Saved-set ladder (S19 §6): root
+// setuid writes real+effective+saved-set all to the target, so after dropping
+// to a non-root id you cannot climb back to root — setuid(0) must fail EPERM.
+// Restoring to the dropped id is allowed (== real/saved-set).
 void test_setuid_setgid(void) {
-  /* Drop GID first: once setuid() drops euid 0, CAP_SETGID is gone. */
+  // Drop GID first: once setuid() drops euid 0, CAP_SETGID is gone.
   TEST_ASSERT_EQUAL_INT(0, setgid(456));
   TEST_ASSERT_EQUAL_INT(456, getgid());
   TEST_ASSERT_EQUAL_INT(456, getegid());
-  TEST_ASSERT_EQUAL_INT(0, setgid(456)); /* privileged while euid is still 0 */
+  TEST_ASSERT_EQUAL_INT(0, setgid(456)); // privileged while euid is still 0
 
   TEST_ASSERT_EQUAL_INT(0, setuid(123));
   TEST_ASSERT_EQUAL_INT(123, getuid());
   TEST_ASSERT_EQUAL_INT(123, geteuid());
-  TEST_ASSERT_EQUAL_INT(-1, setuid(0)); /* root dropped from saved-set: EPERM */
+  TEST_ASSERT_EQUAL_INT(-1, setuid(0)); // root dropped from saved-set: EPERM
   TEST_ASSERT_EQUAL_INT(EPERM, errno);
-  TEST_ASSERT_EQUAL_INT(123, getuid());  /* unchanged */
-  TEST_ASSERT_EQUAL_INT(0, setuid(123)); /* == real uid: allowed */
+  TEST_ASSERT_EQUAL_INT(123, getuid());  // unchanged
+  TEST_ASSERT_EQUAL_INT(0, setuid(123)); // == real uid: allowed
 
-  TEST_ASSERT_EQUAL_INT(-1, setgid(0)); /* sgid dropped: EPERM */
+  TEST_ASSERT_EQUAL_INT(-1, setgid(0)); // sgid dropped: EPERM
   TEST_ASSERT_EQUAL_INT(EPERM, errno);
-  TEST_ASSERT_EQUAL_INT(0, setgid(456)); /* == real gid: allowed */
+  TEST_ASSERT_EQUAL_INT(0, setgid(456)); // == real gid: allowed
 }
 
-/* 12. gethostname/sethostname round-trip */
+// 12. gethostname/sethostname round-trip
 void test_hostname_roundtrip(void) {
   char original_hostname[256] = {0};
   char buf[256] = {0};
@@ -187,18 +186,18 @@ void test_hostname_roundtrip(void) {
   TEST_ASSERT_EQUAL_INT(0, gethostname(buf, sizeof(buf)));
   TEST_ASSERT_EQUAL_STRING(test_hostname, buf);
 
-  /* buffer too small: musl gethostname truncates to len and returns 0
-   * (POSIX-permitted silent truncation; matches musl src/unistd/gethostname.c,
-   * which reads uname.nodename and caps at len). No -1/EINVAL — that was the
-   * old repo SYS_gethostname path, now retired. */
+  // buffer too small: musl gethostname truncates to len and returns 0
+  // (POSIX-permitted silent truncation; matches musl src/unistd/gethostname.c,
+  // which reads uname.nodename and caps at len). No -1/EINVAL — that was the
+  // old repo SYS_gethostname path, now retired.
   errno = 0;
   char tiny[4];
   TEST_ASSERT_EQUAL_INT(0, gethostname(tiny, sizeof(tiny)));
   TEST_ASSERT_EQUAL_INT(0, errno);
-  tiny[3] = '\0'; /* musl NUL-terminates at name[len-1] */
-  TEST_ASSERT_EQUAL_STRING("tes", tiny); /* "testhost" truncated to 3 chars */
+  tiny[3] = '\0';                        // musl NUL-terminates at name[len-1]
+  TEST_ASSERT_EQUAL_STRING("tes", tiny); // "testhost" truncated to 3 chars
 
-  /* restore */
+  // restore
   TEST_ASSERT_EQUAL_INT(
       0, sethostname(original_hostname, strlen(original_hostname)));
 }

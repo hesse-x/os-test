@@ -20,7 +20,7 @@
 void setUp(void) {}
 void tearDown(void) {}
 
-/* 1. pipe() returns two fds, fd[0] readable, fd[1] writable */
+// 1. pipe() returns two fds, fd[0] readable, fd[1] writable
 void test_pipe_create(void) {
   int fd[2];
   int r = pipe(fd);
@@ -32,7 +32,7 @@ void test_pipe_create(void) {
   close(fd[1]);
 }
 
-/* 2. write "hello" → read back → strcmp */
+// 2. write "hello" → read back → strcmp
 void test_pipe_write_read(void) {
   int fd[2];
   pipe(fd);
@@ -50,7 +50,7 @@ void test_pipe_write_read(void) {
   close(fd[1]);
 }
 
-/* 3. write 10 bytes → read 5 → read 5, verify partial read */
+// 3. write 10 bytes → read 5 → read 5, verify partial read
 void test_pipe_write_read_partial(void) {
   int fd[2];
   pipe(fd);
@@ -72,8 +72,8 @@ void test_pipe_write_read_partial(void) {
   close(fd[1]);
 }
 
-/* 4. Write fills 4KB ring buffer → verify subsequent write blocks
- *    (multi-process: child reads to free space) */
+// 4. Write fills 4KB ring buffer → verify subsequent write blocks
+//    (multi-process: child reads to free space)
 void test_pipe_full_block(void) {
   volatile int *marker = alloc_shared_marker();
   TEST_ASSERT_NOT_NULL((void *)marker);
@@ -84,11 +84,11 @@ void test_pipe_full_block(void) {
 
   pid_t pid = spawn_elf("/test/pipe.elf");
   if (pid > 0 && getpid() > 0) {
-    /* Parent: if child was spawned, this is the parent path */
-    /* For multi-process, child sets *marker = 1 */
-    /* Since we can't easily distinguish parent/child here,
-     * we test a simpler variant: write until pipe is full */
-    /* Skip full blocking test without proper fork model */
+    // Parent: if child was spawned, this is the parent path
+    // For multi-process, child sets *marker = 1
+    // Since we can't easily distinguish parent/child here,
+    // we test a simpler variant: write until pipe is full
+    // Skip full blocking test without proper fork model
     close(fd[0]);
     close(fd[1]);
     int status;
@@ -100,17 +100,17 @@ void test_pipe_full_block(void) {
   close(fd[1]);
 }
 
-/* 5. Read empty pipe blocks (multi-process: child writes to wake) */
+// 5. Read empty pipe blocks (multi-process: child writes to wake)
 void test_pipe_empty_block(void) {
-  /* Similar limitation as test_pipe_full_block - skip complex multi-proc */
+  // Similar limitation as test_pipe_full_block - skip complex multi-proc
   int fd[2];
   pipe(fd);
   close(fd[0]);
   close(fd[1]);
-  /* Placeholder: O_NONBLOCK test covers the non-blocking case */
+  // Placeholder: O_NONBLOCK test covers the non-blocking case
 }
 
-/* 6. Close write end → read returns 0 (EOF) */
+// 6. Close write end → read returns 0 (EOF)
 void test_pipe_close_read_eof(void) {
   int fd[2];
   pipe(fd);
@@ -124,9 +124,9 @@ void test_pipe_close_read_eof(void) {
   close(fd[0]);
 }
 
-/* 7. Close read end → write returns -EPIPE. POSIX raises SIGPIPE on this by
- * default (which would terminate the test process before write() returns);
- * install SIG_IGN so the process survives to observe the -EPIPE return. */
+// 7. Close read end → write returns -EPIPE. POSIX raises SIGPIPE on this by
+// default (which would terminate the test process before write() returns);
+// install SIG_IGN so the process survives to observe the -EPIPE return.
 void test_pipe_close_write_epipe(void) {
   int fd[2];
   pipe(fd);
@@ -142,7 +142,7 @@ void test_pipe_close_write_epipe(void) {
   close(fd[1]);
 }
 
-/* 8. O_NONBLOCK read on empty pipe returns EAGAIN */
+// 8. O_NONBLOCK read on empty pipe returns EAGAIN
 void test_pipe_nonblock_read(void) {
   int fd[2];
   pipe(fd);
@@ -158,14 +158,14 @@ void test_pipe_nonblock_read(void) {
   close(fd[1]);
 }
 
-/* 9. O_NONBLOCK write on full pipe returns EAGAIN */
+// 9. O_NONBLOCK write on full pipe returns EAGAIN
 void test_pipe_nonblock_write(void) {
   int fd[2];
   pipe(fd);
 
   fcntl(fd[1], F_SETFL, O_NONBLOCK);
 
-  /* Write until pipe buffer is full (4KB) */
+  // Write until pipe buffer is full (4KB)
   char buf[4096];
   memset(buf, 'A', sizeof(buf));
   ssize_t total = 0;
@@ -177,21 +177,21 @@ void test_pipe_nonblock_write(void) {
     }
     total += w;
     if (total > 65536)
-      break; /* safety limit */
+      break; // safety limit
   }
 
   close(fd[0]);
   close(fd[1]);
 }
 
-/* 10. close one end → refcount--, other end still usable */
+// 10. close one end → refcount--, other end still usable
 void test_pipe_refcount(void) {
   int fd[2];
   pipe(fd);
 
   close(fd[1]);
 
-  /* Read end should still be valid - read returns 0 (EOF) */
+  // Read end should still be valid - read returns 0 (EOF)
   char buf[4];
   ssize_t r = read(fd[0], buf, 4);
   TEST_ASSERT_EQUAL_INT(0, (int)r);
@@ -199,7 +199,7 @@ void test_pipe_refcount(void) {
   close(fd[0]);
 }
 
-/* 11. spawn child inherits pipe fd (multi-process) */
+// 11. spawn child inherits pipe fd (multi-process)
 void test_pipe_spawn_inherit(void) {
   volatile int *marker = alloc_shared_marker();
   TEST_ASSERT_NOT_NULL((void *)marker);
@@ -208,13 +208,13 @@ void test_pipe_spawn_inherit(void) {
   int fd[2];
   pipe(fd);
 
-  /* Simple test: verify child can be spawned - full inherit test
-   * requires argv or shared memory protocol, deferred */
+  // Simple test: verify child can be spawned - full inherit test
+  // requires argv or shared memory protocol, deferred
   close(fd[0]);
   close(fd[1]);
 }
 
-/* 12. Write 8KB data (exceeds PIPE_BUF), verify integrity */
+// 12. Write 8KB data (exceeds PIPE_BUF), verify integrity
 void test_pipe_big_transfer(void) {
   int fd[2];
   pipe(fd);
@@ -223,8 +223,8 @@ void test_pipe_big_transfer(void) {
   for (int i = 0; i < 8192; i++)
     wbuf[i] = (char)(i & 0xFF);
 
-  /* Pipe buffer is 4096 with 4095 usable bytes.
-   * Single-process: must interleave write/read so writes don't block. */
+  // Pipe buffer is 4096 with 4095 usable bytes.
+  // Single-process: must interleave write/read so writes don't block.
   char rbuf[8192] = {0};
   int off = 0;
   while (off < 8192) {
@@ -245,7 +245,7 @@ void test_pipe_big_transfer(void) {
   close(fd[1]);
 }
 
-/* 13. Multiple small writes, verify order and integrity */
+// 13. Multiple small writes, verify order and integrity
 void test_pipe_multiple_write(void) {
   int fd[2];
   pipe(fd);
@@ -264,12 +264,12 @@ void test_pipe_multiple_write(void) {
   close(fd[1]);
 }
 
-/* 14. Create multiple pipe pairs, verify fd allocation */
+// 14. Create multiple pipe pairs, verify fd allocation
 void test_pipe_fd_limit(void) {
   int fds[30][2];
   int count = 0;
 
-  /* fd 0,1 are stdin/stdout; we can use fd 2-31 */
+  // fd 0,1 are stdin/stdout; we can use fd 2-31
   for (int i = 0; i < 15; i++) {
     int r = pipe(fds[i]);
     if (r < 0)
@@ -279,17 +279,16 @@ void test_pipe_fd_limit(void) {
 
   TEST_ASSERT_TRUE(count >= 5);
 
-  /* Close all */
+  // Close all
   for (int i = 0; i < count; i++) {
     close(fds[i][0]);
     close(fds[i][1]);
   }
 }
 
-/* ===================== S09: F_GETPIPE_SZ / F_SETPIPE_SZ =====================
- */
+// ===================== S09: F_GETPIPE_SZ / F_SETPIPE_SZ =====================
 
-/* Default pipe capacity is PIPE_BUF_SIZE (4096). */
+// Default pipe capacity is PIPE_BUF_SIZE (4096).
 void test_pipe_getpipe_sz_default(void) {
   int fd[2];
   pipe(fd);
@@ -300,19 +299,19 @@ void test_pipe_getpipe_sz_default(void) {
   close(fd[1]);
 }
 
-/* F_SETPIPE_SZ grows the pipe to a power-of-two >= requested. */
+// F_SETPIPE_SZ grows the pipe to a power-of-two >= requested.
 void test_pipe_setpipe_sz_grow(void) {
   int fd[2];
   pipe(fd);
   int sz = fcntl(fd[1], F_SETPIPE_SZ, 8192);
   TEST_ASSERT_TRUE(sz >= 8192);
-  /* Subsequent get reflects the new size. */
+  // Subsequent get reflects the new size.
   TEST_ASSERT_EQUAL_INT(sz, fcntl(fd[0], F_GETPIPE_SZ));
   close(fd[0]);
   close(fd[1]);
 }
 
-/* A tiny requested size is clamped up to PAGE_SIZE. */
+// A tiny requested size is clamped up to PAGE_SIZE.
 void test_pipe_setpipe_sz_clamp_min(void) {
   int fd[2];
   pipe(fd);
@@ -322,19 +321,19 @@ void test_pipe_setpipe_sz_clamp_min(void) {
   close(fd[1]);
 }
 
-/* An oversized request (above PIPE_MAX_SIZE) is rejected. */
+// An oversized request (above PIPE_MAX_SIZE) is rejected.
 void test_pipe_setpipe_sz_too_big(void) {
   int fd[2];
   pipe(fd);
-  int r = fcntl(fd[1], F_SETPIPE_SZ, (1 << 21)); /* 2 MiB > 1 MiB cap */
+  int r = fcntl(fd[1], F_SETPIPE_SZ, (1 << 21)); // 2 MiB > 1 MiB cap
   TEST_ASSERT_EQUAL_INT(-1, r);
   close(fd[0]);
   close(fd[1]);
 }
 
-/* F_GETPIPE_SZ on a non-pipe fd is rejected. */
+// F_GETPIPE_SZ on a non-pipe fd is rejected.
 void test_pipe_getpipe_sz_nonpipe(void) {
-  int sz = fcntl(0, F_GETPIPE_SZ); /* stdin */
+  int sz = fcntl(0, F_GETPIPE_SZ); // stdin
   TEST_ASSERT_EQUAL_INT(-1, sz);
 }
 

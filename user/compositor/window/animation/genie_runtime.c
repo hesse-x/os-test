@@ -1,4 +1,5 @@
-/* Copyright (c) 2026 hesse
+/*
+ * Copyright (c) 2026 hesse
  * SPDX-License-Identifier: MIT
  */
 #include "genie_runtime.h"
@@ -205,8 +206,8 @@ static bool create_window_snapshot(struct tinywl_genie_animation *animation) {
   };
   if (context.pixels == NULL)
     return false;
-  /* SSD buttons are buffers, so paint the flat frame first and composite all
-   * scene buffers afterward in their normal traversal order. */
+  // SSD buttons are buffers, so paint the flat frame first and composite all
+  // scene buffers afterward in their normal traversal order.
   for (size_t i = 0; context.valid && i < animation->options.rect_count; ++i)
     snapshot_rect(&context, animation->options.rects[i]);
   wlr_scene_node_for_each_buffer(animation->options.source, snapshot_buffer,

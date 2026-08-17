@@ -595,7 +595,7 @@ static void fat32_store_entry(uint8_t *p, uint32_t value) {
   p[3] = (uint8_t)(nv >> 24);
 }
 
-/* Allocate one physically contiguous run from a single FAT sector. */
+// Allocate one physically contiguous run from a single FAT sector.
 static int fat32_allocate_run(uint32_t wanted, uint32_t *first, uint32_t *last,
                               uint32_t *allocated) {
   if (!wanted || !first || !last || !allocated)
@@ -2629,9 +2629,9 @@ int fat32_write(struct inode *ip, uint64_t offset, const void *buf,
     write_pages[nr_write_pages++] = cp;
     written += chunk;
 
-    /* writepages limits I/O using i_size. Publish the bytes covered by this
-     * dirty page before writeback, then roll back to the durable prefix if
-     * writeback fails below. */
+    // writepages limits I/O using i_size. Publish the bytes covered by this
+    // dirty page before writeback, then roll back to the durable prefix if
+    // writeback fails below.
     uint64_t pending_end = offset + written;
     if (pending_end > ip->size)
       ip->size = pending_end;

@@ -485,4 +485,4 @@ __asan_memmove(void *dst, const void *src, size_t n) {
   return __memmove(dst, src, n);
 }
 
-#endif /* SANITIZER */
+#endif // SANITIZER

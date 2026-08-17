@@ -25,9 +25,9 @@
 void setUp(void) {}
 void tearDown(void) {}
 
-/* TC1: a >128 MiB anonymous mmap no longer hits the old -EINVAL cap. It
- * succeeds if the free pool is healthy, or returns -ENOMEM if not — both are
- * acceptable. Only -EINVAL would indicate the old hardcap is still in place. */
+// TC1: a >128 MiB anonymous mmap no longer hits the old -EINVAL cap. It
+// succeeds if the free pool is healthy, or returns -ENOMEM if not — both are
+// acceptable. Only -EINVAL would indicate the old hardcap is still in place.
 void test_mmap_large_not_einval(void) {
   size_t big = 200 * 1024 * 1024;
   void *p = mmap(NULL, big, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS,
@@ -42,8 +42,8 @@ void test_mmap_large_not_einval(void) {
   }
 }
 
-/* TC2: size==0 anonymous mmap is still -EINVAL (MAP_SHARED && fd>=0 is the
- * only size==0 exception Linux allows). */
+// TC2: size==0 anonymous mmap is still -EINVAL (MAP_SHARED && fd>=0 is the
+// only size==0 exception Linux allows).
 void test_mmap_size_zero_einval(void) {
   void *p =
       mmap(NULL, 0, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);

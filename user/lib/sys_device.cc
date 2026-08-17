@@ -2,11 +2,10 @@
  * Copyright (c) 2026 hesse
  *
  * SPDX-License-Identifier: MIT
- *
- * Hardware-related syscall wrappers: device, IRQ, PCI, dev_ready.
- *
- * Merged from sys_device.cc + sys_irq.cc + sys_pci.cc + dev_ready.c
  */
+// Hardware-related syscall wrappers: device, IRQ, PCI, dev_ready.
+//
+// Merged from sys_device.cc + sys_irq.cc + sys_pci.cc + dev_ready.c
 
 #include <errno.h> // IWYU pragma: keep
 #include <fcntl.h>

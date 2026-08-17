@@ -1,4 +1,5 @@
-/* Copyright (c) 2026 hesse
+/*
+ * Copyright (c) 2026 hesse
  * SPDX-License-Identifier: MIT
  */
 #include "prime_probe.h"
@@ -18,7 +19,7 @@
 #include <wlr/util/log.h>
 #include <xf86drmMode.h>
 
-/* Exported by wlroots 0.20.2 but intentionally omitted from its public API. */
+// Exported by wlroots 0.20.2 but intentionally omitted from its public API.
 const struct wlr_drm_format_set *
 wlr_renderer_get_render_formats(struct wlr_renderer *renderer);
 

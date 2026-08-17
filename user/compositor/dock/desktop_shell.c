@@ -756,7 +756,7 @@ int os_desktop_shell_run(int argc, char **argv) {
     fprintf(stderr, "desktop-shell: compositor lacks wl_shm or layer-shell\n");
     return 1;
   }
-  /* The first roundtrip discovers outputs; the second receives mode/scale. */
+  // The first roundtrip discovers outputs; the second receives mode/scale.
   wl_display_roundtrip(app.display);
   for (int i = 0; i < app.output_count; i++)
     create_output_surfaces(&app.outputs[i]);

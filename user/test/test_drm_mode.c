@@ -2,9 +2,8 @@
  * Copyright (c) 2026 hesse
  *
  * SPDX-License-Identifier: MIT
- *
- * DRM Phase C tests: property ioctls, master model, cursor, resource cleanup.
  */
+// DRM Phase C tests: property ioctls, master model, cursor, resource cleanup.
 
 #include "drm/drm.h"
 #include "drm/drm_fourcc.h"
@@ -20,7 +19,7 @@
 void setUp(void) {}
 void tearDown(void) {}
 
-/* 1. DRM_CAP_ATOMIC: value must be 0 (force legacy) */
+// 1. DRM_CAP_ATOMIC: value must be 0 (force legacy)
 void test_drm_getcap_atomic(void) {
   int fd = open("/dev/dri/card0", O_RDWR);
   if (fd < 0) {
@@ -30,15 +29,15 @@ void test_drm_getcap_atomic(void) {
 
   struct drm_get_cap cap;
   memset(&cap, 0, sizeof(cap));
-  cap.capability = 0x0D; /* DRM_CAP_ATOMIC */
+  cap.capability = 0x0D; // DRM_CAP_ATOMIC
   int rc = ioctl(fd, DRM_IOCTL_GET_CAP, &cap);
   TEST_ASSERT_EQUAL_INT(0, rc);
-  TEST_ASSERT_EQUAL_INT(0, cap.value); /* force legacy */
+  TEST_ASSERT_EQUAL_INT(0, cap.value); // force legacy
 
   close(fd);
 }
 
-/* 2. GETPLANE: count_format_types must be 4 */
+// 2. GETPLANE: count_format_types must be 4
 void test_drm_getplane_formats(void) {
   int fd = open("/dev/dri/card0", O_RDWR);
   if (fd < 0) {
@@ -48,7 +47,7 @@ void test_drm_getplane_formats(void) {
 
   struct drm_mode_get_plane plane;
   memset(&plane, 0, sizeof(plane));
-  plane.plane_id = 4; /* DRM_PLANE_ID */
+  plane.plane_id = 4; // DRM_PLANE_ID
   int rc = ioctl(fd, DRM_IOCTL_MODE_GETPLANE, &plane);
   TEST_ASSERT_EQUAL_INT(0, rc);
   TEST_ASSERT_EQUAL_INT(4, plane.count_format_types);
@@ -56,7 +55,7 @@ void test_drm_getplane_formats(void) {
   close(fd);
 }
 
-/* 3. GETPROPERTY: read known property attributes */
+// 3. GETPROPERTY: read known property attributes
 void test_drm_getproperty(void) {
   int fd = open("/dev/dri/card0", O_RDWR);
   if (fd < 0) {
@@ -64,16 +63,16 @@ void test_drm_getproperty(void) {
     return;
   }
 
-  /* Find the first property by querying connector's OBJ_GETPROPERTIES */
+  // Find the first property by querying connector's OBJ_GETPROPERTIES
   struct drm_mode_obj_get_properties objp;
   memset(&objp, 0, sizeof(objp));
-  objp.obj_id = 2; /* DRM_CONNECTOR_ID */
+  objp.obj_id = 2; // DRM_CONNECTOR_ID
   objp.obj_type = DRM_MODE_OBJECT_CONNECTOR;
   int rc = ioctl(fd, DRM_IOCTL_MODE_OBJ_GETPROPERTIES, &objp);
   TEST_ASSERT_EQUAL_INT(0, rc);
   TEST_ASSERT_TRUE(objp.count_props > 0);
 
-  /* Query the first property */
+  // Query the first property
   uint32_t props[16];
   uint64_t vals[16];
   objp.props_ptr = (uint64_t)(uintptr_t)props;
@@ -81,11 +80,11 @@ void test_drm_getproperty(void) {
   rc = ioctl(fd, DRM_IOCTL_MODE_OBJ_GETPROPERTIES, &objp);
   TEST_ASSERT_EQUAL_INT(0, rc);
 
-  /* Now query GETPROPERTY for the first prop_id */
+  // Now query GETPROPERTY for the first prop_id
   struct drm_mode_get_property gp;
   memset(&gp, 0, sizeof(gp));
   gp.prop_id = props[0];
-  gp.values_ptr = (uint64_t)(uintptr_t)NULL; /* skip values for now */
+  gp.values_ptr = (uint64_t)(uintptr_t)NULL; // skip values for now
   rc = ioctl(fd, DRM_IOCTL_MODE_GETPROPERTY, &gp);
   TEST_ASSERT_EQUAL_INT(0, rc);
   TEST_ASSERT_TRUE(gp.prop_id == props[0]);
@@ -94,7 +93,7 @@ void test_drm_getproperty(void) {
   close(fd);
 }
 
-/* 4. OBJ_GETPROPERTIES on plane: verify IN_FORMATS + CRTC_ID + FB_ID + SRC_* */
+// 4. OBJ_GETPROPERTIES on plane: verify IN_FORMATS + CRTC_ID + FB_ID + SRC_*
 void test_drm_obj_getproperties_plane(void) {
   int fd = open("/dev/dri/card0", O_RDWR);
   if (fd < 0) {
@@ -104,16 +103,16 @@ void test_drm_obj_getproperties_plane(void) {
 
   struct drm_mode_obj_get_properties o;
   memset(&o, 0, sizeof(o));
-  o.obj_id = 4; /* DRM_PLANE_ID */
+  o.obj_id = 4; // DRM_PLANE_ID
   o.obj_type = DRM_MODE_OBJECT_PLANE;
 
-  /* First call: get count */
+  // First call: get count
   int rc = ioctl(fd, DRM_IOCTL_MODE_OBJ_GETPROPERTIES, &o);
   TEST_ASSERT_EQUAL_INT(0, rc);
   TEST_ASSERT_TRUE(o.count_props >=
-                   4); /* IN_FORMATS + CRTC_ID + FB_ID + at least 1 SRC */
+                   4); // IN_FORMATS + CRTC_ID + FB_ID + at least 1 SRC
 
-  /* Second call: get values */
+  // Second call: get values
   uint32_t props[16];
   uint64_t vals[16];
   o.props_ptr = (uint64_t)(uintptr_t)props;
@@ -124,7 +123,7 @@ void test_drm_obj_getproperties_plane(void) {
   close(fd);
 }
 
-/* 5. OBJ_GETPROPERTIES on CRTC: verify ACTIVE + MODE_ID */
+// 5. OBJ_GETPROPERTIES on CRTC: verify ACTIVE + MODE_ID
 void test_drm_obj_getproperties_crtc(void) {
   int fd = open("/dev/dri/card0", O_RDWR);
   if (fd < 0) {
@@ -134,18 +133,18 @@ void test_drm_obj_getproperties_crtc(void) {
 
   struct drm_mode_obj_get_properties o;
   memset(&o, 0, sizeof(o));
-  o.obj_id = 1; /* DRM_CRTC_ID */
+  o.obj_id = 1; // DRM_CRTC_ID
   o.obj_type = DRM_MODE_OBJECT_CRTC;
 
   int rc = ioctl(fd, DRM_IOCTL_MODE_OBJ_GETPROPERTIES, &o);
   TEST_ASSERT_EQUAL_INT(0, rc);
-  TEST_ASSERT_TRUE(o.count_props >= 2); /* ACTIVE + MODE_ID */
+  TEST_ASSERT_TRUE(o.count_props >= 2); // ACTIVE + MODE_ID
 
   close(fd);
 }
 
-/* 6. GETPROPBLOB on IN_FORMATS: verify blob header + 4 formats + linear
- * modifier */
+// 6. GETPROPBLOB on IN_FORMATS: verify blob header + 4 formats + linear
+// modifier
 void test_drm_getpropropblob_in_formats(void) {
   int fd = open("/dev/dri/card0", O_RDWR);
   if (fd < 0) {
@@ -153,7 +152,7 @@ void test_drm_getpropropblob_in_formats(void) {
     return;
   }
 
-  /* Get plane properties to find IN_FORMATS blob_id */
+  // Get plane properties to find IN_FORMATS blob_id
   uint32_t props[16];
   uint64_t vals[16];
   struct drm_mode_obj_get_properties o;
@@ -164,7 +163,7 @@ void test_drm_getpropropblob_in_formats(void) {
   o.prop_values_ptr = (uint64_t)(uintptr_t)vals;
   ioctl(fd, DRM_IOCTL_MODE_OBJ_GETPROPERTIES, &o);
 
-  /* Find IN_FORMATS prop — identify by querying each property name */
+  // Find IN_FORMATS prop — identify by querying each property name
   uint32_t in_formats_blob_id = 0;
   for (uint32_t i = 0; i < o.count_props; i++) {
     struct drm_mode_get_property gp;
@@ -178,7 +177,7 @@ void test_drm_getpropropblob_in_formats(void) {
   }
   TEST_ASSERT_TRUE(in_formats_blob_id > 0);
 
-  /* First call: get blob length */
+  // First call: get blob length
   struct drm_mode_get_blob blob;
   memset(&blob, 0, sizeof(blob));
   blob.blob_id = in_formats_blob_id;
@@ -186,14 +185,14 @@ void test_drm_getpropropblob_in_formats(void) {
   TEST_ASSERT_EQUAL_INT(0, rc);
   TEST_ASSERT_TRUE(blob.length > 0);
 
-  /* Second call: read blob data */
+  // Second call: read blob data
   uint8_t blob_data[256];
   memset(blob_data, 0, sizeof(blob_data));
   blob.data = (uint64_t)(uintptr_t)blob_data;
   rc = ioctl(fd, DRM_IOCTL_MODE_GETPROPBLOB, &blob);
   TEST_ASSERT_EQUAL_INT(0, rc);
 
-  /* Verify header fields */
+  // Verify header fields
   struct drm_format_modifier_blob {
     uint32_t version;
     uint32_t count_formats;
@@ -206,14 +205,14 @@ void test_drm_getpropropblob_in_formats(void) {
   TEST_ASSERT_EQUAL_INT(4, hdr->count_formats);
   TEST_ASSERT_EQUAL_INT(1, hdr->count_modifiers);
 
-  /* Verify first format is XRGB8888 */
+  // Verify first format is XRGB8888
   uint32_t *fmts = (uint32_t *)(blob_data + hdr->formats_offset);
   TEST_ASSERT_EQUAL_INT(DRM_FORMAT_XRGB8888, fmts[0]);
 
   close(fd);
 }
 
-/* 7. GETCONNECTOR: count_props == 2 (DPMS + EDID) */
+// 7. GETCONNECTOR: count_props == 2 (DPMS + EDID)
 void test_drm_property_getconnector(void) {
   int fd = open("/dev/dri/card0", O_RDWR);
   if (fd < 0) {
@@ -228,7 +227,7 @@ void test_drm_property_getconnector(void) {
   TEST_ASSERT_EQUAL_INT(0, rc);
   TEST_ASSERT_TRUE(conn.count_props >= 2);
 
-  /* Second call: read props */
+  // Second call: read props
   uint32_t props[16];
   uint64_t vals[16];
   conn.props_ptr = (uint64_t)(uintptr_t)props;
@@ -241,7 +240,7 @@ void test_drm_property_getconnector(void) {
   close(fd);
 }
 
-/* 8. GETPROPBLOB on EDID: verify 128 bytes with valid checksum */
+// 8. GETPROPBLOB on EDID: verify 128 bytes with valid checksum
 void test_drm_getpropropblob_edid(void) {
   int fd = open("/dev/dri/card0", O_RDWR);
   if (fd < 0) {
@@ -249,7 +248,7 @@ void test_drm_getpropropblob_edid(void) {
     return;
   }
 
-  /* Find EDID blob_id through connector properties */
+  // Find EDID blob_id through connector properties
   uint32_t props[16];
   uint64_t vals[16];
   struct drm_mode_get_connector conn;
@@ -259,11 +258,11 @@ void test_drm_getpropropblob_edid(void) {
   conn.prop_values_ptr = (uint64_t)(uintptr_t)vals;
   ioctl(fd, DRM_IOCTL_MODE_GETCONNECTOR, &conn);
 
-  /* Identify which value is EDID by querying property names */
+  // Identify which value is EDID by querying property names
   uint32_t edid_blob_id = 0;
   for (uint32_t i = 0; i < conn.count_props && i < 16; i++) {
     if (vals[i] == 0)
-      continue; /* skip zero (not blob) */
+      continue; // skip zero (not blob)
     struct drm_mode_get_property gp;
     memset(&gp, 0, sizeof(gp));
     gp.prop_id = props[i];
@@ -275,7 +274,7 @@ void test_drm_getpropropblob_edid(void) {
   }
   TEST_ASSERT_TRUE(edid_blob_id > 0);
 
-  /* Read EDID blob */
+  // Read EDID blob
   struct drm_mode_get_blob blob;
   uint8_t edid_data[256];
   memset(&blob, 0, sizeof(blob));
@@ -286,20 +285,20 @@ void test_drm_getpropropblob_edid(void) {
   TEST_ASSERT_EQUAL_INT(0, rc);
   TEST_ASSERT_EQUAL_INT(128, (int)blob.length);
 
-  /* Verify EDID checksum */
+  // Verify EDID checksum
   uint8_t sum = 0;
   for (int i = 0; i < 128; i++)
     sum += edid_data[i];
   TEST_ASSERT_EQUAL_INT(0, sum);
 
-  /* Verify EDID header */
+  // Verify EDID header
   TEST_ASSERT_EQUAL_INT(0x00, edid_data[0]);
   TEST_ASSERT_EQUAL_INT(0xFF, edid_data[1]);
 
   close(fd);
 }
 
-/* 9. SET_MASTER multi-fd: fd1 set master → fd2 set master returns -EBUSY */
+// 9. SET_MASTER multi-fd: fd1 set master → fd2 set master returns -EBUSY
 void test_drm_master_multi_fd(void) {
   int fd1 = open("/dev/dri/card0", O_RDWR);
   if (fd1 < 0) {
@@ -313,7 +312,7 @@ void test_drm_master_multi_fd(void) {
     return;
   }
 
-  /* fd1: set master — should succeed */
+  // fd1: set master — should succeed
   int rc = ioctl(fd1, DRM_IOCTL_SET_MASTER, 0);
   if (rc < 0 && errno == EBUSY) {
     close(fd1);
@@ -323,26 +322,26 @@ void test_drm_master_multi_fd(void) {
   }
   TEST_ASSERT_EQUAL_INT(0, rc);
 
-  /* fd2: set master — should fail with -EBUSY */
+  // fd2: set master — should fail with -EBUSY
   rc = ioctl(fd2, DRM_IOCTL_SET_MASTER, 0);
   TEST_ASSERT_TRUE(rc < 0);
   TEST_ASSERT_EQUAL_INT(EBUSY, errno);
 
-  /* fd1: drop master */
+  // fd1: drop master
   rc = ioctl(fd1, DRM_IOCTL_DROP_MASTER, 0);
   TEST_ASSERT_EQUAL_INT(0, rc);
 
-  /* fd2: now can set master */
+  // fd2: now can set master
   rc = ioctl(fd2, DRM_IOCTL_SET_MASTER, 0);
   TEST_ASSERT_EQUAL_INT(0, rc);
 
-  /* Cleanup */
+  // Cleanup
   ioctl(fd2, DRM_IOCTL_DROP_MASTER, 0);
   close(fd1);
   close(fd2);
 }
 
-/* 10. DROP_MASTER cleanup: verify master drop resets state */
+// 10. DROP_MASTER cleanup: verify master drop resets state
 void test_drm_drop_master_cleanup(void) {
   int fd = open("/dev/dri/card0", O_RDWR);
   if (fd < 0) {
@@ -357,20 +356,20 @@ void test_drm_drop_master_cleanup(void) {
     return;
   }
 
-  /* Drop master */
+  // Drop master
   rc = ioctl(fd, DRM_IOCTL_DROP_MASTER, 0);
   TEST_ASSERT_EQUAL_INT(0, rc);
 
-  /* Verify: can set master again (cleanup doesn't leave stale master) */
+  // Verify: can set master again (cleanup doesn't leave stale master)
   rc = ioctl(fd, DRM_IOCTL_SET_MASTER, 0);
   TEST_ASSERT_EQUAL_INT(0, rc);
 
-  /* Drop again for clean state */
+  // Drop again for clean state
   ioctl(fd, DRM_IOCTL_DROP_MASTER, 0);
   close(fd);
 }
 
-/* 11. AUTH_MAGIC strict: unauthenticated magic returns -EPERM */
+// 11. AUTH_MAGIC strict: unauthenticated magic returns -EPERM
 void test_drm_auth_magic_strict(void) {
   int fd = open("/dev/dri/card0", O_RDWR);
   if (fd < 0) {
@@ -385,7 +384,7 @@ void test_drm_auth_magic_strict(void) {
     return;
   }
 
-  /* Try to auth a magic that was never issued via GET_MAGIC */
+  // Try to auth a magic that was never issued via GET_MAGIC
   struct drm_auth auth;
   memset(&auth, 0, sizeof(auth));
   auth.magic = 0xDEADBEEF;
@@ -393,7 +392,7 @@ void test_drm_auth_magic_strict(void) {
   TEST_ASSERT_TRUE(rc < 0);
   TEST_ASSERT_EQUAL_INT(EPERM, errno);
 
-  /* Now get a proper magic and auth it */
+  // Now get a proper magic and auth it
   memset(&auth, 0, sizeof(auth));
   rc = ioctl(fd, DRM_IOCTL_GET_MAGIC, &auth);
   TEST_ASSERT_EQUAL_INT(0, rc);
@@ -406,7 +405,7 @@ void test_drm_auth_magic_strict(void) {
   close(fd);
 }
 
-/* 12. CURSOR2: set cursor bitmap from a dumb buffer */
+// 12. CURSOR2: set cursor bitmap from a dumb buffer
 void test_drm_cursor2_bo(void) {
   int fd = open("/dev/dri/card0", O_RDWR);
   if (fd < 0) {
@@ -422,7 +421,7 @@ void test_drm_cursor2_bo(void) {
   }
   TEST_ASSERT_EQUAL_INT(0, rc);
 
-  /* Create a dumb buffer with cursor-size data */
+  // Create a dumb buffer with cursor-size data
   struct drm_mode_create_dumb dumb;
   memset(&dumb, 0, sizeof(dumb));
   dumb.width = 64;
@@ -435,7 +434,7 @@ void test_drm_cursor2_bo(void) {
     return;
   }
 
-  /* Map and write cursor pattern */
+  // Map and write cursor pattern
   struct drm_mode_map_dumb map;
   memset(&map, 0, sizeof(map));
   map.handle = dumb.handle;
@@ -452,13 +451,13 @@ void test_drm_cursor2_bo(void) {
     return;
   }
 
-  /* Fill with an ARGB cursor pattern: solid white arrow shape */
+  // Fill with an ARGB cursor pattern: solid white arrow shape
   uint32_t *pixels = (uint32_t *)buf;
   for (int y = 0; y < 64; y++)
     for (int x = 0; x < 64; x++)
-      pixels[y * 64 + x] = 0xFFFFFFFF; /* white, fully opaque */
+      pixels[y * 64 + x] = 0xFFFFFFFF; // white, fully opaque
 
-  /* Set cursor via CURSOR2 BO */
+  // Set cursor via CURSOR2 BO
   struct drm_mode_cursor2 cur;
   memset(&cur, 0, sizeof(cur));
   cur.flags = DRM_MODE_CURSOR_BO;
@@ -472,7 +471,7 @@ void test_drm_cursor2_bo(void) {
   close(fd);
 }
 
-/* 13. CURSOR2: move cursor */
+// 13. CURSOR2: move cursor
 void test_drm_cursor2_move(void) {
   int fd = open("/dev/dri/card0", O_RDWR);
   if (fd < 0) {
@@ -499,8 +498,8 @@ void test_drm_cursor2_move(void) {
   close(fd);
 }
 
-/* 14. drm_close cleanup: create resources, close fd, verify no leak (re-open
- * check) */
+// 14. drm_close cleanup: create resources, close fd, verify no leak (re-open
+// check)
 void test_drm_close_cleanup(void) {
   int fd = open("/dev/dri/card0", O_RDWR);
   if (fd < 0) {
@@ -508,7 +507,7 @@ void test_drm_close_cleanup(void) {
     return;
   }
 
-  /* Create a dumb buffer */
+  // Create a dumb buffer
   struct drm_mode_create_dumb dumb;
   memset(&dumb, 0, sizeof(dumb));
   dumb.width = 800;
@@ -517,7 +516,7 @@ void test_drm_close_cleanup(void) {
   int rc = ioctl(fd, DRM_IOCTL_MODE_CREATE_DUMB, &dumb);
   TEST_ASSERT_EQUAL_INT(0, rc);
 
-  /* Create a framebuffer */
+  // Create a framebuffer
   struct drm_mode_fb_cmd2 fb2;
   memset(&fb2, 0, sizeof(fb2));
   fb2.width = 800;
@@ -528,10 +527,10 @@ void test_drm_close_cleanup(void) {
   rc = ioctl(fd, DRM_IOCTL_MODE_ADDFB2, &fb2);
   TEST_ASSERT_EQUAL_INT(0, rc);
 
-  /* Close fd — triggers drm_close cleanup */
+  // Close fd — triggers drm_close cleanup
   close(fd);
 
-  /* Re-open and verify we can create new resources (no slot leak) */
+  // Re-open and verify we can create new resources (no slot leak)
   int fd2 = open("/dev/dri/card0", O_RDWR);
   TEST_ASSERT_TRUE(fd2 >= 0);
   close(fd2);

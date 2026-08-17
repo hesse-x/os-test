@@ -156,7 +156,7 @@ static struct inode *inotify_resolve_path(const char *upath) {
     return ERR_PTR(-ENOENT);
 
   if (kpath[0] == '/') {
-    struct inode *ip = vfs_open_kern(kpath); /* +1 or NULL */
+    struct inode *ip = vfs_open_kern(kpath); // +1 or NULL
     if (!ip)
       return ERR_PTR(-ENOENT);
     return ip;
@@ -165,7 +165,7 @@ static struct inode *inotify_resolve_path(const char *upath) {
   struct inode *start = resolve_dirfd_start(AT_FDCWD);
   if (IS_ERR(start))
     return start;
-  struct inode *ip = path_walk_from(start, kpath); /* +1 or NULL */
+  struct inode *ip = path_walk_from(start, kpath); // +1 or NULL
   inode_put(start);
   if (!ip)
     return ERR_PTR(-ENOENT);
@@ -406,8 +406,8 @@ void inotify_inode_event(struct inode *inode, uint32_t mask, uint32_t cookie,
     uint64_t flags;
     spin_lock_irqsave(&in->lock, &flags);
     if (in->nqueued < INOTIFY_MAX_EVENTS) {
-      /* Linux reports len including the terminating NUL and padding. Keeping
-       * each record 4-byte aligned also lets userspace safely walk a batch. */
+      // Linux reports len including the terminating NUL and padding. Keeping
+      // each record 4-byte aligned also lets userspace safely walk a batch.
       uint32_t event_len = name ? (namelen + 1 + 3) & ~3u : 0;
       inotify_event_node *node =
           (inotify_event_node *)kmalloc(sizeof(inotify_event_node) + event_len);

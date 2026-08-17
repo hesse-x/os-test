@@ -49,8 +49,8 @@ void test_pthread_self(void) {
   TEST_ASSERT_EQUAL_INT(
       0, pthread_create(&t, NULL, thread_self_fn, &self_captured));
   pthread_join(t, NULL);
-  /* pthread_t is a pointer (struct __pthread *) under musl; compare as
-   * pointers rather than truncating to int. */
+  // pthread_t is a pointer (struct __pthread *) under musl; compare as
+  // pointers rather than truncating to int.
   TEST_ASSERT_EQUAL_PTR(t, self_captured);
 }
 
@@ -272,8 +272,8 @@ static void *thread_detached_fn(void *arg) {
   volatile char buf[1024];
   for (int i = 0; i < 1024; i++)
     buf[i] = (char)i;
-  /* Read back so the writes are not "set but not used"; this also
-   * guarantees the thread touches its full stack page. */
+  // Read back so the writes are not "set but not used"; this also
+  // guarantees the thread touches its full stack page.
   volatile char sum = 0;
   for (int i = 0; i < 1024; i++)
     sum += buf[i];
@@ -354,7 +354,7 @@ static volatile int overflow_waiter_done;
 
 static void *thread_futex_overflow_fn(void *arg) {
   (void)arg;
-  /* This tv_sec value made tv_sec * 1e9 wrap to 512ns. */
+  // This tv_sec value made tv_sec * 1e9 wrap to 512ns.
   struct timespec timeout = {.tv_sec = 20211507185753197L, .tv_nsec = 0};
   overflow_waiter_ready = 1;
   int rc = sys_futex(&overflow_futex, FUTEX_WAIT | FUTEX_PRIVATE_FLAG, 0,

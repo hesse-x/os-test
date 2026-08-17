@@ -4,14 +4,16 @@
  * SPDX-License-Identifier: MIT
  */
 
-// test_xkbcommon_smoke — wlroots 前置依赖 libxkbcommon 的目标端冒烟测试。
+// test_xkbcommon_smoke — target-side smoke test for libxkbcommon, a
+// wlroots prerequisite.
 //
-// 仅验证纯逻辑路径：context 创建、自包含 keymap
-// 编译（xkb_keymap_new_from_string， 不依赖磁盘 XKB 规则数据——那是 WF-4
-// 的范围）、keysym 名称↔数值转换、keymap 内 键的符号查询。证明
-// build/libxkbcommon.so 能被 musl loader 加载、符号（含
-// secure_getenv）可解析、最小 API 行为正确。参考 test_pixman_smoke.c
-// 的诊断式风格。
+// Verifies only the pure-logic paths: context creation, compiling a
+// self-contained keymap (xkb_keymap_new_from_string, no reliance on on-disk
+// XKB rule data — that is WF-4 scope), keysym name<->value conversion, and
+// symbol lookup of keys in the keymap. Proves that build/libxkbcommon.so can
+// be loaded by the musl loader, that symbols (including secure_getenv) resolve,
+// and that the minimal API behaves correctly. Follows the diagnostic style of
+// test_pixman_smoke.c.
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -25,15 +27,17 @@ static int fail(const char *what) {
 }
 
 int main(void) {
-  // 1. 创建 context，禁用默认 include 路径——本测试用自包含 keymap，不读取
-  //    任何磁盘 XKB 规则数据（WF-4 才接入 XKB_CONFIG_ROOT）。
+  // 1. Create the context, disabling the default include path — this test uses
+  //    a self-contained keymap and reads no on-disk XKB rule data (only WF-4
+  //    wires in XKB_CONFIG_ROOT).
   struct xkb_context *ctx = xkb_context_new(XKB_CONTEXT_NO_DEFAULT_INCLUDES);
   if (!ctx)
     fail("xkb_context_new");
   printf("xkbcommon: created context %p\n", (void *)ctx);
 
-  // 2. 编译一个自包含的最小 keymap：单键 <a>(keycode 24) 映射到 keysym 'a'。
-  //    不含任何 include 指令，因此无需 XKB 数据目录。
+  // 2. Compile a self-contained minimal keymap: single key <a> (keycode 24)
+  //    mapped to keysym 'a'. Contains no include directives, so no XKB data
+  //    directory is needed.
   static const char keymap_str[] = "xkb_keymap {\n"
                                    "  xkb_keycodes { <a> = 24; };\n"
                                    "  xkb_compat {};\n"
@@ -46,13 +50,13 @@ int main(void) {
     fail("xkb_keymap_new_from_string");
   printf("xkbcommon: compiled keymap %p\n", (void *)keymap);
 
-  // 3. keysym 名称→数值：'a' 对应 XKB_KEY_a (0x61)。
+  // 3. keysym name->value: 'a' maps to XKB_KEY_a (0x61).
   xkb_keysym_t ks = xkb_keysym_from_name("a", XKB_KEYSYM_NO_FLAGS);
   printf("xkbcommon: keysym 'a' = 0x%x\n", ks);
   if (ks != 0x61)
     fail("xkb_keysym_from_name('a') != 0x61");
 
-  // 4. 数值→名称：反向解析 0x61 应回到 "a"。
+  // 4. value->name: reverse-resolving 0x61 should return "a".
   char name[64];
   int nlen = xkb_keysym_get_name(ks, name, sizeof(name));
   if (nlen <= 0 || (size_t)nlen >= sizeof(name))
@@ -61,10 +65,12 @@ int main(void) {
   if (strcmp(name, "a") != 0)
     fail("xkb_keysym_get_name did not return 'a'");
 
-  // 5. keymap 内键的符号查询：keycode 24 (<a>) 的 Level0 符号应为 'a' (0x61)。
-  //    xkb_keymap_key_get_syms_by_level 的 layout 与 level 形参均为 0 基
-  //    （见 xkbcommon.h 注释及上游 test/keymap.c 用法），单 level 键的符号
-  //    在 level 0；level 1 超出该键的 level 数 → 返回 0、syms 置 NULL。
+  // 5. Symbol lookup of a key in the keymap: keycode 24 (<a>)'s Level0 symbol
+  //    should be 'a' (0x61). The layout and level args of
+  //    xkb_keymap_key_get_syms_by_level are both 0-based (see xkbcommon.h
+  //    comments and upstream test/keymap.c usage); a single-level key's symbol
+  //    is at level 0; level 1 exceeds the key's level count -> returns 0, syms
+  //    set to NULL.
   const xkb_keysym_t *syms = NULL;
   int nsyms = xkb_keymap_key_get_syms_by_level(keymap, 24, 0, 0, &syms);
   printf("xkbcommon: keycode 24 level0 -> %d syms (first 0x%x)\n", nsyms,
@@ -72,7 +78,8 @@ int main(void) {
   if (nsyms != 1 || !syms || syms[0] != 0x61)
     fail("xkb_keymap_key_get_syms_by_level(keycode 24) != 'a'");
 
-  // 6. state 创建（验证 keymap 可构造 state，覆盖 xkb_state_new 路径）。
+  // 6. State creation (verifies the keymap can construct a state, covering the
+  //    xkb_state_new path).
   struct xkb_state *state = xkb_state_new(keymap);
   if (!state)
     fail("xkb_state_new");

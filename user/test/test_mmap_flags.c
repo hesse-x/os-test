@@ -3,7 +3,6 @@
  *
  * SPDX-License-Identifier: MIT
  */
-
 // S13: mmap flag handling — recognized-but-unsupported flags are no-op,
 // genuinely-unknown bits are rejected with -EINVAL, and MAP_LOCKED now uses
 // the Linux value 0x2000 (0x100 belongs to MAP_GROWSDOWN).
@@ -26,7 +25,7 @@ static void *anon_with_flag(int extra) {
               MAP_PRIVATE | MAP_ANONYMOUS | extra, -1, 0);
 }
 
-/* TC1: MAP_LOCKED is accepted (no swap here → no-op). */
+// TC1: MAP_LOCKED is accepted (no swap here → no-op).
 void test_mmap_locked_noop(void) {
   void *p = anon_with_flag(MAP_LOCKED);
   TEST_ASSERT_NOT_NULL(p);
@@ -35,7 +34,7 @@ void test_mmap_locked_noop(void) {
   munmap(p, PAGE);
 }
 
-/* TC2: MAP_HUGETLB is accepted as no-op (ordinary 4KB page). */
+// TC2: MAP_HUGETLB is accepted as no-op (ordinary 4KB page).
 void test_mmap_hugetlb_noop(void) {
   void *p = anon_with_flag(MAP_HUGETLB);
   TEST_ASSERT_NOT_NULL(p);
@@ -44,7 +43,7 @@ void test_mmap_hugetlb_noop(void) {
   munmap(p, PAGE);
 }
 
-/* TC3: MAP_POPULATE is a no-op (anonymous mmap pre-allocates already). */
+// TC3: MAP_POPULATE is a no-op (anonymous mmap pre-allocates already).
 void test_mmap_populate_noop(void) {
   void *p = anon_with_flag(MAP_POPULATE);
   TEST_ASSERT_NOT_NULL(p);
@@ -53,7 +52,7 @@ void test_mmap_populate_noop(void) {
   munmap(p, PAGE);
 }
 
-/* TC4: MAP_STACK is a no-op (fixed user stack, no special placement). */
+// TC4: MAP_STACK is a no-op (fixed user stack, no special placement).
 void test_mmap_stack_noop(void) {
   void *p = anon_with_flag(MAP_STACK);
   TEST_ASSERT_NOT_NULL(p);
@@ -62,7 +61,7 @@ void test_mmap_stack_noop(void) {
   munmap(p, PAGE);
 }
 
-/* TC5: MAP_NORESERVE is a no-op (no swap to reserve). */
+// TC5: MAP_NORESERVE is a no-op (no swap to reserve).
 void test_mmap_noreserve_noop(void) {
   void *p = anon_with_flag(MAP_NORESERVE);
   TEST_ASSERT_NOT_NULL(p);
@@ -71,7 +70,7 @@ void test_mmap_noreserve_noop(void) {
   munmap(p, PAGE);
 }
 
-/* TC6: MAP_GROWSDOWN is a no-op (no stack-grow mechanism). */
+// TC6: MAP_GROWSDOWN is a no-op (no stack-grow mechanism).
 void test_mmap_growsdown_noop(void) {
   void *p = anon_with_flag(MAP_GROWSDOWN);
   TEST_ASSERT_NOT_NULL(p);
@@ -80,9 +79,9 @@ void test_mmap_growsdown_noop(void) {
   munmap(p, PAGE);
 }
 
-/* TC7: a genuinely-unknown flag bit is rejected with -EINVAL.
- * 0x40000000 is not in MAP_KNOWN_FLAGS (0x80000000 is MAP_PHYSICAL, which
- * *is* recognized). */
+// TC7: a genuinely-unknown flag bit is rejected with -EINVAL.
+// 0x40000000 is not in MAP_KNOWN_FLAGS (0x80000000 is MAP_PHYSICAL, which
+// *is* recognized).
 void test_mmap_unknown_flag_einval(void) {
   void *p = mmap(NULL, PAGE, PROT_READ | PROT_WRITE,
                  MAP_PRIVATE | MAP_ANONYMOUS | 0x40000000, -1, 0);

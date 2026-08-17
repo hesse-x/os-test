@@ -1,4 +1,5 @@
-/* Copyright (c) 2026 hesse
+/*
+ * Copyright (c) 2026 hesse
  * SPDX-License-Identifier: MIT
  */
 #ifndef OS_COMPOSITOR_DOCK_LAYOUT_H

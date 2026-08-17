@@ -121,7 +121,7 @@ typedef struct files {
   refcount_t f_count;
 } files;
 
-#endif /* KERNEL_BSD_TYPES_H */
+#endif // KERNEL_BSD_TYPES_H
 
 // ===================== proc =====================
 // Must match kernel/bsd/proc.h exactly.
@@ -199,7 +199,7 @@ DRV_STATIC_ASSERT(offsetof(proc, signal) == 176,
 DRV_STATIC_ASSERT(sizeof(proc) == 584, "driver proc size drift");
 #undef DRV_STATIC_ASSERT
 
-#endif /* KERNEL_BSD_PROC_H */
+#endif // KERNEL_BSD_PROC_H
 
 // ===================== file refcount =====================
 // Must match kernel/bsd/types.h.
@@ -218,4 +218,4 @@ static inline struct file *fd_lookup(files *files, int fd) {
 }
 #endif
 
-#endif /* KERNEL_DRIVER_BSD_TYPES_H */
+#endif // KERNEL_DRIVER_BSD_TYPES_H

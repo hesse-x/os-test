@@ -40,7 +40,7 @@ const struct termios default_termios = {
     .c_cc =
         {
             [VINTR] = 0x03,  // Ctrl-C
-            [VQUIT] = 0x1C,  /* Ctrl-backslash */
+            [VQUIT] = 0x1C,  // Ctrl-backslash
             [VERASE] = 0x7F, // DEL
             [VKILL] = 0x15,  // Ctrl-U
             [VEOF] = 0x04,   // Ctrl-D
@@ -184,11 +184,11 @@ void pty_init(void) {
   devtmpfs_create("ptmx", &ptmx_ops, NULL);
 
   ptmx_inode = devtmpfs_lookup("ptmx");
-  /* ptmx_inode is kept only for pointer-identity comparisons
-   * (pty_fd_is_master / pty_is_master_inode). devtmpfs_lookup now returns a
-   * +1 reference; we don't need to own one — the dev_list entry keeps the
-   * inode alive for the system's lifetime (ptmx is a kernel device, never
-   * removed). Drop the lookup ref so we don't leak it. */
+  // ptmx_inode is kept only for pointer-identity comparisons
+  // (pty_fd_is_master / pty_is_master_inode). devtmpfs_lookup now returns a
+  // +1 reference; we don't need to own one — the dev_list entry keeps the
+  // inode alive for the system's lifetime (ptmx is a kernel device, never
+  // removed). Drop the lookup ref so we don't leak it.
   inode_put(ptmx_inode);
 
   printk(LOG_INFO, "pty_init: /dev/ptmx registered\n");

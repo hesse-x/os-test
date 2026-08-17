@@ -28,7 +28,7 @@
 #define PERF_EVENTSEL_INT (1ULL << 20)
 #define PERF_EVENTSEL_ENABLE (1ULL << 22)
 
-/* 0=uninitialized, 1=PMU NMI, 2=timer fallback. */
+// 0=uninitialized, 1=PMU NMI, 2=timer fallback.
 static uint8_t pmu_state[MAX_CPUS];
 static uint8_t pmu_width[MAX_CPUS];
 static uint64_t pmu_period[MAX_CPUS];

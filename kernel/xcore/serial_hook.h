@@ -31,4 +31,4 @@ void serial_vprintf_locked(const char *fmt, va_list ap);
 #define SERIAL_PRINTF(...) serial_printf(__VA_ARGS__)
 #define SERIAL_VPRINTF(fmt, ap) serial_vprintf(fmt, ap)
 
-#endif /* KERNEL_XCORE_SERIAL_HOOK_H */
+#endif // KERNEL_XCORE_SERIAL_HOOK_H

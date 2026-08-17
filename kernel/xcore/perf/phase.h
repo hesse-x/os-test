@@ -7,9 +7,9 @@
 #ifndef XOS_KERNEL_PERF_PHASE_H
 #define XOS_KERNEL_PERF_PHASE_H
 
+#ifdef PERF
 #include <stdint.h>
 
-#ifdef PERF
 void perf_early_phase_begin_at(uint16_t phase_id, uint64_t timestamp);
 void perf_phase_begin(uint16_t phase_id);
 void perf_phase_end(uint16_t phase_id);

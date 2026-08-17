@@ -1,4 +1,5 @@
-/* Copyright (c) 2026 hesse
+/*
+ * Copyright (c) 2026 hesse
  * SPDX-License-Identifier: MIT
  */
 #ifndef OS_COMPOSITOR_TRUSTED_CLIENT_H
@@ -8,8 +9,8 @@
 
 struct wl_client;
 
-/* Only the wl_client created from the inherited WAYLAND_SOCKET may bind the
- * private effect global. Pointer identity is stable for the client lifetime. */
+// Only the wl_client created from the inherited WAYLAND_SOCKET may bind the
+// private effect global. Pointer identity is stable for the client lifetime.
 struct os_trusted_client {
   const struct wl_client *wayland_socket_client;
 };

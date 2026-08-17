@@ -4,17 +4,20 @@
  * SPDX-License-Identifier: MIT
  */
 
-/* test_link.c — 验证 §3.4 link(2)/linkat(2)(tmpfs 硬链接 + nlink 全链路,
- * Q3)。对齐 test_rename.c/test_stat_real.c 风格:Unity freestanding,FAT32
- * (/ 前缀)+ tmpfs(/run 前缀)双夹具。
- *
- * nlink 全链路(Q3):link 使 target nlink==2;unlink 链名后 nlink==1
- * (原路径仍可达,数据不丢);mkdir 使父目录 nlink++(目录的 "."/".." 计数),
- * rmdir 反向。硬链目录 → EPERM(POSIX);跨 fs(FAT32↔tmpfs)→ EXDEV;
- * FAT32 link → EPERM(物理无硬链)。重名 → EEXIST。
- *
- * tmpfs 硬链语义:link 建 new → old 共享同一 inode(目录项是名字→inode 映射),
- * nlink 是该 inode 的目录项计数。unlink 摘目录项 nlink--,i_count 管回收。 */
+// test_link.c — verifies §3.4 link(2)/linkat(2) (tmpfs hard links + the full
+// nlink chain, Q3). Aligned with the test_rename.c/test_stat_real.c style:
+// Unity freestanding, FAT32 (/ prefix) + tmpfs (/run prefix) dual fixtures.
+//
+// Full nlink chain (Q3): link makes target nlink==2; unlinking a link name
+// drops nlink to 1 (the original path still works, data is not lost); mkdir
+// increments the parent dir's nlink++ ("."/".." count), rmdir reverses it.
+// Hard-linking a directory → EPERM (POSIX); cross-fs (FAT32↔tmpfs) → EXDEV;
+// FAT32 link → EPERM (no physical hard links). Duplicate name → EEXIST.
+//
+// tmpfs hard-link semantics: link creates new → old sharing the same inode
+// (a directory entry maps name → inode), and nlink counts that inode's
+// directory entries. unlink removes an entry and decrements nlink, while
+// i_count manages reclamation.
 #include "unity.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -40,8 +43,9 @@ static void cleanup(void) {
   unlink(FAT "/a");
 }
 
-/* tmpfs link round-trip:建 a → write 数据 → link(a, b) → b 可读同数据 +
- * nlink==2。验证硬链共享 inode(非软链的拷贝)。 */
+// tmpfs link round-trip: create a → write data → link(a, b) → b reads the
+// same data + nlink==2. Verifies hard links share an inode (not a symlink
+// copy).
 void test_link_tmpfs_data_shared(void) {
   cleanup();
   int fd = open(TFS "/a", O_CREAT | O_WRONLY | O_TRUNC, 0644);
@@ -62,8 +66,9 @@ void test_link_tmpfs_data_shared(void) {
   TEST_ASSERT_EQUAL_INT(2, (int)st.st_nlink);
 }
 
-/* unlink 链名后 nlink--:link(a,b) 后 unlink a,nlink 回 1,且 b 仍可达数据
- * (硬链不依赖原路径,数据在 inode 上)。 */
+// After unlinking a link name, nlink--: after link(a,b) + unlink a, nlink
+// returns to 1 and b still reaches the data (a hard link does not depend on
+// the original path; the data lives on the inode).
 void test_link_unlink_keeps_data(void) {
   cleanup();
   int fd = open(TFS "/a", O_CREAT | O_WRONLY | O_TRUNC, 0644);
@@ -84,7 +89,8 @@ void test_link_unlink_keeps_data(void) {
   TEST_ASSERT_EQUAL_STRING("xyz", buf);
 }
 
-/* linkat 用 dirfd 相对路径:open a 的父目录 dfd,linkat(dfd,"a",dfd,"b",0)。 */
+// linkat uses a dirfd-relative path: open a's parent dir dfd, then
+// linkat(dfd,"a",dfd,"b",0).
 void test_linkat_dirfd(void) {
   cleanup();
   int fd = open(TFS "/a", O_CREAT | O_WRONLY | O_TRUNC, 0644);
@@ -97,7 +103,7 @@ void test_linkat_dirfd(void) {
   TEST_ASSERT_EQUAL_INT(0, access(TFS "/b", F_OK));
 }
 
-/* 硬链目录 → EPERM(POSIX:仅 root 可,本 OS 不开)。 */
+// Hard-linking a directory → EPERM (POSIX: root-only, not enabled here).
 void test_link_dir_eperm(void) {
   cleanup();
   TEST_ASSERT_EQUAL_INT(0, mkdir(TFS "/d", 0755));
@@ -107,7 +113,7 @@ void test_link_dir_eperm(void) {
   rmdir(TFS "/dlink");
 }
 
-/* 跨 fs(FAT32↔tmpfs)→ EXDEV。 */
+// Cross-fs (FAT32↔tmpfs) → EXDEV.
 void test_link_cross_fs_exdev(void) {
   cleanup();
   int fd = open(FAT "/a", O_CREAT | O_WRONLY | O_TRUNC, 0644);
@@ -117,8 +123,8 @@ void test_link_cross_fs_exdev(void) {
   TEST_ASSERT_EQUAL_INT(EXDEV, errno);
 }
 
-/* FAT32 link → EPERM(FAT32 物理无硬链,fat32_dir_iop.link==NULL → 内核
- * do_linkat 返 -EPERM)。 */
+// FAT32 link → EPERM (FAT32 has no hard links; fat32_dir_iop.link==NULL →
+// the kernel's do_linkat returns -EPERM).
 void test_link_fat32_eperm(void) {
   cleanup();
   int fd = open(FAT "/a", O_CREAT | O_WRONLY | O_TRUNC, 0644);
@@ -128,7 +134,7 @@ void test_link_fat32_eperm(void) {
   TEST_ASSERT_EQUAL_INT(EPERM, errno);
 }
 
-/* 目标已存在 → EEXIST。 */
+// Target already exists → EEXIST.
 void test_link_eexist(void) {
   cleanup();
   int fd = open(TFS "/a", O_CREAT | O_WRONLY | O_TRUNC, 0644);
@@ -141,7 +147,8 @@ void test_link_eexist(void) {
   TEST_ASSERT_EQUAL_INT(EEXIST, errno);
 }
 
-/* 非法 flags(linkat 仅 AT_SYMLINK_FOLLOW 合法)→ EINVAL(Q6 严格校验)。 */
+// Invalid flags (linkat only accepts AT_SYMLINK_FOLLOW) → EINVAL (strict Q6
+// validation).
 void test_linkat_invalid_flags(void) {
   cleanup();
   int fd = open(TFS "/a", O_CREAT | O_WRONLY | O_TRUNC, 0644);

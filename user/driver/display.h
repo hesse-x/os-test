@@ -7,12 +7,12 @@
 #ifndef DRIVER_DISPLAY_H
 #define DRIVER_DISPLAY_H
 
-/* Userspace display client API — DRM/KMS backend (virtio-gpu).
-   API surface unchanged from the old bochs-display KMS version:
-   terminal.cc calls display_client_init / render_cell / clear /
-   scroll_up / set_cursor / flush. Internals now drive DRM ioctls
-  on a libseat-granted /dev/dri/card0 fd (CREATE_DUMB / MAP_DUMB / mmap / ADDFB
-  / SETCRTC / PAGE_FLIP). */
+// Userspace display client API — DRM/KMS backend (virtio-gpu).
+// API surface unchanged from the old bochs-display KMS version:
+// terminal.cc calls display_client_init / render_cell / clear /
+// scroll_up / set_cursor / flush. Internals now drive DRM ioctls
+// on a libseat-granted /dev/dri/card0 fd (CREATE_DUMB / MAP_DUMB / mmap /
+// ADDFB / SETCRTC / PAGE_FLIP).
 
 #include <fcntl.h>
 #include <stddef.h>
@@ -29,7 +29,7 @@
 #include "xf86drm.h"
 #include "xf86drmMode.h"
 
-/* Local metadata (filled by display_client_init) */
+// Local metadata (filled by display_client_init)
 static uint32_t display_pitch;
 static uint32_t display_fb_width;
 static uint32_t display_fb_height;
@@ -39,7 +39,7 @@ static uint8_t *display_back_buffer;
 static size_t display_buffer_size;
 static int display_dev_fd = -1;
 
-/* DRM handles (internal) */
+// DRM handles (internal)
 static uint32_t drm_dumb_handle;
 static uint32_t drm_fb_id;
 
@@ -62,20 +62,20 @@ static inline void display_client_destroy(void) {
   display_dev_fd = -1;
 }
 
-/* Initialize KMS on a card fd granted by the terminal's libseat session. */
+// Initialize KMS on a card fd granted by the terminal's libseat session.
 static inline int display_client_init(int fd) {
   if (fd < 0)
     return -1;
   display_dev_fd = fd;
 
-  /* seatd acquires master before passing this open-file-description. */
+  // seatd acquires master before passing this open-file-description.
   if (drmSetMaster(fd) < 0) {
     printf("display_client_init: seatd fd is not DRM master\n");
     display_client_destroy();
     return -1;
   }
 
-  /* Query resources via libdrm */
+  // Query resources via libdrm
   drmModeRes *res = drmModeGetResources(fd);
   if (!res) {
     printf("display_client_init: drmModeGetResources failed\n");
@@ -83,7 +83,7 @@ static inline int display_client_init(int fd) {
     return -1;
   }
 
-  /* Get the first connector to grab mode info */
+  // Get the first connector to grab mode info
   drmModeConnector *conn = NULL;
   for (int i = 0; i < res->count_connectors; i++) {
     conn = drmModeGetConnector(fd, res->connectors[i]);
@@ -99,12 +99,12 @@ static inline int display_client_init(int fd) {
     return -1;
   }
 
-  /* Use the preferred mode (first in list) */
+  // Use the preferred mode (first in list)
   drmModeModeInfo *mode = &conn->modes[0];
   display_fb_width = mode->hdisplay;
   display_fb_height = mode->vdisplay;
 
-  /* CREATE_DUMB via drmIoctl */
+  // CREATE_DUMB via drmIoctl
   struct drm_mode_create_dumb dumb;
   memset(&dumb, 0, sizeof(dumb));
   dumb.width = display_fb_width;
@@ -124,7 +124,7 @@ static inline int display_client_init(int fd) {
   display_rows = display_fb_height / FONT_HEIGHT;
   display_cols = display_fb_width / FONT_WIDTH;
 
-  /* MAP_DUMB via drmIoctl */
+  // MAP_DUMB via drmIoctl
   struct drm_mode_map_dumb map;
   memset(&map, 0, sizeof(map));
   map.handle = drm_dumb_handle;
@@ -136,7 +136,7 @@ static inline int display_client_init(int fd) {
     return -1;
   }
 
-  /* mmap back buffer */
+  // mmap back buffer
   void *buf =
       mmap(NULL, dumb.size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, map.offset);
   if (buf == MAP_FAILED) {
@@ -148,7 +148,7 @@ static inline int display_client_init(int fd) {
   }
   display_back_buffer = (uint8_t *)buf;
 
-  /* ADDFB via drmModeAddFB */
+  // ADDFB via drmModeAddFB
   uint32_t fb_id;
   if (drmModeAddFB(fd, display_fb_width, display_fb_height, 24, 32,
                    display_pitch, drm_dumb_handle, &fb_id) < 0) {
@@ -160,9 +160,8 @@ static inline int display_client_init(int fd) {
   }
   drm_fb_id = fb_id;
 
-  /* SETCRTC via drmModeSetCrtc */
-  if (drmModeSetCrtc(fd, 1 /* crtc_id */, fb_id, 0, 0, &conn->connector_id, 1,
-                     mode) < 0) {
+  // SETCRTC via drmModeSetCrtc (crtc_id = 1)
+  if (drmModeSetCrtc(fd, 1, fb_id, 0, 0, &conn->connector_id, 1, mode) < 0) {
     printf("display_client_init: SETCRTC failed\n");
     drmModeFreeConnector(conn);
     drmModeFreeResources(res);
@@ -175,7 +174,7 @@ static inline int display_client_init(int fd) {
   return 0;
 }
 
-/* Render a single cell to the back buffer */
+// Render a single cell to the back buffer
 static inline void display_client_render_cell(uint32_t row, uint32_t col,
                                               uint8_t ch, uint32_t fg,
                                               uint32_t bg) {
@@ -198,7 +197,7 @@ static inline void display_client_render_cell(uint32_t row, uint32_t col,
   }
 }
 
-/* Clear back buffer */
+// Clear back buffer
 static inline void display_client_clear(uint32_t bg) {
   uint32_t total_pixels = display_fb_height * (display_pitch / 4);
   uint32_t *buf = (uint32_t *)display_back_buffer;
@@ -207,13 +206,13 @@ static inline void display_client_clear(uint32_t bg) {
   }
 }
 
-/* Scroll back buffer up by one text row */
+// Scroll back buffer up by one text row
 static inline void display_client_scroll_up(uint32_t bg) {
   uint32_t line_bytes = display_pitch * FONT_HEIGHT;
   uint32_t fb_bytes = display_fb_height * display_pitch;
   uint32_t move_bytes = fb_bytes - line_bytes;
 
-  /* uint64_t bulk move (8-byte stride), byte-wise tail for remainder */
+  // uint64_t bulk move (8-byte stride), byte-wise tail for remainder
   uint64_t *dst64 = (uint64_t *)display_back_buffer;
   const uint64_t *src64 = (const uint64_t *)(display_back_buffer + line_bytes);
   uint32_t n64 = move_bytes / 8;
@@ -236,21 +235,21 @@ static inline void display_client_scroll_up(uint32_t bg) {
   }
 }
 
-/* Cursor (no-op: software cursor rendered by terminal) */
+// Cursor (no-op: software cursor rendered by terminal)
 static inline void display_client_set_cursor(uint32_t x, uint32_t y) {
   (void)x;
   (void)y;
 }
 
-/* Flush: page-flip the back buffer to the scanout. The dirty-row range
-   is ignored for now (the kernel transfers the full frame on flip);
-   keeping the argument preserves the call sites in terminal.cc. */
+// Flush: page-flip the back buffer to the scanout. The dirty-row range
+// is ignored for now (the kernel transfers the full frame on flip);
+// keeping the argument preserves the call sites in terminal.cc.
 static inline void display_client_flush(uint32_t dirty_row_start,
                                         uint32_t dirty_row_end) {
   (void)dirty_row_start;
   (void)dirty_row_end;
-  drmModePageFlip(display_dev_fd, 1 /* crtc_id */, drm_fb_id,
-                  0 /* flags — fire-and-forget */, NULL /* user_data */);
+  // crtc_id = 1; flags = fire-and-forget; user_data = NULL
+  drmModePageFlip(display_dev_fd, 1, drm_fb_id, 0, NULL);
 }
 
 #endif

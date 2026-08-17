@@ -4,8 +4,8 @@
  * SPDX-License-Identifier: MIT
  */
 
-/* test_clock_realtime — S14: CLOCK_REALTIME wall clock (CMOS RTC) + clockid
- * set completion + clock_settime offset adjust. */
+// test_clock_realtime — S14: CLOCK_REALTIME wall clock (CMOS RTC) + clockid
+// set completion + clock_settime offset adjust.
 
 #include <errno.h>
 #include <stdint.h>
@@ -21,16 +21,16 @@
 void setUp(void) {}
 void tearDown(void) {}
 
-/* CR-001: CLOCK_REALTIME is a wall clock (epoch seconds), not the monotonic
- * "seconds since boot" value. A boot-time monotonic clock is usually < 1000s;
- * any post-2023 wall clock is > 1.7e9. */
+// CR-001: CLOCK_REALTIME is a wall clock (epoch seconds), not the monotonic
+// "seconds since boot" value. A boot-time monotonic clock is usually < 1000s;
+// any post-2023 wall clock is > 1.7e9.
 void test_clock_realtime_is_epoch(void) {
   struct timespec ts;
   TEST_ASSERT_EQUAL_INT(0, clock_gettime(CLOCK_REALTIME, &ts));
   TEST_ASSERT_TRUE(ts.tv_sec > 1700000000L);
 }
 
-/* CR-002: clock_gettime(REALTIME) and gettimeofday agree to within 1s. */
+// CR-002: clock_gettime(REALTIME) and gettimeofday agree to within 1s.
 void test_clock_realtime_matches_gettimeofday(void) {
   struct timespec ts;
   struct timeval tv;
@@ -39,7 +39,7 @@ void test_clock_realtime_matches_gettimeofday(void) {
   TEST_ASSERT_TRUE(llabs((long long)ts.tv_sec - (long long)tv.tv_sec) <= 1);
 }
 
-/* CR-003: monotonic < realtime (monotonic starts at 0 at boot). */
+// CR-003: monotonic < realtime (monotonic starts at 0 at boot).
 void test_monotonic_less_than_realtime(void) {
   struct timespec mono, rt;
   TEST_ASSERT_EQUAL_INT(0, clock_gettime(CLOCK_MONOTONIC, &mono));
@@ -47,7 +47,7 @@ void test_monotonic_less_than_realtime(void) {
   TEST_ASSERT_TRUE(mono.tv_sec < rt.tv_sec);
 }
 
-/* CR-004: MONOTONIC_RAW == MONOTONIC (no NTP in this OS). */
+// CR-004: MONOTONIC_RAW == MONOTONIC (no NTP in this OS).
 void test_monotonic_raw_equals_monotonic(void) {
   struct timespec a, b;
   TEST_ASSERT_EQUAL_INT(0, clock_gettime(CLOCK_MONOTONIC, &a));
@@ -55,7 +55,7 @@ void test_monotonic_raw_equals_monotonic(void) {
   TEST_ASSERT_TRUE(llabs((long long)a.tv_sec - (long long)b.tv_sec) <= 1);
 }
 
-/* CR-005: BOOTTIME == MONOTONIC (no suspend). */
+// CR-005: BOOTTIME == MONOTONIC (no suspend).
 void test_boottime_equals_monotonic(void) {
   struct timespec a, b;
   TEST_ASSERT_EQUAL_INT(0, clock_gettime(CLOCK_MONOTONIC, &a));
@@ -63,7 +63,7 @@ void test_boottime_equals_monotonic(void) {
   TEST_ASSERT_TRUE(llabs((long long)a.tv_sec - (long long)b.tv_sec) <= 1);
 }
 
-/* CR-006: TAI == REALTIME (no TAI offset). */
+// CR-006: TAI == REALTIME (no TAI offset).
 void test_tai_equals_realtime(void) {
   struct timespec a, b;
   TEST_ASSERT_EQUAL_INT(0, clock_gettime(CLOCK_REALTIME, &a));
@@ -71,7 +71,7 @@ void test_tai_equals_realtime(void) {
   TEST_ASSERT_TRUE(llabs((long long)a.tv_sec - (long long)b.tv_sec) <= 1);
 }
 
-/* CR-007: REALTIME_COARSE == REALTIME. */
+// CR-007: REALTIME_COARSE == REALTIME.
 void test_realtime_coarse_equals_realtime(void) {
   struct timespec a, b;
   TEST_ASSERT_EQUAL_INT(0, clock_gettime(CLOCK_REALTIME, &a));
@@ -79,7 +79,7 @@ void test_realtime_coarse_equals_realtime(void) {
   TEST_ASSERT_TRUE(llabs((long long)a.tv_sec - (long long)b.tv_sec) <= 1);
 }
 
-/* CR-008: MONOTONIC_COARSE == MONOTONIC. */
+// CR-008: MONOTONIC_COARSE == MONOTONIC.
 void test_monotonic_coarse_equals_monotonic(void) {
   struct timespec a, b;
   TEST_ASSERT_EQUAL_INT(0, clock_gettime(CLOCK_MONOTONIC, &a));
@@ -87,7 +87,7 @@ void test_monotonic_coarse_equals_monotonic(void) {
   TEST_ASSERT_TRUE(llabs((long long)a.tv_sec - (long long)b.tv_sec) <= 1);
 }
 
-/* CR-009: THREAD_CPUTIME_ID returns a valid (non-EINVAL) timespec. */
+// CR-009: THREAD_CPUTIME_ID returns a valid (non-EINVAL) timespec.
 void test_thread_cputime_id_valid(void) {
   struct timespec ts;
   TEST_ASSERT_EQUAL_INT(0, clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts));
@@ -95,15 +95,15 @@ void test_thread_cputime_id_valid(void) {
   TEST_ASSERT_TRUE(ts.tv_nsec >= 0 && ts.tv_nsec < 1000000000L);
 }
 
-/* CR-010: unknown clock id -> EINVAL. */
+// CR-010: unknown clock id -> EINVAL.
 void test_unknown_clockid_einval(void) {
   struct timespec ts;
   TEST_ASSERT_EQUAL_INT(-1, clock_gettime(999, &ts));
   TEST_ASSERT_EQUAL_INT(EINVAL, errno);
 }
 
-/* CR-011: clock_settime(REALTIME) shifts the offset; subsequent reads reflect
- * it. Restores the original time afterward so later tests aren't skewed. */
+// CR-011: clock_settime(REALTIME) shifts the offset; subsequent reads reflect
+// it. Restores the original time afterward so later tests aren't skewed.
 void test_clock_settime_adjusts_offset(void) {
   struct timespec before, after, shifted;
   TEST_ASSERT_EQUAL_INT(0, clock_gettime(CLOCK_REALTIME, &before));
@@ -113,15 +113,15 @@ void test_clock_settime_adjusts_offset(void) {
   TEST_ASSERT_EQUAL_INT(0, clock_settime(CLOCK_REALTIME, &shifted));
 
   TEST_ASSERT_EQUAL_INT(0, clock_gettime(CLOCK_REALTIME, &after));
-  /* Allow scheduling latency up to 2s. */
+  // Allow scheduling latency up to 2s.
   TEST_ASSERT_TRUE(after.tv_sec >= shifted.tv_sec &&
                    after.tv_sec <= shifted.tv_sec + 2);
 
-  /* Restore. */
+  // Restore.
   TEST_ASSERT_EQUAL_INT(0, clock_settime(CLOCK_REALTIME, &before));
 }
 
-/* CR-012: clock_settime(MONOTONIC) -> EPERM (monotonic is not settable). */
+// CR-012: clock_settime(MONOTONIC) -> EPERM (monotonic is not settable).
 void test_clock_settime_monotonic_eperm(void) {
   struct timespec ts = {100, 0};
   TEST_ASSERT_EQUAL_INT(-1, clock_settime(CLOCK_MONOTONIC, &ts));

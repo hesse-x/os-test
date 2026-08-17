@@ -4,20 +4,19 @@
  * SPDX-License-Identifier: MIT
  */
 
-/* test_accept_no_timeout — S18 accept() no longer has a 30s false timeout.
- *
- * Linux blocking accept() has no built-in timeout: it blocks indefinitely for a
- * connection, returning only on a signal (EINTR) or fd close. The kernel used
- * to arm a 30s wait_deadline and return -ETIMEDOUT on idle listeners, which
- * made long-lived servers (udevd/shell) wrongly bail out. S18 removed that.
- *
- * Strategy: bind+listen an AF_UNIX socket, accept() with no incoming
- * connection, and arm a SIGALRM at 35s — past the old 30s false-timeout. If
- * accept returns before SIGALRM with -ETIMEDOUT, the regression is present
- * (fail). If it blocks until SIGALRM and returns -EINTR, the fix holds.
- *
- * NOTE: this test sleeps up to 35s by design — it is the regression proof.
- */
+// test_accept_no_timeout — S18 accept() no longer has a 30s false timeout.
+//
+// Linux blocking accept() has no built-in timeout: it blocks indefinitely for a
+// connection, returning only on a signal (EINTR) or fd close. The kernel used
+// to arm a 30s wait_deadline and return -ETIMEDOUT on idle listeners, which
+// made long-lived servers (udevd/shell) wrongly bail out. S18 removed that.
+//
+// Strategy: bind+listen an AF_UNIX socket, accept() with no incoming
+// connection, and arm a SIGALRM at 35s — past the old 30s false-timeout. If
+// accept returns before SIGALRM with -ETIMEDOUT, the regression is present
+// (fail). If it blocks until SIGALRM and returns -EINTR, the fix holds.
+//
+// NOTE: this test sleeps up to 35s by design — it is the regression proof.
 
 #include <errno.h>
 #include <fcntl.h>
@@ -47,12 +46,12 @@ static uint64_t now_ms(void) {
   return (uint64_t)ts.tv_sec * 1000ULL + (uint64_t)ts.tv_nsec / 1000000ULL;
 }
 
-/* Idle blocking accept must outlast the old 30s false-timeout and only return
- * via SIGALRM/EINTR. */
+// Idle blocking accept must outlast the old 30s false-timeout and only return
+// via SIGALRM/EINTR.
 void test_accept_blocks_past_30s(void) {
   int lst = socket(AF_UNIX, SOCK_STREAM, 0);
   if (lst < 0) {
-    /* AF_UNIX unavailable in this build — nothing to assert. */
+    // AF_UNIX unavailable in this build — nothing to assert.
     TEST_ASSERT_TRUE(1);
     return;
   }
@@ -68,7 +67,7 @@ void test_accept_blocks_past_30s(void) {
     return;
   }
 
-  /* No child connects. Arm SIGALRM at 35s — past the old 30s timeout. */
+  // No child connects. Arm SIGALRM at 35s — past the old 30s timeout.
   got_alrm = 0;
   struct sigaction act;
   memset(&act, 0, sizeof(act));
@@ -83,8 +82,7 @@ void test_accept_blocks_past_30s(void) {
 
   TEST_ASSERT_EQUAL_INT(-1, a);
   TEST_ASSERT_EQUAL_INT(EINTR, errno);
-  /* Must have actually waited for the alarm (≥30s), proving no false timeout.
-   */
+  // Must have actually waited for the alarm (≥30s), proving no false timeout.
   TEST_ASSERT_TRUE(dt >= 30000);
   TEST_ASSERT_TRUE(got_alrm);
 
@@ -92,8 +90,8 @@ void test_accept_blocks_past_30s(void) {
   unlink(addr.sun_path);
 }
 
-/* Sanity: accept on a non-blocking idle listener returns EAGAIN immediately
- * (the non-block path is untouched by S18). */
+// Sanity: accept on a non-blocking idle listener returns EAGAIN immediately
+// (the non-block path is untouched by S18).
 void test_accept_nonblock_eagain(void) {
   int lst = socket(AF_UNIX, SOCK_STREAM, 0);
   if (lst < 0) {

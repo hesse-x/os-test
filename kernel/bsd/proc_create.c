@@ -110,8 +110,8 @@ xtask *process_create_elf(const uint8_t *elf_data, uint64_t elf_size) {
     }
   }
 
-// === argc/argv/envp/auxv stack construction (standard SysV ABI) ===
-// The init process created directly by the kernel has no execve path; inject
+// === argc/argv/envp/auxv stack construction (standard SysV ABI) ===// The init
+// process created directly by the kernel has no execve path; inject
 // argv[0]="/init". The stack is contiguous physical memory; user-space
 // addresses [stack_base, USER_STACK_TOP) are contiguously mapped.
 #define ARG_MAX 128

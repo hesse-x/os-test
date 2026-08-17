@@ -9,28 +9,26 @@
 
 #include <stdint.h>
 
-/*
- * Kernel-internal stat layout. Userspace uses musl's struct stat; this mirror
- * is pinned to the same Linux x86-64 syscall ABI.
- *
- * Linux x86-64 ABI (natural alignment, 144 bytes):
- *   offset   0: st_dev      uint64_t
- *   offset   8: st_ino      uint64_t
- *   offset  16: st_nlink    uint64_t
- *   offset  24: st_mode     uint32_t
- *   offset  28: st_uid      uint32_t
- *   offset  32: st_gid      uint32_t
- *   offset  36: __pad0      uint32_t
- *   offset  40: st_rdev     uint64_t
- *   offset  48: st_size     int64_t
- *   offset  56: st_blksize  int64_t
- *   offset  64: st_blocks   int64_t
- *   offset  72: st_atim     timespec {int64_t, int64_t}
- *   offset  88: st_mtim     timespec
- *   offset 104: st_ctim     timespec
- *   offset 120: __reserved  int64_t[3]
- *   Total: 144 bytes
- */
+// Kernel-internal stat layout. Userspace uses musl's struct stat; this mirror
+// is pinned to the same Linux x86-64 syscall ABI.
+//
+// Linux x86-64 ABI (natural alignment, 144 bytes):
+//   offset   0: st_dev      uint64_t
+//   offset   8: st_ino      uint64_t
+//   offset  16: st_nlink    uint64_t
+//   offset  24: st_mode     uint32_t
+//   offset  28: st_uid      uint32_t
+//   offset  32: st_gid      uint32_t
+//   offset  36: __pad0      uint32_t
+//   offset  40: st_rdev     uint64_t
+//   offset  48: st_size     int64_t
+//   offset  56: st_blksize  int64_t
+//   offset  64: st_blocks   int64_t
+//   offset  72: st_atim     timespec {int64_t, int64_t}
+//   offset  88: st_mtim     timespec
+//   offset 104: st_ctim     timespec
+//   offset 120: __reserved  int64_t[3]
+//   Total: 144 bytes
 
 struct kstat_timespec {
   int64_t tv_sec;

@@ -42,8 +42,9 @@
 #include <xos/capability.h>
 #include <xos/errno.h>
 
-/* DRM 主号（仅 stat 设备号用，与 virtio_gpu.c DRM_MAJOR 同值；226 是 DRM 语义、
- * 不属于 devtmpfs 通用层，故各 .c 顶部各自定义而非放公共头）。 */
+// DRM major (used only for stat device numbers; same value as virtio_gpu.c
+// DRM_MAJOR; 226 is DRM semantics, not a devtmpfs common-layer concern, so each
+// .c defines its own at the top rather than putting it in a shared header).
 #define DRM_MAJOR_FOR_STAT 226
 
 void vfs_init(void) {
@@ -68,23 +69,23 @@ void vfs_init(void) {
     register_fstype(&procfs_fstype);
     sysfs_init();
     mount_internal(&fat32_fstype, "/", NULL, 0);
-    /* Create /dev directory entry on FAT32 root so getdents("/") sees it.
-     * fat32_mkdir is not idempotent (it allocates a cluster unconditionally),
-     * so only create when the entry is missing. */
+    // Create /dev directory entry on FAT32 root so getdents("/") sees it.
+    // fat32_mkdir is not idempotent (it allocates a cluster unconditionally),
+    // so only create when the entry is missing.
     {
       uint8_t ksb[256];
       if (fat32_stat("/dev", ksb) != 0)
         fat32_mkdir("/dev");
     }
     mount_internal(&devtmpfs_fstype, "/dev", NULL, 0);
-    /* Create /sys directory on FAT32 root for getdents("/") visibility */
+    // Create /sys directory on FAT32 root for getdents("/") visibility
     {
       uint8_t ksb[256];
       if (fat32_stat("/sys", ksb) != 0)
         fat32_mkdir("/sys");
     }
     mount_internal(&sysfs_fstype, "/sys", sysfs_root_node(), 0);
-    /* procfs(procfs.md §2.4):建 /proc 目录挂 procfs_fstype。 */
+    // procfs (procfs.md §2.4): create /proc directory, mount procfs_fstype.
     {
       uint8_t ksb[256];
       if (fat32_stat("/proc", ksb) != 0)
@@ -92,16 +93,17 @@ void vfs_init(void) {
     }
     procfs_init();
     mount_internal(&procfs_fstype, "/proc", procfs_root_node(), 0);
-    /* Create /run directory on FAT32 root for getdents("/") visibility,
-     * then mount tmpfs on /run (内存 fs，udevd db/socket 前置)。 */
+    // Create /run directory on FAT32 root for getdents("/") visibility,
+    // then mount tmpfs on /run (in-memory fs, prerequisite for udevd
+    // db/socket).
     {
       uint8_t ksb[256];
       if (fat32_stat("/run", ksb) != 0)
         fat32_mkdir("/run");
     }
     mount_internal(&tmpfs_fstype, "/run", NULL, 0);
-    /* POSIX shm_open maps names to /dev/shm. Keep it on a distinct tmpfs
-     * mount so shared-memory objects cannot collide with /run contents. */
+    // POSIX shm_open maps names to /dev/shm. Keep it on a distinct tmpfs
+    // mount so shared-memory objects cannot collide with /run contents.
     devtmpfs_mkdir("shm");
     mount_internal(&tmpfs_fstype, "/dev/shm", NULL, 0);
     block_publish_devtmpfs();
@@ -112,22 +114,27 @@ void vfs_init(void) {
   }
 }
 
-/* path_walk:逐段 lookup 查目标 inode(已 inode_get,+1,调用者 put)。
- * relpath 始终在单个 mount 内(vfs_resolve 已剥离挂载点前缀);不做 fs 内
- * `..` 跨 mount 穿越。中间段须为 INODE_DIR,否则返 NULL。最后一段不校验类型。
- *
- * §3.3.3 symlink 跟随:中间段若为 INODE_LNK,经 follow_symlink 解析 target
- * 串替换 dir 继续走(对齐 Linux walk 中间组件跟随);末段 LNK 原样返回——
- * stat/access 等调用方决定是否跟随末段(AT_SYMLINK_NOFOLLOW / readlink 取
- * link inode 本身)。SYMLINK_MAX 防 target 循环 → ELOOP。 */
-#define SYMLINK_MAX 40 /* 对齐 Linux MAXSYMLINKS */
+// path_walk: walk segment-by-segment lookup to the target inode (already
+// inode_get, +1, caller puts). relpath stays within a single mount (vfs_resolve
+// has stripped the mount-point prefix); no in-fs `..` crossing mounts. Middle
+// segments must be INODE_DIR, else NULL is returned. The final segment's type
+// is not checked.
+//
+// §3.3.3 symlink following: a middle segment that is INODE_LNK is resolved via
+// follow_symlink's target string to replace dir and continue (matching Linux's
+// follow of walk middle components); a final-segment LNK is returned as-is —
+// callers like stat/access decide whether to follow the final segment
+// (AT_SYMLINK_NOFOLLOW / readlink takes the link inode itself). SYMLINK_MAX
+// guards against target loops → ELOOP.
+#define SYMLINK_MAX 40 // matches Linux MAXSYMLINKS
 
-/* follow_symlink:跟随 LNK inode 的 target 串(经 i_op->readlink),返回解析
- * 后的目标 inode(+1,调用者 put)。depth 防 target 循环 → ELOOP。target 绝对
- * 路径从 root mount 重解(vfs_resolve);相对路径从 lnk 的父目录起解(本 OS
- * tmpfs inode 无 parent_dir 回指,相对 target 罕见,fallback 从 root 走)。
- * 非 static:chmod/chown 等 syscall 需复用末段 symlink 跟随(vfs_statx 同模式)。
- */
+// follow_symlink: follow the LNK inode's target string (via i_op->readlink),
+// returning the resolved target inode (+1, caller puts). depth guards against
+// target loops → ELOOP. An absolute target re-resolves from the root mount
+// (vfs_resolve); a relative target resolves from the lnk's parent dir (this OS
+// tmpfs inodes have no parent_dir back-reference, so relative targets are rare
+// — fall back to resolving from root). Not static: chmod/chown etc. reuse
+// final-segment symlink following (same pattern as vfs_statx).
 struct inode *follow_symlink(struct inode *lnk, int *depth) {
   if (!lnk || lnk->type != INODE_LNK || !lnk->i_op || !lnk->i_op->readlink)
     return ERR_PTR(-EINVAL);
@@ -145,34 +152,36 @@ struct inode *follow_symlink(struct inode *lnk, int *depth) {
     struct mount_entry *m = vfs_resolve(target, relpath, sizeof(relpath));
     if (!m)
       return ERR_PTR(-ENOENT);
-    return path_walk(m, relpath); /* +1 */
+    return path_walk(m, relpath); // +1
   }
-  /* 相对 target:本 OS tmpfs inode 无 parent_dir 回指,从 root 起解
-   * (软链相对 target 罕见;绝对 target 是常见用例)。 */
+  // Relative target: this OS tmpfs inode has no parent_dir back-reference, so
+  // resolve from root (relative symlink targets are rare; absolute targets are
+  // the common case).
   char relpath[256];
   struct mount_entry *m = vfs_resolve(target, relpath, sizeof(relpath));
   if (!m)
     return ERR_PTR(-ENOENT);
-  return path_walk(m, relpath); /* +1 */
+  return path_walk(m, relpath); // +1
 }
 
 struct inode *path_walk(struct mount_entry *m, const char *relpath) {
   if (!m->fs->mount_root)
     return NULL;
-  struct inode *dir = m->fs->mount_root(m); /* 根 inode(+1) */
+  struct inode *dir = m->fs->mount_root(m); // root inode (+1)
   if (!dir)
     return NULL;
   const char *p = relpath;
-  int sym_depth = 0; /* §3.3.3 SYMLINK_MAX 防 target 循环 */
+  int sym_depth = 0; // §3.3.3 SYMLINK_MAX guards against target loops
   while (*p) {
     while (*p == '/')
       p++;
     if (!*p)
-      break; /* 尾部斜杠,dir 即目标 */
+      break; // trailing slash, dir is the target
     const char *seg = p;
     while (*p && *p != '/')
       p++;
-    /* 后续是否还有非斜杠段(决定本段是否"中间段"):跳过尾随斜杠后 *p 非空。 */
+    // Whether there are more non-slash segments (determines if this segment is
+    // a "middle" segment): after skipping trailing slashes, *p is non-empty.
     const char *after = p;
     while (*after == '/')
       after++;
@@ -189,33 +198,35 @@ struct inode *path_walk(struct mount_entry *m, const char *relpath) {
       inode_put(dir);
       return NULL;
     }
-    struct inode *next = dir->i_op->lookup(dir, name); /* +1 */
-    inode_put(dir); /* 释放上一段(对齐 dget/dput) */
+    struct inode *next = dir->i_op->lookup(dir, name); // +1
+    inode_put(dir); // release the previous segment (matching dget/dput)
     dir = next;
     if (!dir)
       return NULL;
-    /* §3.3.3 中间段 symlink 跟随:本段非末段且为 LNK → follow_symlink 替换
-     * dir 为 target 解析结果(+1)。末段 LNK 原样返回(stat 决定跟随与否)。 */
+    // §3.3.3 middle-segment symlink following: this segment is not the last and
+    // is a LNK → follow_symlink replaces dir with the target resolution (+1).
+    // A final-segment LNK is returned as-is (stat decides whether to follow).
     if (has_more && dir->type == INODE_LNK) {
       struct inode *resolved = follow_symlink(dir, &sym_depth);
       inode_put(dir);
       dir = resolved;
       if (IS_ERR(dir))
-        return NULL; /* ELOOP/ENOENT/ENAMETOOLONG → 解析失败 */
+        return NULL; // ELOOP/ENOENT/ENAMETOOLONG → resolution failure
     }
   }
-  return dir; /* 目标,+1,调用者 put */
+  return dir; // target, +1, caller puts
 }
 
-/* path_walk_parent:走到倒数第二段,返回父目录 inode(+1,调用者 put)+
- * 最后一段名写入 lastname。空 relpath 或 "/" 显式拒。 */
+// path_walk_parent: walk to the penultimate segment, return the parent
+// directory inode (+1, caller puts) and write the last segment name into
+// lastname. An empty relpath or "/" is explicitly rejected.
 int path_walk_parent(struct mount_entry *m, const char *relpath,
                      struct inode **out_parent, char *lastname,
                      size_t lastcap) {
   *out_parent = NULL;
   lastname[0] = '\0';
   if (!relpath[0] || (relpath[0] == '/' && relpath[1] == '\0'))
-    return -EBUSY; /* 根无 parent、无 lastname(mkdir/rmdir "/" 对齐 -EBUSY) */
+    return -EBUSY; // root has no parent, no lastname (mkdir/rmdir "/" → -EBUSY)
   if (!m->fs->mount_root)
     return -ENOENT;
   struct inode *dir = m->fs->mount_root(m);
@@ -233,7 +244,7 @@ int path_walk_parent(struct mount_entry *m, const char *relpath,
     while (*next == '/')
       next++;
     if (!*next) {
-      /* seg 是最后一段 */
+      // seg is the last segment
       if (seglen >= (int)lastcap) {
         inode_put(dir);
         return -ENAMETOOLONG;
@@ -262,7 +273,7 @@ int path_walk_parent(struct mount_entry *m, const char *relpath,
       inode_put(dir);
       return -ENOTDIR;
     }
-    struct inode *child = dir->i_op->lookup(dir, name); /* +1 */
+    struct inode *child = dir->i_op->lookup(dir, name); // +1
     inode_put(dir);
     dir = child;
     if (!dir)
@@ -275,21 +286,22 @@ int path_walk_parent(struct mount_entry *m, const char *relpath,
   }
 }
 
-/* path_walk_from:逐段 lookup,从给定 start inode 起解析 relpath(+1,调用者 put)。
- * 与 path_walk 同语义,只是起点是 dirfd 指向的目录 inode 而非 mount root。
- * relpath 不得以 '/' 开头(调用者对绝对路径退回 root 解析)。中间段须 INODE_DIR。
- */
+// path_walk_from: walk segment-by-segment, resolving relpath from a given start
+// inode (+1, caller puts). Same semantics as path_walk, but the start is the
+// directory inode pointed at by dirfd rather than the mount root. relpath must
+// not start with '/' (callers fall back to root resolution for absolute paths).
+// Middle segments must be INODE_DIR.
 struct inode *path_walk_from(struct inode *start, const char *relpath) {
   if (!start)
     return NULL;
   struct inode *dir = inode_get(start);
   const char *p = relpath;
-  int sym_depth = 0; /* §3.3.3 SYMLINK_MAX */
+  int sym_depth = 0; // §3.3.3 SYMLINK_MAX
   while (*p) {
     while (*p == '/')
       p++;
     if (!*p)
-      break; /* 尾部斜杠,dir 即目标 */
+      break; // trailing slash, dir is the target
     const char *seg = p;
     while (*p && *p != '/')
       p++;
@@ -309,13 +321,14 @@ struct inode *path_walk_from(struct inode *start, const char *relpath) {
       inode_put(dir);
       return NULL;
     }
-    struct inode *next = dir->i_op->lookup(dir, name); /* +1 */
+    struct inode *next = dir->i_op->lookup(dir, name); // +1
     inode_put(dir);
     dir = next;
     if (!dir)
       return NULL;
-    /* §3.3.3 中间段 symlink 跟随(同 path_walk)。相对 target 从 root 起解
-     * (本 OS tmpfs inode 无 parent_dir 回指)。 */
+    // §3.3.3 middle-segment symlink following (same as path_walk). Relative
+    // targets resolve from root (this OS tmpfs inode has no parent_dir
+    // back-reference).
     if (has_more && dir->type == INODE_LNK) {
       struct inode *resolved = follow_symlink(dir, &sym_depth);
       inode_put(dir);
@@ -324,11 +337,11 @@ struct inode *path_walk_from(struct inode *start, const char *relpath) {
         return NULL;
     }
   }
-  return dir; /* +1,调用者 put */
+  return dir; // +1, caller puts
 }
 
-/* path_walk_parent_from:同 path_walk_parent,但起点为 start inode(+1 parent,
- * 调用者 put)+ 最后一段名。 */
+// path_walk_parent_from: same as path_walk_parent, but the start is a start
+// inode (+1 parent, caller puts) + last segment name.
 int path_walk_parent_from(struct inode *start, const char *relpath,
                           struct inode **out_parent, char *lastname,
                           size_t lastcap) {
@@ -337,7 +350,7 @@ int path_walk_parent_from(struct inode *start, const char *relpath,
   if (!start)
     return -ENOENT;
   if (!relpath[0] || (relpath[0] == '/' && relpath[1] == '\0'))
-    return -EBUSY; /* 根无 parent、无 lastname */
+    return -EBUSY; // root has no parent, no lastname
   struct inode *dir = inode_get(start);
   const char *p = relpath;
   while (*p == '/')
@@ -351,7 +364,7 @@ int path_walk_parent_from(struct inode *start, const char *relpath,
     while (*next == '/')
       next++;
     if (!*next) {
-      /* seg 是最后一段 */
+      // seg is the last segment
       if (seglen >= (int)lastcap) {
         inode_put(dir);
         return -ENAMETOOLONG;
@@ -380,7 +393,7 @@ int path_walk_parent_from(struct inode *start, const char *relpath,
       inode_put(dir);
       return -ENOTDIR;
     }
-    struct inode *child = dir->i_op->lookup(dir, name); /* +1 */
+    struct inode *child = dir->i_op->lookup(dir, name); // +1
     inode_put(dir);
     dir = child;
     if (!dir)
@@ -393,35 +406,37 @@ int path_walk_parent_from(struct inode *start, const char *relpath,
   }
 }
 
-/* vfs_open_kern:内核态 path 解析,返 +1 inode 或 NULL(不装 fd、不做 user copy)。
- */
+// vfs_open_kern: kernel-mode path resolution, returns +1 inode or NULL (no fd
+// installed, no user copy).
 struct inode *vfs_open_kern(const char *kpath) {
   char relpath[256];
   struct mount_entry *m = vfs_resolve(kpath, relpath, sizeof(relpath));
   if (!m)
     return NULL;
-  return path_walk(m, relpath); /* +1,调用者 put */
+  return path_walk(m, relpath); // +1, caller puts
 }
 
-/* inode_permission:按 check_uid/check_gid 判定 mask 权限(Q4)。本 OS 有完整
- * permission ladder (proc.h uid/euid/suid/gid/egid/sgid,默认
- * 0=root;test_setuid_saved 证 ladder 真在跑),故按位判定非"无脑 root 放行"。
- * root 放行经 capable(CAP_DAC_OVERRIDE)——仍按 EFFECTIVE
- * uid(current_proc->euid)判, 不随 check_uid 走:setuid-root 程序 ruid=nobody 时
- * root 放行仍须生效(有效凭据语义)。 check_uid/check_gid 仅驱动
- * owner/group/other 位选择:access(2) 传 real uid, faccessat(AT_EACCESS)/eaccess
- * 传 effective uid,其余(open/utimensat)传 euid。 返 0=允许,负=-EACCES/-ENOENT。
- */
+// inode_permission: judge mask permission by check_uid/check_gid (Q4). This OS
+// has the full permission ladder (proc.h uid/euid/suid/gid/egid/sgid, default
+// 0=root; test_setuid_saved proves the ladder really runs), so the bit-mask
+// decision is not a naive "root always passes". Root privilege passes via
+// capable(CAP_DAC_OVERRIDE) — still judged by the EFFECTIVE uid
+// (current_proc->euid), not by check_uid: a setuid-root program with
+// ruid=nobody must still have root privilege apply (effective-credential
+// semantics). check_uid/check_gid only drive owner/group/other bit selection:
+// access(2) passes the real uid, faccessat(AT_EACCESS)/eaccess pass the
+// effective uid, the rest (open/utimensat) pass the euid. Returns 0=allowed,
+// negative=-EACCES/-ENOENT.
 int inode_permission(struct inode *ip, int mask, uint32_t check_uid,
                      uint32_t check_gid) {
   if (!ip)
     return -ENOENT;
   if (mask == F_OK)
-    return 0; /* 存在性:path_walk 成功即存在 */
+    return 0; // existence: path_walk success implies it exists
   if (capable(CAP_DAC_OVERRIDE))
-    return 0; /* root 放行(CAP_DAC_OVERRIDE;按 euid,不随 check_uid) */
-  /* 非 root:按 mode 的 owner/group/other 位。check_uid 匹配 owner → owner 位;
-   * 否则 check_gid 匹配 gid → group 位;否则 other 位。 */
+    return 0; // root pass (CAP_DAC_OVERRIDE; by euid, not check_uid)
+  // Non-root: use mode's owner/group/other bits. check_uid matching owner →
+  // owner bits; else check_gid matching gid → group bits; else other bits.
   uint32_t mode = ip->mode;
   uint32_t bits = (check_uid == ip->uid)   ? (mode >> 6) & 7
                   : (check_gid == ip->gid) ? (mode >> 3) & 7
@@ -435,9 +450,10 @@ int inode_permission(struct inode *ip, int mask, uint32_t check_uid,
   return 0;
 }
 
-/* generic_update_time:VFS 层默认时间戳更新(内存态,Q5)。按 which 位写非 OMIT
- * 的时间戳。OMIT 哨兵由调用方(sys_utimensat)解释,此处只写显式传入的值。
- * 各 fs .update_time 可置 NULL,VFS 回退到此。 */
+// generic_update_time: VFS-layer default timestamp update (in-memory, Q5).
+// Writes the non-OMIT timestamps per the `which` bits. The OMIT sentinel is
+// interpreted by the caller (sys_utimensat); here only explicitly-passed values
+// are written. A filesystem .update_time may be NULL and VFS falls back here.
 int generic_update_time(struct inode *ip, struct vfs_timespec64 at,
                         struct vfs_timespec64 mt, struct vfs_timespec64 ct,
                         int which) {
@@ -458,11 +474,11 @@ int generic_update_time(struct inode *ip, struct vfs_timespec64 at,
   return 0;
 }
 
-/* S19 §7: kernel-mode inode read for execve. Only regular files backed by a
- * real filesystem (fat32) are readable here; char devices / pseudo-fs / tmpfs
- * are not executable, so execve bails with -ENOEXEC before touching the inode
- * data. tmpfs kernel-read (for memfd-style tmpfs binaries) is deferred — the
- * interface stays generic so adding it later does not touch execve again. */
+// S19 §7: kernel-mode inode read for execve. Only regular files backed by a
+// real filesystem (fat32) are readable here; char devices / pseudo-fs / tmpfs
+// are not executable, so execve bails with -ENOEXEC before touching the inode
+// data. tmpfs kernel-read (for memfd-style tmpfs binaries) is deferred — the
+// interface stays generic so adding it later does not touch execve again.
 int vfs_read_kernel(struct inode *ip, uint64_t offset, void *buf,
                     size_t count) {
   if (!ip || !buf)
@@ -481,13 +497,13 @@ int vfs_read_kernel(struct inode *ip, uint64_t offset, void *buf,
   return (int)ip->i_fop->read_at(NULL, &file, buf, count, offset);
 }
 
-/* sys_open(path, flags, mode) — SYS_OPEN */
+// sys_open(path, flags, mode) — SYS_OPEN
 int64_t sys_open(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
                  int64_t unused2, int64_t unused3) {
   const char __user *upath = (const char __user *__force)arg1;
   int flags = (int)arg2;
 
-  /* 1. Resolve via mount table (longest-prefix match) */
+  // 1. Resolve via mount table (longest-prefix match)
   char relpath[256];
   struct mount_entry *m = vfs_resolve_user(upath, relpath, sizeof(relpath));
   if (IS_ERR(m))
@@ -499,10 +515,10 @@ int64_t sys_open(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
   if ((m->m_flags & MS_RDONLY) && wants_write)
     return (int64_t)-EROFS;
 
-  /* 2. devtmpfs device files: delegate to devtmpfs_open so the fd is
-   * created as FD_DEV and ops->open (ptmx/pts, serial, etc.) runs.
-   * The bare "/dev" directory (relpath empty) falls through to the
-   * generic directory path below. */
+  // 2. devtmpfs device files: delegate to devtmpfs_open so the fd is
+  // created as FD_DEV and ops->open (ptmx/pts, serial, etc.) runs.
+  // The bare "/dev" directory (relpath empty) falls through to the
+  // generic directory path below.
   if (m->fs == &devtmpfs_fstype && relpath[0] != '\0') {
     if (m->m_flags & MS_NODEV)
       return (int64_t)-EACCES;
@@ -510,25 +526,27 @@ int64_t sys_open(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
     return dev_ret;
   }
 
-  /* 3. 查已存在(逐段 path_walk) */
-  struct inode *ip = path_walk(m, relpath); /* +1 */
+  // 3. Look up an existing entry (segment-by-segment path_walk)
+  struct inode *ip = path_walk(m, relpath); // +1
   if (ip) {
-    /* O_EXCL: file must not already exist. */
+    // O_EXCL: file must not already exist.
     if ((flags & O_CREAT) && (flags & O_EXCL)) {
       inode_put(ip);
       return (int64_t)-EEXIST;
     }
-    /* O_TRUNC: 走 i_op->setattr(非 fat32 硬编码)。仅对 INODE_REGULAR。 */
+    // O_TRUNC: go through i_op->setattr (not hardcoded to fat32). Only for
+    // INODE_REGULAR.
     if ((flags & O_TRUNC) && ip->type == INODE_REGULAR && ip->size > 0) {
       if (!ip->i_op || !ip->i_op->setattr) {
         inode_put(ip);
         return (
-            int64_t)-EPERM; /* 对齐 Linux notify_change:无 setattr → EPERM */
+            int64_t)-EPERM; // matches Linux notify_change: no setattr → EPERM
       }
-      ip->i_op->setattr(ip, 0); /* 锁由 setattr 内部持(§6.6) */
+      ip->i_op->setattr(ip, 0); // lock held internally by setattr (§6.6)
     }
   } else if (flags & O_CREAT) {
-    /* 不存在 + O_CREAT:path_walk_parent 拿父目录 + 最后一段名 */
+    // Not existing + O_CREAT: path_walk_parent gets the parent + last segment
+    // name
     char lastname[256];
     struct inode *parent = NULL;
     int rc = path_walk_parent(m, relpath, &parent, lastname, sizeof(lastname));
@@ -541,48 +559,50 @@ int64_t sys_open(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
       inode_put(parent);
       return (int64_t)-EACCES;
     }
-    /* S08: 应用 umask(mode & ~umask),创建后设 owner=当前进程 uid/gid。
-     * umask 在此减而非 create 内部:create 不知调用者 umask。 */
+    // S08: apply umask (mode & ~umask), set owner = current process uid/gid.
+    // umask is applied here rather than in create: create doesn't know the
+    // caller's umask.
     int eff_mode = (int)arg3 & 0777;
     eff_mode = eff_mode & ~(int)current_proc->umask;
-    ip = parent->i_op->create(parent, lastname, eff_mode); /* +1 新 inode */
-    inode_put(parent); /* 还 path_walk_parent 的 parent */
+    ip = parent->i_op->create(parent, lastname, eff_mode); // +1 new inode
+    inode_put(parent); // return path_walk_parent's parent
     if (IS_ERR(ip))
       return PTR_ERR(ip);
     if (!ip)
       return (int64_t)-ENOMEM;
-    /* S08: 新建文件 owner=创建进程(非硬编 0/调用者)。仅普通文件 create;
-     * socket 走 vfs_mknod_socket(mknod)路径。 */
+    // S08: new file owner = creating process (not hardcoded 0/caller). Only
+    // regular-file create; sockets go through vfs_mknod_socket (mknod) path.
     ip->mode = (ip->mode & ~0777) | (uint32_t)eff_mode;
     ip->uid = current_proc->uid;
     ip->gid = current_proc->gid;
   } else {
     return (int64_t)-ENOENT;
   }
-  /* ip 此刻 +1(来自 path_walk 或 create)。 */
-  ip->mount = m; /* 惰性设 mount(§6 不变式2:仅 sys_open 设) */
+  // ip is now +1 (from path_walk or create).
+  ip->mount = m; // mount set lazily (§6 invariant 2: only sys_open sets it)
 
-  /* Reject write access to directories (POSIX EISDIR). */
+  // Reject write access to directories (POSIX EISDIR).
   if (ip->type == INODE_DIR &&
       (flags & (O_WRONLY | O_RDWR | O_CREAT | O_TRUNC))) {
     inode_put(ip);
     return (int64_t)-EISDIR;
   }
 
-  /* O_DIRECTORY: caller requires a directory; non-dir → ENOTDIR (Linux). */
+  // O_DIRECTORY: caller requires a directory; non-dir → ENOTDIR (Linux).
   if ((flags & O_DIRECTORY) && ip->type != INODE_DIR) {
     inode_put(ip);
     return (int64_t)-ENOTDIR;
   }
 
-  /* Linux 语义：open() 一个 socket 文件返 ENXIO（任何 flags）。
-   * socket 文件只能经 bind/connect 访问，不能 open 出 fd 读写。 */
+  // Linux semantics: open()ing a socket file returns ENXIO (any flags).
+  // Socket files can only be accessed via bind/connect, not opened for fd
+  // read/write.
   if (ip->type == INODE_SOCKET) {
     inode_put(ip);
     return (int64_t)-ENXIO;
   }
 
-  /* 4. Allocate fd (under fd_lock) */
+  // 4. Allocate fd (under fd_lock)
   xtask *proc = current_task;
   files *files = proc->proc->files;
   spinlock *fdlk = &files->fd_lock;
@@ -594,7 +614,7 @@ int64_t sys_open(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
     return (int64_t)-EMFILE;
   }
 
-  /* 5. Allocate struct file */
+  // 5. Allocate struct file
   struct file *f = (struct file *)kmalloc(sizeof(struct file));
   if (!f) {
     spin_unlock(fdlk);
@@ -604,7 +624,7 @@ int64_t sys_open(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
   __memset(f, 0, sizeof(*f));
   refcount_set(&f->f_count, 1);
 
-  /* 6. Set up fd entry */
+  // 6. Set up fd entry
   f->f_op = ip->i_fop;
   f->mount = m;
   atomic_inc(&m->sb.active_files);
@@ -613,7 +633,7 @@ int64_t sys_open(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
     f->type = FD_DIR;
     f->flags = O_RDONLY;
     f->inode = ip;
-    f->offset = 0; /* directory scan position */
+    f->offset = 0; // directory scan position
   } else {
     f->type = FD_REGULAR;
     f->flags = flags & (O_RDONLY | O_WRONLY | O_RDWR | O_APPEND | O_NONBLOCK);
@@ -628,20 +648,22 @@ int64_t sys_open(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
   return (int64_t)fd;
 }
 
-/* ===================== statx core =====================
- * vfs_statx(dirfd, kpath, flags, stx) — 唯一的元数据获取核心，SYS_STATX 直
- * 接暴露；legacy SYS_STAT/SYS_FSTAT/SYS_NEWFSTATAT 是缩窄到 struct kstat 的
- * 薄封装。解析对齐 Linux statx：
- *   AT_EMPTY_PATH + "" → stat fd 本身（per-fd-type 填充）
- *   绝对路径           → mount 表最长前缀匹配
- *   相对路径           → 从 dirfd 解析（AT_FDCWD ≡ root；内核无 per-process
- *                        CWD，libc 调用前已拼好绝对路径）
- * AT_SYMLINK_NOFOLLOW/AT_NO_AUTOMOUNT 接受但无操作（本 OS 无 symlink）。
- * fs 层 getattr 仍填 struct kstat（不动），此处 statx_from_kstat 展开；
- * stx_mask 只报 STATX_BASIC_STATS —— btime/attributes/mnt_id 未提供，调用
- * 方不得读。 */
+// ===================== statx core =====================
+// vfs_statx(dirfd, kpath, flags, stx) — the single metadata-fetch core,
+// exposed directly by SYS_STATX; the legacy SYS_STAT/SYS_FSTAT/SYS_NEWFSTATAT
+// are thin wrappers narrowing to struct kstat. Resolution matches Linux statx:
+//   AT_EMPTY_PATH + "" → stat the fd itself (per-fd-type fill)
+//   absolute path     → longest-prefix match on the mount table
+//   relative path     → resolve from dirfd (AT_FDCWD ≡ root; the kernel has no
+//                        per-process CWD, libc concatenates an absolute path
+//                        before calling)
+// AT_SYMLINK_NOFOLLOW/AT_NO_AUTOMOUNT accepted but no-op (this OS has
+// symlinks). The fs layer getattr still fills struct kstat (unchanged); here
+// statx_from_kstat expands it; stx_mask only reports STATX_BASIC_STATS —
+// btime/attributes/mnt_id are not provided, callers must not read them.
 
-/* kstat → statx 展开。stx_mode/stx_nlink 缩窄安全（值域远小于位宽）。 */
+// kstat → statx expansion. stx_mode/stx_nlink narrowing is safe (value range
+// far smaller than the field width).
 static void statx_from_kstat(struct statx *stx, const struct kstat *ks) {
   __memset(stx, 0, sizeof(*stx));
   stx->stx_mask = STATX_BASIC_STATS;
@@ -665,8 +687,8 @@ static void statx_from_kstat(struct statx *stx, const struct kstat *ks) {
   stx->stx_dev_minor = k_minor(ks->st_dev);
 }
 
-/* statx → kstat 缩窄（legacy SYS_STAT/SYS_FSTAT/SYS_NEWFSTATAT 用）。对本系
- * 统的值域是无损往返。 */
+// statx → kstat narrowing (for legacy SYS_STAT/SYS_FSTAT/SYS_NEWFSTATAT). A
+// lossless round-trip for this system's value ranges.
 static void kstat_from_statx(struct kstat *ks, const struct statx *stx) {
   __memset(ks, 0, sizeof(*ks));
   ks->st_dev = k_makedev(stx->stx_dev_major, stx->stx_dev_minor);
@@ -687,9 +709,10 @@ static void kstat_from_statx(struct kstat *ks, const struct statx *stx) {
   ks->st_ctim.tv_nsec = stx->stx_ctime.tv_nsec;
 }
 
-/* per-fd-type kstat 填充（原 sys_fstat 的 switch 本体）。FD_REGULAR/FD_DIR/
- * FD_DEV 委派 inode getattr 报真实字段，无 getattr 时回退填基本字段；其余
- * fd 类型（pipe/tty/shm）无 inode，按类型硬编码 st_mode。 */
+// per-fd-type kstat fill (the original sys_fstat switch body). FD_REGULAR/
+// FD_DIR/FD_DEV delegate to the inode getattr to report the real fields, and
+// fall back to basic fields without getattr; the remaining fd types
+// (pipe/tty/shm) have no inode and hardcode st_mode by type.
 static int fstat_fill(struct file *f, struct kstat *ks) {
   __memset(ks, 0, sizeof(*ks));
   ks->st_nlink = 1;
@@ -738,14 +761,16 @@ static int fstat_fill(struct file *f, struct kstat *ks) {
     ks->st_mode = S_IFIFO | 0644;
     return 0;
   case FD_TTY: {
-    /* tty fd 的 f->inode 即 devtmpfs /dev/pts/N 节点(打开时由 sys_open 绑定)。
-     * musl ttyname_r 用 stat(path) vs fstat(fd) 的 (dev,ino) 交叉校验确认
-     * /proc/self/fd/N 链接所指即该 fd——故 fstat 必须回填与 stat 一致的
-     * st_ino/st_rdev,否则闭环误判 ENODEV(procfs.md §3.4.1)。 */
+    // A tty fd's f->inode is the devtmpfs /dev/pts/N node (bound by sys_open at
+    // open time). musl ttyname_r uses the (dev,ino) cross-check of stat(path)
+    // vs fstat(fd) to confirm the /proc/self/fd/N link target is that fd — so
+    // fstat must backfill st_ino/st_rdev consistent with stat, else the closure
+    // misjudges ENODEV (procfs.md §3.4.1).
     struct inode *ip = f->inode;
     if (ip) {
       ks->st_ino = ip->ino;
-      ks->st_rdev = ip->ino; /* 字符设备 rdev = ino(devtmpfs 约定,见 FD_DEV) */
+      ks->st_rdev = ip->ino; // char device rdev = ino (devtmpfs convention, see
+                             // FD_DEV)
       ks->st_uid = ip->uid;
       ks->st_gid = ip->gid;
     }
@@ -784,7 +809,7 @@ static int fstat_fill(struct file *f, struct kstat *ks) {
   }
 }
 
-/* fd 路径填充：AT_EMPTY_PATH + 空路径 → stat fd 本身。 */
+// fd path fill: AT_EMPTY_PATH + empty path → stat the fd itself.
 static int vfs_fstat_fd(int fd, struct kstat *ks) {
   xtask *proc = current_task;
   if (fd < 0 || fd >= MAX_FD)
@@ -803,7 +828,8 @@ static int vfs_fstat_fd(int fd, struct kstat *ks) {
 }
 
 int vfs_statx(int dirfd, const char *kpath, unsigned flags, struct statx *stx) {
-  /* Linux do_statx: FORCE_SYNC|DONT_SYNC 同时置位非法；未知 flag 位非法。 */
+  // Linux do_statx: FORCE_SYNC|DONT_SYNC set together is illegal; unknown flag
+  // bits are illegal.
   if ((flags & AT_STATX_SYNC_TYPE) == AT_STATX_SYNC_TYPE)
     return -EINVAL;
   if (flags & ~(AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT | AT_EMPTY_PATH |
@@ -815,36 +841,39 @@ int vfs_statx(int dirfd, const char *kpath, unsigned flags, struct statx *stx) {
   int rc;
 
   if (kpath[0] == '\0') {
-    /* 空路径仅在 AT_EMPTY_PATH 下合法（stat fd 本身），否则 ENOENT。 */
+    // Empty path is only legal under AT_EMPTY_PATH (stat the fd itself), else
+    // ENOENT.
     if (!(flags & AT_EMPTY_PATH))
       return -ENOENT;
     rc = vfs_fstat_fd(dirfd, &ks);
   } else {
     char relpath[256];
     if (kpath[0] == '/') {
-      /* 绝对路径：dirfd 忽略，mount 表最长前缀匹配。 */
+      // Absolute path: dirfd ignored, longest-prefix match on mount table.
       char norm[256];
       if (normalize_path(kpath, norm, sizeof(norm)) < 0)
         return -ENAMETOOLONG;
       struct mount_entry *m = vfs_resolve(norm, relpath, sizeof(relpath));
       if (!m)
         return -ENOENT;
-      ip = path_walk(m, relpath); /* +1 */
+      ip = path_walk(m, relpath); // +1
     } else {
-      /* 相对路径：从 dirfd 解析（AT_FDCWD ≡ root，内核无 CWD）。 */
+      // Relative path: resolve from dirfd (AT_FDCWD ≡ root, kernel has no CWD).
       if (normalize_path(kpath, relpath, sizeof(relpath)) < 0)
         return -ENAMETOOLONG;
       struct inode *start = resolve_dirfd_start(dirfd);
       if (IS_ERR(start))
         return (int)PTR_ERR(start);
-      ip = path_walk_from(start, relpath); /* +1 */
+      ip = path_walk_from(start, relpath); // +1
       inode_put(start);
     }
     if (!ip)
       return -ENOENT;
-    /* §3.3.4 末段 symlink 跟随:未设 AT_SYMLINK_NOFOLLOW 时跟随末段 LNK
-     * (stat 默认跟随,lstat 设 NOFOLLOW 取 link 本身)。中间段已由 path_walk
-     * 跟随;此处分理末段。depth 防 target 循环 → ELOOP。 */
+    // §3.3.4 final-segment symlink following: follow a final-segment LNK unless
+    // AT_SYMLINK_NOFOLLOW is set (stat follows by default; lstat sets NOFOLLOW
+    // to take the link itself). Middle segments were followed by path_walk;
+    // this handles the final segment. depth guards against target loops →
+    // ELOOP.
     if (ip->type == INODE_LNK && !(flags & AT_SYMLINK_NOFOLLOW)) {
       int sym_depth = 0;
       struct inode *resolved = follow_symlink(ip, &sym_depth);
@@ -864,11 +893,12 @@ int vfs_statx(int dirfd, const char *kpath, unsigned flags, struct statx *stx) {
   return 0;
 }
 
-/* sys_statx(dirfd, path, flags, mask, buf) — SYS_STATX */
+// sys_statx(dirfd, path, flags, mask, buf) — SYS_STATX
 int64_t sys_statx(int64_t dirfd, int64_t path, int64_t flags, int64_t mask,
                   int64_t buf, int64_t unused) {
   (void)unused;
-  (void)mask; /* 请求掩码仅 advisory —— 始终回填 STATX_BASIC_STATS */
+  (void)mask; // request mask is only advisory — always backfill
+              // STATX_BASIC_STATS
   const char __user *upath = (const char __user *__force)path;
   if (!upath)
     return (int64_t)-EFAULT;
@@ -884,7 +914,7 @@ int64_t sys_statx(int64_t dirfd, int64_t path, int64_t flags, int64_t mask,
   return 0;
 }
 
-/* Legacy path-stat syscalls are thin kstat views over the statx core. */
+// Legacy path-stat syscalls are thin kstat views over the statx core.
 static int64_t sys_stat_legacy(int64_t path, int64_t buf, unsigned flags) {
   const char __user *upath = (const char __user *__force)path;
   if (!upath)
@@ -903,7 +933,7 @@ static int64_t sys_stat_legacy(int64_t path, int64_t buf, unsigned flags) {
   return 0;
 }
 
-/* sys_stat(path, stat_buf) — SYS_STAT: follow the final symlink. */
+// sys_stat(path, stat_buf) — SYS_STAT: follow the final symlink.
 int64_t sys_stat(int64_t arg1, int64_t arg2, int64_t unused1, int64_t unused2,
                  int64_t unused3, int64_t unused4) {
   (void)unused1;
@@ -913,7 +943,7 @@ int64_t sys_stat(int64_t arg1, int64_t arg2, int64_t unused1, int64_t unused2,
   return sys_stat_legacy(arg1, arg2, 0);
 }
 
-/* sys_lstat(path, stat_buf) — SYS_LSTAT: inspect the final symlink itself. */
+// sys_lstat(path, stat_buf) — SYS_LSTAT: inspect the final symlink itself.
 int64_t sys_lstat(int64_t arg1, int64_t arg2, int64_t unused1, int64_t unused2,
                   int64_t unused3, int64_t unused4) {
   (void)unused1;
@@ -938,10 +968,10 @@ struct inode *resolve_dirfd_start(int dirfd) {
     char norm[256];
     if (normalize_path(bp->cwd, norm, sizeof(norm)) < 0)
       return ERR_PTR(-ENAMETOOLONG);
-    struct inode *ip = vfs_open_kern(norm); /* +1 or NULL */
-    /* cwd is only ever set by sys_chdir/sys_fchdir after a S_ISDIR check, so a
-     * valid cwd resolves to a directory; NULL (cwd removed out from under us)
-     * → ENOENT, matching Linux. */
+    struct inode *ip = vfs_open_kern(norm); // +1 or NULL
+    // cwd is only ever set by sys_chdir/sys_fchdir after a S_ISDIR check, so a
+    // valid cwd resolves to a directory; NULL (cwd removed out from under us)
+    // → ENOENT, matching Linux.
     if (!ip)
       return ERR_PTR(-ENOENT);
     return ip;
@@ -963,7 +993,7 @@ struct inode *resolve_dirfd_start(int dirfd) {
   else if (f->inode->type != INODE_DIR)
     ip = ERR_PTR(-ENOTDIR);
   else
-    ip = inode_get(f->inode); /* +1 */
+    ip = inode_get(f->inode); // +1
   file_put(f);
   return ip;
 }
@@ -985,11 +1015,11 @@ int64_t sys_openat(int64_t dirfd, int64_t path, int64_t flags, int64_t mode,
   if (n < 0)
     return (int64_t)-EFAULT;
 
-  /* Absolute path: dirfd ignored, resolve via mount table (existing path). */
+  // Absolute path: dirfd ignored, resolve via mount table (existing path).
   if (kpath[0] == '/')
     return sys_open(path, flags, mode, 0, 0, 0);
 
-  /* Relative path: resolve start inode from dirfd (or root for AT_FDCWD). */
+  // Relative path: resolve start inode from dirfd (or root for AT_FDCWD).
   struct inode *start = resolve_dirfd_start((int)dirfd);
   if (IS_ERR(start))
     return (int64_t)PTR_ERR(start);
@@ -1007,7 +1037,7 @@ int64_t sys_openat(int64_t dirfd, int64_t path, int64_t flags, int64_t mode,
     inode_put(start);
     return (int64_t)-EROFS;
   }
-  struct inode *ip = path_walk_from(start, relpath); /* +1 or NULL */
+  struct inode *ip = path_walk_from(start, relpath); // +1 or NULL
   if (ip) {
     if ((iflags & O_CREAT) && (iflags & O_EXCL)) {
       inode_put(ip);
@@ -1040,7 +1070,7 @@ int64_t sys_openat(int64_t dirfd, int64_t path, int64_t flags, int64_t mode,
     }
     int eff_mode = (int)mode & 0777;
     eff_mode = eff_mode & ~(int)current_proc->umask;
-    ip = parent->i_op->create(parent, lastname, eff_mode); /* +1 */
+    ip = parent->i_op->create(parent, lastname, eff_mode); // +1
     inode_put(parent);
     if (IS_ERR(ip)) {
       inode_put(start);
@@ -1058,15 +1088,15 @@ int64_t sys_openat(int64_t dirfd, int64_t path, int64_t flags, int64_t mode,
     return (int64_t)-ENOENT;
   }
   inode_put(start);
-  /* ip is +1 (from path_walk_from or create). */
-  ip->mount = mount_of_inode(ip); /* lazy, mirrors sys_open */
+  // ip is +1 (from path_walk_from or create).
+  ip->mount = mount_of_inode(ip); // lazy, mirrors sys_open
 
   if (ip->type == INODE_DIR &&
       (iflags & (O_WRONLY | O_RDWR | O_CREAT | O_TRUNC))) {
     inode_put(ip);
     return (int64_t)-EISDIR;
   }
-  /* O_DIRECTORY: caller requires a directory; non-dir → ENOTDIR (Linux). */
+  // O_DIRECTORY: caller requires a directory; non-dir → ENOTDIR (Linux).
   if ((iflags & O_DIRECTORY) && ip->type != INODE_DIR) {
     inode_put(ip);
     return (int64_t)-ENOTDIR;
@@ -1115,9 +1145,9 @@ int64_t sys_openat(int64_t dirfd, int64_t path, int64_t flags, int64_t mode,
   return (int64_t)fd;
 }
 
-/* newfstatat(dirfd, path, buf, flags) — vfs_statx 薄封装（缩窄到 kstat）。
- * AT_EMPTY_PATH + 空路径 → stat dirfd 本身；AT_SYMLINK_NOFOLLOW 接受但无操
- * 作（无 symlink）。 */
+// newfstatat(dirfd, path, buf, flags) — thin vfs_statx wrapper (narrowing to
+// kstat). AT_EMPTY_PATH + empty path → stat dirfd itself; AT_SYMLINK_NOFOLLOW
+// accepted but no-op (no symlink).
 int64_t sys_newfstatat(int64_t dirfd, int64_t path, int64_t buf, int64_t flags,
                        int64_t unused1, int64_t unused2) {
   (void)unused1;
@@ -1139,8 +1169,8 @@ int64_t sys_newfstatat(int64_t dirfd, int64_t path, int64_t buf, int64_t flags,
   return 0;
 }
 
-/* sys_fstat(fd, stat_buf) — SYS_FSTAT：vfs_statx 薄封装（AT_EMPTY_PATH 路
- * 径，缩窄到 kstat）。 */
+// sys_fstat(fd, stat_buf) — SYS_FSTAT: thin vfs_statx wrapper (AT_EMPTY_PATH
+// path, narrowing to kstat).
 int64_t sys_fstat(int64_t arg1, int64_t arg2, int64_t unused1, int64_t unused2,
                   int64_t unused3, int64_t unused4) {
   (void)unused1;
@@ -1158,9 +1188,9 @@ int64_t sys_fstat(int64_t arg1, int64_t arg2, int64_t unused1, int64_t unused2,
   return 0;
 }
 
-/* sys_truncate(path, len) — SYS_TRUNCATE (group 3)
- * Resolve the path to an inode via mount framework + path_walk, then
- * dispatch size change to i_op->setattr (eliminates raw fat32_open). */
+// sys_truncate(path, len) — SYS_TRUNCATE (group 3)
+// Resolve the path to an inode via mount framework + path_walk, then
+// dispatch size change to i_op->setattr (eliminates raw fat32_open).
 int64_t sys_truncate(int64_t arg1, int64_t arg2, int64_t unused1,
                      int64_t unused2, int64_t unused3, int64_t unused4) {
   const char __user *upath = (const char __user *__force)arg1;
@@ -1175,7 +1205,7 @@ int64_t sys_truncate(int64_t arg1, int64_t arg2, int64_t unused1,
     return PTR_ERR(m);
   if (!m)
     return (int64_t)-ENOENT;
-  struct inode *ip = path_walk(m, relpath); /* +1 */
+  struct inode *ip = path_walk(m, relpath); // +1
   if (!ip)
     return (int64_t)-ENOENT;
   if (ip->type != INODE_REGULAR) {
@@ -1184,14 +1214,15 @@ int64_t sys_truncate(int64_t arg1, int64_t arg2, int64_t unused1,
   }
   if (!ip->i_op || !ip->i_op->setattr) {
     inode_put(ip);
-    return (int64_t)-EPERM; /* 对齐 Linux notify_change:无 setattr → EPERM */
+    return (int64_t)-EPERM; // matches Linux notify_change: no setattr → EPERM
   }
-  int rc = ip->i_op->setattr(ip, (uint64_t)len); /* 锁由 setattr 内部持(§6.6) */
+  int rc = ip->i_op->setattr(ip, (uint64_t)len); // lock held internally by
+                                                 // setattr (§6.6)
   inode_put(ip);
   return (int64_t)rc;
 }
 
-/* sys_fsync(fd) — SYS_FSYNC (group 3): write back dirty pages of one inode. */
+// sys_fsync(fd) — SYS_FSYNC (group 3): write back dirty pages of one inode.
 int64_t sys_fsync(int64_t arg1, int64_t datasync_arg, int64_t unused2,
                   int64_t unused3, int64_t unused4, int64_t unused5) {
   int fd = (int)arg1;
@@ -1222,7 +1253,7 @@ int64_t sys_fsync(int64_t arg1, int64_t datasync_arg, int64_t unused2,
   return (int64_t)rc;
 }
 
-/* sys_sync() — SYS_SYNC (group 3): write back all dirty pages. */
+// sys_sync() — SYS_SYNC (group 3): write back all dirty pages.
 int64_t sys_sync(int64_t unused1, int64_t unused2, int64_t unused3,
                  int64_t unused4, int64_t unused5, int64_t unused6) {
   (void)unused1;
@@ -1238,7 +1269,7 @@ int64_t sys_sync(int64_t unused1, int64_t unused2, int64_t unused3,
   return (int64_t)(rc ? rc : flush_rc);
 }
 
-/* sys_mkdir(path, mode) — SYS_MKDIR */
+// sys_mkdir(path, mode) — SYS_MKDIR
 int64_t sys_mkdir(int64_t arg1, int64_t arg2, int64_t unused1, int64_t unused2,
                   int64_t unused3, int64_t unused4) {
   const char __user *upath = (const char __user *__force)arg1;
@@ -1260,12 +1291,14 @@ int64_t sys_mkdir(int64_t arg1, int64_t arg2, int64_t unused1, int64_t unused2,
   }
   if (!parent->i_op || !parent->i_op->mkdir) {
     inode_put(parent);
-    return (int64_t)-EPERM; /* 对齐 Linux vfs_mkdir:无 mkdir → EPERM */
+    return (int64_t)-EPERM; // matches Linux vfs_mkdir: no mkdir → EPERM
   }
-  /* 先查目标是否已存在,fat32_dir_mkdir 不查重(直接分配 cluster 建项),
-   * 缺这层会建出重复同名目录项(见重复 /var bug)。对齐 Linux vfs_mkdir 的
-   * lookup_one_len:命中已存在 → EEXIST。 */
-  struct inode *existing = path_walk(m, relpath); /* +1 */
+  // First check whether the target already exists; fat32_dir_mkdir does not
+  // check for duplicates (it directly allocates a cluster to create an entry),
+  // and without this layer it would create duplicate same-name directory
+  // entries (see the duplicate /var bug). Matches Linux vfs_mkdir's
+  // lookup_one_len: hitting an existing entry → EEXIST.
+  struct inode *existing = path_walk(m, relpath); // +1
   if (existing) {
     inode_put(existing);
     inode_put(parent);
@@ -1276,9 +1309,10 @@ int64_t sys_mkdir(int64_t arg1, int64_t arg2, int64_t unused1, int64_t unused2,
   inode_put(parent);
   if (rc != 0)
     return (int64_t)rc;
-  /* S08: mkdir 不返 inode,取回新建目录设 owner=创建进程 + 应用 umask 权限位
-   * (保留目录类型位 S_IFDIR)。 */
-  struct inode *nip = path_walk(m, relpath); /* +1 */
+  // S08: mkdir returns no inode; re-fetch the new directory to set
+  // owner = creating process + apply the umask permission bits (keep the
+  // S_IFDIR directory type bit).
+  struct inode *nip = path_walk(m, relpath); // +1
   if (nip) {
     nip->mode = (nip->mode & ~0777) | (uint32_t)eff_mode;
     nip->uid = current_proc->uid;
@@ -1288,11 +1322,11 @@ int64_t sys_mkdir(int64_t arg1, int64_t arg2, int64_t unused1, int64_t unused2,
   return 0;
 }
 
-/* sys_mknod(path, mode, dev) — SYS_MKNOD
- * 对齐 Linux mknod：在 path 父目录建 mode 类型节点。
- * tmpfs 支持 S_IFREG/S_IFIFO/S_IFSOCK（建节点返 0）；
- * S_IFCHR/S_IFBLK/S_IFDIR（设备节点归 devtmpfs，目录用 mkdir）→ -EOPNOTSUPP。
- */
+// sys_mknod(path, mode, dev) — SYS_MKNOD
+// Matches Linux mknod: create a mode-type node in path's parent dir.
+// tmpfs supports S_IFREG/S_IFIFO/S_IFSOCK (create returns 0);
+// S_IFCHR/S_IFBLK/S_IFDIR (device nodes belong to devtmpfs, directories use
+// mkdir) → -EOPNOTSUPP.
 int64_t sys_mknod(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
                   int64_t unused2, int64_t unused3) {
   (void)unused1;
@@ -1300,13 +1334,15 @@ int64_t sys_mknod(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
   (void)unused3;
   const char __user *upath = (const char __user *__force)arg1;
   int mode = (int)arg2;
-  (void)arg3; /* dev 参数仅对 CHR/BLK 有意义，本方案支持类型不涉及，忽略 */
+  (void)arg3; // dev only matters for CHR/BLK; the supported types don't use it
+              // here, ignore
 
   if (!upath)
     return (int64_t)-EFAULT;
   int fmt = mode & S_IFMT;
   if (fmt != S_IFREG && fmt != S_IFIFO && fmt != S_IFSOCK)
-    return (int64_t)-EOPNOTSUPP; /* 对齐 Linux：tmpfs 不建设备/目录节点 */
+    return (int64_t)-EOPNOTSUPP; // matches Linux: tmpfs doesn't build
+                                 // device/directory nodes
 
   char relpath[256], lastname[256];
   struct mount_entry *m = vfs_resolve_user(upath, relpath, sizeof(relpath));
@@ -1327,7 +1363,8 @@ int64_t sys_mknod(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
     inode_put(parent);
     return (int64_t)-EPERM;
   }
-  /* S08: 权限位应用 umask,类型位保留;设 owner=创建进程。 */
+  // S08: permission bits apply umask, type bits keep; set owner = creating
+  // process.
   int eff_mode = (mode & S_IFMT) | ((mode & 0777) & ~(int)current_proc->umask);
   struct inode *ip = parent->i_op->create(parent, lastname, eff_mode);
   inode_put(parent);
@@ -1337,11 +1374,11 @@ int64_t sys_mknod(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
     return (int64_t)-ENOMEM;
   ip->uid = current_proc->uid;
   ip->gid = current_proc->gid;
-  inode_put(ip); /* create 已 inode_create 初始 +1，平衡 */
+  inode_put(ip); // create already did the initial +1 in inode_create; balance
   return 0;
 }
 
-/* sys_unlink(path) — SYS_UNLINK */
+// sys_unlink(path) — SYS_UNLINK
 int64_t sys_unlink(int64_t arg1, int64_t unused1, int64_t unused2,
                    int64_t unused3, int64_t unused4, int64_t unused5) {
   const char __user *upath = (const char __user *__force)arg1;
@@ -1363,17 +1400,19 @@ int64_t sys_unlink(int64_t arg1, int64_t unused1, int64_t unused2,
   }
   if (!parent->i_op || !parent->i_op->unlink) {
     inode_put(parent);
-    return (int64_t)-EPERM; /* 对齐 Linux vfs_unlink:无 unlink → EPERM */
+    return (int64_t)-EPERM; // matches Linux vfs_unlink: no unlink → EPERM
   }
   rc = parent->i_op->unlink(parent, lastname);
   inode_put(parent);
   return (int64_t)rc;
 }
 
-/* sys_rename(oldpath, newpath) — SYS_RENAME
- * 照 sys_unlink 模板:双 path_walk_parent 取两个 parent + lastname,
- * 调 old_parent->i_op->rename。跨 mount 不支持(vfs_resolve 已剥离挂载点
- * 前缀,relpath 限单 mount 内),db 场景全在 /run/udev/data/ 单 tmpfs mount。 */
+// sys_rename(oldpath, newpath) — SYS_RENAME
+// Following the sys_unlink template: two path_walk_parent calls take the two
+// parents + lastnames, then call old_parent->i_op->rename. Cross-mount not
+// supported (vfs_resolve strips mount-point prefixes; relpath is confined to a
+// single mount), the db scenario is all within the single tmpfs mount
+// /run/udev/data/.
 int64_t sys_rename(int64_t arg1, int64_t arg2, int64_t unused1, int64_t unused2,
                    int64_t unused3, int64_t unused4) {
   (void)unused1;
@@ -1399,7 +1438,8 @@ int64_t sys_rename(int64_t arg1, int64_t arg2, int64_t unused1, int64_t unused2,
   if (!new_m)
     return (int64_t)-ENOENT;
 
-  /* db 场景 old/new 同 mount;跨 mount 返 -EXDEV(对齐 Linux rename(2)) */
+  // The db scenario has old/new in the same mount; a cross-mount returns
+  // -EXDEV (matching Linux rename(2)).
   if (old_m != new_m)
     return (int64_t)-EXDEV;
 
@@ -1423,7 +1463,7 @@ int64_t sys_rename(int64_t arg1, int64_t arg2, int64_t unused1, int64_t unused2,
   if (!old_parent->i_op || !old_parent->i_op->rename) {
     inode_put(old_parent);
     inode_put(new_parent);
-    return (int64_t)-EPERM; /* 对齐 Linux vfs_rename:无 rename → EPERM */
+    return (int64_t)-EPERM; // matches Linux vfs_rename: no rename → EPERM
   }
   rc = old_parent->i_op->rename(old_parent, old_name, new_parent, new_name);
   inode_put(old_parent);
@@ -1431,7 +1471,7 @@ int64_t sys_rename(int64_t arg1, int64_t arg2, int64_t unused1, int64_t unused2,
   return (int64_t)rc;
 }
 
-/* sys_rmdir(path) — SYS_RMDIR */
+// sys_rmdir(path) — SYS_RMDIR
 int64_t sys_rmdir(int64_t arg1, int64_t unused1, int64_t unused2,
                   int64_t unused3, int64_t unused4, int64_t unused5) {
   const char __user *upath = (const char __user *__force)arg1;
@@ -1453,16 +1493,16 @@ int64_t sys_rmdir(int64_t arg1, int64_t unused1, int64_t unused2,
   }
   if (!parent->i_op || !parent->i_op->rmdir) {
     inode_put(parent);
-    return (int64_t)-EPERM; /* 对齐 Linux vfs_rmdir:无 rmdir → EPERM */
+    return (int64_t)-EPERM; // matches Linux vfs_rmdir: no rmdir → EPERM
   }
   rc = parent->i_op->rmdir(parent, lastname);
   inode_put(parent);
   return (int64_t)rc;
 }
 
-/* sys_dev_create(name, shm_fd, minor) — SYS_DEV_CREATE
- * Kernel auto-fills driver_pid=current_task->pid, is_block=false, callbacks
- * NULL (user-space driver). minor stored in dev_ops for ioctl req routing. */
+// sys_dev_create(name, shm_fd, minor) — SYS_DEV_CREATE
+// Kernel auto-fills driver_pid=current_task->pid, is_block=false, callbacks
+// NULL (user-space driver). minor stored in dev_ops for ioctl req routing.
 int64_t sys_dev_create(int64_t arg1, int64_t arg2, int64_t arg3,
                        int64_t unused1, int64_t unused2, int64_t unused3) {
   const char __user *uname = (const char __user *__force)arg1;
@@ -1517,9 +1557,9 @@ int64_t sys_dev_create(int64_t arg1, int64_t arg2, int64_t arg3,
   return 0;
 }
 
-/* sys_getdents(fd, buf, len) — SYS_GETDENTS64
- * Read directory entries into user buffer.
- * fd must be FD_DIR. Returns bytes written, 0 on EOF, or negative errno. */
+// sys_getdents(fd, buf, len) — SYS_GETDENTS64
+// Read directory entries into user buffer.
+// fd must be FD_DIR. Returns bytes written, 0 on EOF, or negative errno.
 int64_t sys_getdents(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
                      int64_t unused2, int64_t unused3) {
   int fd = (int)arg1;

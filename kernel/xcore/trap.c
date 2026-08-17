@@ -476,8 +476,8 @@ void trap_dispatch(trapframe *tf) {
       int fault_result = fault_handler(fault_addr, current_task);
       if (fault_result == FAULT_IO_ERROR) {
         if (force_sig_hook)
-          force_sig_hook(current_task, SIGBUS, 2 /* BUS_ADRERR */,
-                         (void *)fault_addr);
+          // BUS_ADRERR
+          force_sig_hook(current_task, SIGBUS, 2, (void *)fault_addr);
         return;
       }
       if (fault_result == FAULT_HANDLED) {
@@ -754,7 +754,7 @@ void trap_dispatch(trapframe *tf) {
 // scheduler_lock) but sched count freezes, idle phase=4.
 static void reschedule_ipi_handler(trapframe *tf) {
   (void)tf;
-  /* An IPI cannot interrupt rcu_read_lock() because readers keep IRQs off. */
+  // An IPI cannot interrupt rcu_read_lock() because readers keep IRQs off.
   rcu_quiescent();
   current_task->need_resched = 1;
   lapic_eoi();

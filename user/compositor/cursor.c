@@ -2,18 +2,17 @@
  * Copyright (c) 2026 hesse
  *
  * SPDX-License-Identifier: MIT
- *
- * Apple-style software cursor loading for tinywl. PNGs in user/cursor/ are
- * decoded to straight ARGB8888 (reusing wallpaper.c's libpng decoder), then
- * pre-multiplied in place, then wrapped in self-built wlr_buffers (malloc'd
- * ARGB + wlr_buffer_init with a DATA_PTR impl). wlr_cursor_set_buffer feeds
- * them through wlroots' software-cursor GLES2 texture-quad path — the same
- * path the default xcursor uses, only the pixel source differs.
- *
- * This is the only translation unit that includes cursors.h: os_cursors[] is
- * declared static there, so a second includer would be a duplicate-definition
- * link error.
  */
+// Apple-style software cursor loading for tinywl. PNGs in user/cursor/ are
+// decoded to straight ARGB8888 (reusing wallpaper.c's libpng decoder), then
+// pre-multiplied in place, then wrapped in self-built wlr_buffers (malloc'd
+// ARGB + wlr_buffer_init with a DATA_PTR impl). wlr_cursor_set_buffer feeds
+// them through wlroots' software-cursor GLES2 texture-quad path — the same
+// path the default xcursor uses, only the pixel source differs.
+//
+// This is the only translation unit that includes cursors.h: os_cursors[] is
+// declared static there, so a second includer would be a duplicate-definition
+// link error.
 #define _GNU_SOURCE
 #include <drm/drm_fourcc.h>
 #include <png.h>
@@ -31,22 +30,22 @@
 #include "cursor.h"
 #include "cursors.h"
 
-/* Cached buffer for one cursor. The ARGB pixels are owned by the buffer and
- * freed in its destroy handler. */
+// Cached buffer for one cursor. The ARGB pixels are owned by the buffer and
+// freed in its destroy handler.
 struct os_cursor_buf {
   struct wlr_buffer base;
   uint32_t *data;
   size_t stride;
 };
 
-/* One entry per os_cursors[]; buf stays NULL when loading failed. The table
- * currently has 55 name entries (44 unique PNGs), so 64 leaves headroom. */
+// One entry per os_cursors[]; buf stays NULL when loading failed. The table
+// currently has 55 name entries (44 unique PNGs), so 64 leaves headroom.
 static struct wlr_buffer *os_cursor_buffers[64];
 
-/* The packaged artwork is 128px but is displayed as a 32px logical cursor. */
+// The packaged artwork is 128px but is displayed as a 32px logical cursor.
 static const float os_cursor_buffer_scale = 4.0f;
 
-/* ---- libpng decode → straight ARGB8888 (mirrors wallpaper.c:load_png) ---- */
+// ---- libpng decode → straight ARGB8888 (mirrors wallpaper.c:load_png) ----
 static bool load_cursor_png(const char *path, uint32_t **out_argb, int *w,
                             int *h) {
   FILE *fp = fopen(path, "rb");
@@ -123,8 +122,8 @@ fail:
   return false;
 }
 
-/* straight ARGB8888 → pre-multiplied ARGB8888, in place. Transparent pixels
- * are zeroed whole so no tinted fringe leaks at edges. */
+// straight ARGB8888 → pre-multiplied ARGB8888, in place. Transparent pixels
+// are zeroed whole so no tinted fringe leaks at edges.
 static void png_to_premult_argb(uint32_t *argb, size_t n) {
   for (size_t i = 0; i < n; i++) {
     uint32_t px = argb[i];
@@ -169,8 +168,8 @@ static const struct wlr_buffer_impl os_cursor_buffer_impl = {
     .end_data_ptr_access = os_cursor_buffer_end_data_ptr_access,
 };
 
-/* Build a self-built wlr_buffer taking ownership of <argb>. Returns NULL on
- * allocation failure (caller retains ownership of argb then). */
+// Build a self-built wlr_buffer taking ownership of <argb>. Returns NULL on
+// allocation failure (caller retains ownership of argb then).
 static struct wlr_buffer *os_cursor_buffer_create(uint32_t *argb, int w,
                                                   int h) {
   struct os_cursor_buf *buf = calloc(1, sizeof(*buf));
@@ -184,8 +183,8 @@ static struct wlr_buffer *os_cursor_buffer_create(uint32_t *argb, int w,
 }
 
 void os_cursor_init(void) {
-  /* os_cursor_buffers[] is zero-initialised; any entry left NULL falls back to
-   * the wlroots default cursor at apply time. */
+  // os_cursor_buffers[] is zero-initialised; any entry left NULL falls back to
+  // the wlroots default cursor at apply time.
   for (int i = 0; i < os_cursors_n; i++) {
     uint32_t *argb = NULL;
     int w = 0, h = 0;
@@ -194,9 +193,9 @@ void os_cursor_init(void) {
       continue;
     }
     if (w != 128 || h != 128) {
-      /* Assets are authored at 128×128 and rendered at scale 4.0 (→32 logical
-       * px); a mismatch means the hotspot (in 128px coords) would be off. Load
-       * anyway but flag it loudly. */
+      // Assets are authored at 128×128 and rendered at scale 4.0 (→32 logical
+      // px); a mismatch means the hotspot (in 128px coords) would be off. Load
+      // anyway but flag it loudly.
       wlr_log(WLR_ERROR, "cursor: %s is %dx%d, expected 128x128",
               os_cursors[i].name, w, h);
     }
@@ -228,8 +227,8 @@ void os_cursor_apply(struct wlr_cursor *cursor, struct wlr_xcursor_manager *mgr,
         if (hy < 0) {
           hy = 0;
         }
-        /* wlr_cursor_set_buffer expects a logical-coordinate hotspot, unlike
-         * the asset-coordinate hotspots stored in cursors.h. */
+        // wlr_cursor_set_buffer expects a logical-coordinate hotspot, unlike
+        // the asset-coordinate hotspots stored in cursors.h.
         hx = (int)(hx / os_cursor_buffer_scale + 0.5f);
         hy = (int)(hy / os_cursor_buffer_scale + 0.5f);
         wlr_cursor_set_buffer(cursor, buf, hx, hy, os_cursor_buffer_scale);
@@ -238,8 +237,8 @@ void os_cursor_apply(struct wlr_cursor *cursor, struct wlr_xcursor_manager *mgr,
       break;
     }
   }
-  /* Name unknown or its buffer failed to load: fall back to the wlroots
-   * default (NULL theme → built-in basic arrow). */
+  // Name unknown or its buffer failed to load: fall back to the wlroots
+  // default (NULL theme → built-in basic arrow).
   wlr_cursor_set_xcursor(cursor, mgr, "default");
 }
 

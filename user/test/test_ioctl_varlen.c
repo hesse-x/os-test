@@ -1,12 +1,12 @@
 /*
  * Copyright (c) 2026 hesse
  * SPDX-License-Identifier: MIT
- *
- * test_ioctl_varlen — variable-length ioctl via user-space driver proxy.
- * Fork: parent = driver (sys_dev_create + recv loop), child = client (ioctl).
- * Covers: RECV_REQ inline (<=48B), RECV_IOCTL varlen (>48B), boundary 48/49,
- *         65536 cap, ETIMEDOUT, arg layout (pure data, no result prefix).
  */
+// test_ioctl_varlen — variable-length ioctl via user-space driver proxy.
+// Fork: parent = driver (sys_dev_create + recv loop), child = client (ioctl).
+// Covers: RECV_REQ inline (<=48B), RECV_IOCTL varlen (>48B), boundary 48/49,
+//         65536 cap, ETIMEDOUT, arg layout (pure data, no result prefix).
+//
 
 #include <errno.h>
 #include <fcntl.h>

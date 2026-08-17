@@ -114,7 +114,7 @@ void test_chmod_owner_clears_setuid(void) {
     struct stat s2;
     if (stat(TFS "/f", &s2) != 0)
       _exit(3);
-    _exit((s2.st_mode & S_ISUID) ? 1 : 0); /* 0 = cleared as expected */
+    _exit((s2.st_mode & S_ISUID) ? 1 : 0); // 0 = cleared as expected
   }
   int status = 0;
   TEST_ASSERT_EQUAL_INT(child, waitpid(child, &status, 0));
@@ -133,7 +133,7 @@ void test_chmod_non_root_eperm(void) {
   if (child == 0) {
     setuid(1000);
     int r = chmod(TFS "/f", 0600);
-    _exit(r == -1 && errno == EPERM ? 0 : 1); /* 0 = got EPERM as expected */
+    _exit(r == -1 && errno == EPERM ? 0 : 1); // 0 = got EPERM as expected
   }
   int status = 0;
   TEST_ASSERT_EQUAL_INT(child, waitpid(child, &status, 0));
@@ -227,7 +227,7 @@ void test_chown_non_root_eperm(void) {
   if (child == 0) {
     setuid(1000);
     int r = chown(FAT "/f", 1000, 1000);
-    _exit(r == -1 && errno == EPERM ? 0 : 1); /* 0 = got EPERM as expected */
+    _exit(r == -1 && errno == EPERM ? 0 : 1); // 0 = got EPERM as expected
   }
   int status = 0;
   TEST_ASSERT_EQUAL_INT(child, waitpid(child, &status, 0));

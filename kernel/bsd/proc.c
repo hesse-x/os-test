@@ -207,9 +207,10 @@ void proc_reap(xtask *proc) {
     bp->signal = NULL;
   }
 
-  /* procfs 侧表清理(procfs.md §3.5):reap 在无锁下被调,字符串自带 refcount,
-   * 持引用的读者放完才 free。须在 pid 复用前清(否则新进程读到旧 exe/cmdline)。
-   */
+  // procfs side-table cleanup (procfs.md §3.5): reap runs lock-free and the
+  // strings carry their own refcount, freed only after the last ref-holding
+  // reader is done. Must be cleared before the pid is reused (else a new
+  // process reads a stale exe/cmdline).
   procfs_pinfo_clear(proc->pid);
 
   kfree(bp);
@@ -262,11 +263,11 @@ void file_put(struct file *f) {
   if (f->f_op && f->f_op->close)
     f->f_op->close(current_task, f);
 
-  /* Release OFD (per open file description) locks before dropping the inode
-   * reference: they are owned by this description, not the process, so the
-   * close of its last fd (this path) is where they must vanish. No-op for
-   * files without an inode or that never held OFD locks. Must precede the
-   * per-type inode_put below so f->inode stays valid. */
+  // Release OFD (per open file description) locks before dropping the inode
+  // reference: they are owned by this description, not the process, so the
+  // close of its last fd (this path) is where they must vanish. No-op for
+  // files without an inode or that never held OFD locks. Must precede the
+  // per-type inode_put below so f->inode stays valid.
   file_lock_release_file(f);
 
   switch (f->type) {
@@ -296,10 +297,12 @@ void file_put(struct file *f) {
   case FD_DEV: {
     struct inode *ip = f->inode;
     if (ip) {
-      /* §5: 锁下读 i_priv(防 borrow-window UAF)。fd 引用由 open 时
-       * dev_ops_get 取,ops 在本 fd close 前不归 0,故读出后可安全用。
-       * close 回调 + 放 fd 引用(dev_ops_put)在锁外完成;put 可能触发
-       * kfree(仅 user-space driver 且本 fd 是最后持有者时)。*/
+      // §5: read i_priv under the lock (prevents a borrow-window UAF). The fd
+      // reference was taken by dev_ops_get at open; ops cannot reach 0 before
+      // this fd closes, so it is safe to use after reading. The close callback
+      // + dropping the fd reference (dev_ops_put) happen outside the lock; put
+      // may trigger kfree (only for a user-space driver when this fd is the
+      // last holder).
       struct dev_ops *ops = dev_ops_peek_by_inode(ip);
       if (ops) {
         if (ops->driver_pid == 0) {
@@ -308,7 +311,7 @@ void file_put(struct file *f) {
           else if (ops->close)
             ops->close(current_task, -1);
         }
-        dev_ops_put(ops); /* 放 fd 引用 */
+        dev_ops_put(ops); // drop the fd reference
       }
       inode_put(ip);
     }
@@ -365,9 +368,9 @@ void file_put(struct file *f) {
     inotify_release(f);
     break;
   case FD_SYNC_FILE:
-    /* FD_SYNC_FILE (plan2): drop the fence ref the fd holds. Defined in the
-     * driver layer; declared here locally to avoid pulling drm_internal.h
-     * into the BSD layer. */
+    // FD_SYNC_FILE (plan2): drop the fence ref the fd holds. Defined in the
+    // driver layer; declared here locally to avoid pulling drm_internal.h
+    // into the BSD layer.
     if (f->sync_file_fence) {
       extern void drm_fence_put(struct drm_fence * fence);
       drm_fence_put(f->sync_file_fence);
@@ -390,7 +393,7 @@ void file_put(struct file *f) {
     break;
   case FD_IPC:
     // Clear the owner task's ipcfd_file back-link and drop the create-time
-    // reference (evdev_refact.md §4.3 生命周期 / §5.6).
+    // reference (evdev_refact.md §4.3 lifecycle / §5.6).
     ipcfd_close(f);
     break;
   case FD_NETLINK:
@@ -399,10 +402,11 @@ void file_put(struct file *f) {
     break;
   case FD_TTY: {
     if (f->inode) {
-      /* §5: ptmx_open/pts_open 把 FD_DEV mutate 成 FD_TTY,fd 引用随之转交,
-       * close 时在此放(对齐 FD_DEV 分支)。The slave ops is embedded in
-       * pts_priv, which pty_close_file may free when it removes /dev/pts/N,
-       * so the fd reference must be dropped before that teardown. */
+      // §5: ptmx_open/pts_open mutate FD_DEV into FD_TTY, transferring the fd
+      // reference accordingly; it is dropped here on close (aligned with the
+      // FD_DEV branch). The slave ops is embedded in
+      // pts_priv, which pty_close_file may free when it removes /dev/pts/N,
+      // so the fd reference must be dropped before that teardown.
       struct dev_ops *ops = dev_ops_peek_by_inode(f->inode);
       if (ops)
         dev_ops_put(ops);
@@ -432,13 +436,13 @@ int alloc_fd(files *files, int min_fd) {
   return -EMFILE;
 }
 
-/* FD_SYNC_FILE (plan2): install a sync_file fd bound to `fence`. The caller
- * (driver EXECBUFFER out-fence path) takes a fence ref before calling; this fd
- * holds that ref, released on close by the FD_SYNC_FILE case in file_put.
- *
- * Lives in the BSD layer so the driver never touches struct file layout / fd
- * table internals directly (the driver↔bsd include boundary). drm_fence is an
- * opaque type to the BSD layer — declared forward in kernel/bsd/types.h. */
+// FD_SYNC_FILE (plan2): install a sync_file fd bound to `fence`. The caller
+// (driver EXECBUFFER out-fence path) takes a fence ref before calling; this fd
+// holds that ref, released on close by the FD_SYNC_FILE case in file_put.
+//
+// Lives in the BSD layer so the driver never touches struct file layout / fd
+// table internals directly (the driver↔bsd include boundary). drm_fence is an
+// opaque type to the BSD layer — declared forward in kernel/bsd/types.h.
 int bsd_sync_file_fd_install(xtask *proc, struct drm_fence *fence) {
   if (!fence)
     return -EINVAL;
@@ -1428,11 +1432,13 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   // 8. fs_base + proc thread-level fields
   child->fs_base = (flags & CLONE_SETTLS) ? tls : parent->fs_base;
   if (flags & CLONE_THREAD) {
-    // §4.5:TLS/栈信息由 sys_pthread_setup 预置到 current_task,此处消费即清;
-    // 未预置则为零值。仓库 pthread 走 sys_pthread_setup 两步握手;musl pthread
-    // 走纯 5 参 Linux clone 不预置 → ci 全零 → detached=0 → sched_task_reap 的
-    // TLS/stack 回收分支 no-op(由 musl __unmapself 自管),clear_tid_addr 路径仍
-    // 兑现 CLONE_CHILD_CLEARTID 的 join 同步。两条路径共存,无 double-free。
+    // §4.5: TLS/stack info is preset into current_task by sys_pthread_setup and
+    // consumed (cleared) here; zero if not preset. Repo pthread uses the
+    // two-step sys_pthread_setup handshake; musl pthread uses a plain 5-arg
+    // Linux clone and does not preset → ci all-zero → detached=0 →
+    // sched_task_reap's TLS/stack reclaim branch is a no-op (managed by musl
+    // __unmapself), while the clear_tid_addr path still honors
+    // CLONE_CHILD_CLEARTID's join sync. Both paths coexist, no double-free.
     struct thread_clone_info ci = current_task->pending_pthread_setup;
     __memset(&current_task->pending_pthread_setup, 0,
              sizeof(struct thread_clone_info));
@@ -1486,7 +1492,8 @@ int64_t sys_clone(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   child->state = READY;
   child->k_rsp = k_rsp;
   child->k_stack_top = k_stack_top;
-  kstack_canary_write(child); // (frame_opt.md 块四) canary at stack bottom
+  kstack_canary_write(
+      child); // (frame_opt.md block four) canary at stack bottom
   child->entry = parent->entry;
   child->wait_event = WAIT_NONE;
   child->vfork_child_pid = -1;
@@ -1677,9 +1684,10 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
   }
   uint32_t saved_ino = ip->ino;
   uint64_t file_size = ip->size;
-  /* S_ISUID/S_ISGID 凭证切换前置：ip 在 sys_close 后 dangling，须在此捕获
-   * 文件 mode/uid/gid 与所在挂载的 NOSUID 标志。point-of-no-return 后才提交
-   * new_euid/egid（见步骤 9b），失败路径不污染调用者凭证。 */
+  // S_ISUID/S_ISGID credential-switch prerequisite: ip dangles after sys_close,
+  // so capture the file mode/uid/gid and the mount's NOSUID flag here.
+  // new_euid/ egid are only committed after point-of-no-return (see step 9b);
+  // failure paths do not pollute the caller's credentials.
   uint32_t file_mode = ip->mode;
   uint32_t file_uid = ip->uid;
   uint32_t file_gid = ip->gid;
@@ -1704,7 +1712,7 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
   // so execve reads the whole image into a kmalloc'd buffer here.
   int nread = vfs_read_kernel(ip, 0, (void *)elf_buf, file_size);
   sys_close((int64_t)fd, 0, 0, 0, 0, 0);
-  ip = NULL; /* ip is now dangling after sys_close — do not dereference */
+  ip = NULL; // ip is now dangling after sys_close — do not dereference
 
   if (nread < 0 || (uint64_t)nread < file_size) {
     kfree(elf_buf);
@@ -1726,11 +1734,13 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
   printk(LOG_DEBUG, "execve: pid=%d path=%s size=%lu magic OK\n", proc->pid,
          pathname, (unsigned long)file_size);
 
-  /* S_ISUID/S_ISGID 预计算（对齐 Linux prepare_binfmt → commit_creds 分离）。
-   * 只切 euid/suid（egid/sgid），real uid/gid 保持调用者——setuid 程序能
-   * setuid(getuid()) 永久 drop 特权的前提。MNT_NOSUID 跳过（todo #1
-   * 核心消费点）。 此处仅算新值，不写 proc；point-of-no-return 后才提交（步骤
-   * 9b），故后续 ld.so 加载/栈分配等失败路径 return 时调用者凭证原封不动。 */
+  // S_ISUID/S_ISGID precompute (aligned with Linux prepare_binfmt →
+  // commit_creds split). Only euid/suid (egid/sgid) are switched; real uid/gid
+  // stay with the caller — the prerequisite for a setuid program being able to
+  // setuid(getuid()) to permanently drop privilege. MNT_NOSUID skips it (todo
+  // #1 core consumer). Only the new values are computed here, not written to
+  // proc; committed after point-of-no-return (step 9b), so a later ld.so load /
+  // stack-allocation failure returning leaves the caller's credentials intact.
   uint32_t new_euid = proc->proc->euid, new_suid = proc->proc->suid;
   uint32_t new_egid = proc->proc->egid, new_sgid = proc->proc->sgid;
   if (!(mnt_flags & MS_NOSUID)) {
@@ -2050,17 +2060,17 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
   auxv[ai++] = current_proc->uid;
   auxv[ai++] = AT_EUID;
   auxv[ai++] =
-      new_euid; /* S_ISUID exec 后的新 euid（未设 setuid 位则 == euid） */
+      new_euid; // new euid after an S_ISUID exec (== euid if no setuid bit)
   auxv[ai++] = AT_GID;
   auxv[ai++] = current_proc->gid;
   auxv[ai++] = AT_EGID;
-  auxv[ai++] = new_egid; /* S_ISGID exec 后的新 egid */
+  auxv[ai++] = new_egid; // new egid after an S_ISGID exec
   auxv[ai++] = AT_PLATFORM;
   auxv[ai++] = 0;
   auxv[ai++] = AT_SECURE;
-  /* AT_SECURE: euid!=uid 或 egid!=gid → musl 进 secure-execution 模式 drop
-   * LD_*。 setuid exec 使 euid 切到 inode owner → AT_SECURE 非零（setuid
-   * 程序应得隔离）。 */
+  // AT_SECURE: euid!=uid or egid!=gid → musl enters secure-execution mode and
+  // drops LD_*. A setuid exec switches euid to the inode owner → AT_SECURE
+  // non-zero (a setuid program should get isolation).
   auxv[ai++] =
       (new_euid != current_proc->uid) || (new_egid != current_proc->gid);
   auxv[ai++] = AT_HWCAP;
@@ -2101,10 +2111,11 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
   uint64_t user_sp = sp_user;
 #undef STACK_KV
 
-  /* procfs 侧表填充(procfs.md §3.5):exe/cmdline 必须在 execve 时抓(运行期栈
-   * 即将释放)。argv_strings[0] 即 argv[0]=exe 路径(Linux 约定),cmdline = argv
-   * \0 拼接。须在 kfree(argv_strings) 之前。NULL envp:本期不存 environ(留
-   * TODO)。 */
+  // procfs side-table fill (procfs.md §3.5): exe/cmdline must be captured at
+  // execve time (the runtime stack is about to be released). argv_strings[0]
+  // is argv[0] = the exe path (Linux convention), cmdline = argv joined with
+  // \0. Must precede kfree(argv_strings). NULL envp: this release does not
+  // store environ (left as TODO).
   {
     const char *pinfo_argv[ARG_MAX + 1];
     for (int i = 0; i < argc && i < ARG_MAX; i++)
@@ -2125,10 +2136,11 @@ int64_t sys_execve(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
 
   // === Point of no return: old address space will be replaced ===
 
-  /* commit_creds: 提交预计算的 setuid/setgid 凭证（对齐 Linux commit_creds 在
-   * point-of-no-return 之后）。此后无 return 失败路径（cloexec/换地址空间失败
-   * 走 sys_exit），故不存在把切过的 euid 带回调用者的窗口。real uid/gid 不动。
-   */
+  // commit_creds: commit the precomputed setuid/setgid credentials (aligned
+  // with Linux commit_creds after point-of-no-return). There are no return
+  // failure paths after this (cloexec/address-space-swap failures go through
+  // sys_exit), so there is no window for a switched euid to reach the caller.
+  // real uid/gid are untouched.
   proc->proc->euid = new_euid;
   proc->proc->suid = new_suid;
   proc->proc->egid = new_egid;
@@ -2321,9 +2333,10 @@ int64_t sys_setuid(int64_t arg1, int64_t unused2, int64_t unused3,
   //  otherwise: euid may only be set to the current real uid or saved-set uid;
   //    real + saved-set are unchanged. This prevents a non-root process from
   //    escalating to an arbitrary uid (incl. root) it never held.
-  //  Gate经 capable() 单一收口(对齐 Linux setuid(2) 判 CAP_SETUID 而非裸
-  //  euid==0; setresuid/setreuid 同收口),未来 capability bitmap 实化只改
-  //  capable()。
+  //  Gate is funneled through capable() as the single chokepoint (aligned with
+  //  Linux setuid(2) testing CAP_SETUID rather than bare euid==0; setresuid/
+  //  setreuid use the same chokepoint). A future capability bitmap only
+  //  changes capable().
   if (capable(CAP_SETUID)) {
     p->uid = uid;
     p->euid = uid;
@@ -2345,8 +2358,9 @@ int64_t sys_setgid(int64_t arg1, int64_t unused2, int64_t unused3,
   (void)unused6;
   uint32_t gid = (uint32_t)arg1;
   proc *p = current_proc;
-  // S19 §6.2: same ladder as setuid, over gid/egid/sgid. Gate 经 capable()
-  // 收口(对齐 setgid(2) 判 CAP_SETGID;setresgid/setregid 同收口)。
+  // S19 §6.2: same ladder as setuid, over gid/egid/sgid. Gate is funneled
+  // through capable() (aligned with setgid(2) testing CAP_SETGID; setresgid/
+  // setregid use the same chokepoint).
   if (capable(CAP_SETGID)) {
     p->gid = gid;
     p->egid = gid;

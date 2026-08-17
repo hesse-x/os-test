@@ -2,13 +2,13 @@
  * Copyright (c) 2026 hesse
  *
  * SPDX-License-Identifier: MIT
- *
- * modetest — Complete libdrm API verification program.
- * Tests: drmOpen -> GETRESOURCES -> GETCONNECTOR -> CREATE_DUMB -> ADDFB ->
- *        SETCRTC -> PAGE_FLIP -> cleanup.
- *
- * Static link version (libdrm.a).
  */
+// modetest — Complete libdrm API verification program.
+// Tests: drmOpen -> GETRESOURCES -> GETCONNECTOR -> CREATE_DUMB -> ADDFB ->
+//        SETCRTC -> PAGE_FLIP -> cleanup.
+//
+// Static link version (libdrm.a).
+//
 
 #include "drm/drm.h"
 #include "drm/drm_mode.h"
@@ -24,15 +24,15 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
-/* Draw color bars: red, green, blue, white */
+// Draw color bars: red, green, blue, white
 static void draw_pattern(uint32_t *buf, int width, int height, int pitch) {
   const int bar_count = 4;
   const int bar_width = width / bar_count;
   uint32_t colors[] = {
-      0x0000FF, /* red   (RGB, stored as BGR in fb) */
-      0x00FF00, /* green */
-      0xFF0000, /* blue  */
-      0xFFFFFF, /* white */
+      0x0000FF, // red   (RGB, stored as BGR in fb)
+      0x00FF00, // green
+      0xFF0000, // blue
+      0xFFFFFF, // white
   };
 
   for (int y = 0; y < height; y++) {
@@ -46,7 +46,7 @@ static void draw_pattern(uint32_t *buf, int width, int height, int pitch) {
   }
 }
 
-/* Wait for page flip vblank event (3s timeout) */
+// Wait for page flip vblank event (3s timeout)
 static int wait_vblank_event(int fd) {
   struct pollfd pfd;
   pfd.fd = fd;
@@ -81,7 +81,7 @@ int main(int argc, char **argv) {
     }
   }
 
-  /* 1. drmOpen */
+  // 1. drmOpen
   int fd = drmOpen("drm", NULL);
   if (fd < 0) {
     printf("modetest: drmOpen failed (errno=%d), abort\n", errno);
@@ -89,10 +89,10 @@ int main(int argc, char **argv) {
   }
   printf("modetest: drmOpen OK (fd=%d)\n", fd);
 
-  /* 2. drmSetMaster */
+  // 2. drmSetMaster
   drmSetMaster(fd);
 
-  /* 3. drmModeGetResources */
+  // 3. drmModeGetResources
   drmModeRes *res = drmModeGetResources(fd);
   if (!res) {
     printf("modetest: drmModeGetResources failed\n");
@@ -110,7 +110,7 @@ int main(int argc, char **argv) {
     return 0;
   }
 
-  /* 4. Find connected connector */
+  // 4. Find connected connector
   drmModeConnector *conn = NULL;
   for (int i = 0; i < res->count_connectors; i++) {
     conn = drmModeGetConnector(fd, res->connectors[i]);
@@ -132,7 +132,7 @@ int main(int argc, char **argv) {
   drmModeCrtc *crtc = drmModeGetCrtc(fd, res->crtcs[0]);
   uint32_t crtc_id = res->crtcs[0];
 
-  /* 5. CREATE_DUMB */
+  // 5. CREATE_DUMB
   struct drm_mode_create_dumb create = {0};
   create.width = conn->modes[0].hdisplay;
   create.height = conn->modes[0].vdisplay;
@@ -149,7 +149,7 @@ int main(int argc, char **argv) {
          create.width, create.height, create.bpp, create.pitch,
          (unsigned long long)create.size);
 
-  /* 6. MAP_DUMB + mmap */
+  // 6. MAP_DUMB + mmap
   struct drm_mode_map_dumb map = {0};
   map.handle = create.handle;
   ret = drmIoctl(fd, DRM_IOCTL_MODE_MAP_DUMB, &map);
@@ -174,11 +174,11 @@ int main(int argc, char **argv) {
   }
   printf("modetest: MAP_DUMB OK, mmap at %p\n", (void *)fb_buf);
 
-  /* 7. Draw pattern */
+  // 7. Draw pattern
   printf("modetest: draw pattern: 4 color bars\n");
   draw_pattern(fb_buf, create.width, create.height, create.pitch);
 
-  /* 8. ADDFB */
+  // 8. ADDFB
   uint32_t fb_id = 0;
   ret = drmModeAddFB(fd, create.width, create.height, 24, 32, create.pitch,
                      create.handle, &fb_id);
@@ -193,7 +193,7 @@ int main(int argc, char **argv) {
   }
   printf("modetest: ADDFB: fb_id=%u\n", fb_id);
 
-  /* 9. SETCRTC */
+  // 9. SETCRTC
   ret = drmModeSetCrtc(fd, crtc_id, fb_id, 0, 0, &conn->connector_id, 1,
                        &conn->modes[0]);
   if (ret < 0) {
@@ -209,12 +209,12 @@ int main(int argc, char **argv) {
   printf("modetest: SETCRTC: OK (fb=%u, mode=%dx%d)\n", fb_id,
          conn->modes[0].hdisplay, conn->modes[0].vdisplay);
 
-  /* 10. PAGE_FLIP with vblank event */
+  // 10. PAGE_FLIP with vblank event
   printf("modetest: PAGE_FLIP submitted, waiting for vblank...\n");
   drmModePageFlip(fd, crtc_id, fb_id, DRM_MODE_PAGE_FLIP_EVENT, NULL);
   wait_vblank_event(fd);
 
-  /* 11. Cleanup */
+  // 11. Cleanup
   drmModeRmFB(fd, fb_id);
   munmap(fb_buf, create.size);
   drmIoctl(fd, DRM_IOCTL_MODE_DESTROY_DUMB, &create);

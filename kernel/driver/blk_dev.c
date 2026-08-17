@@ -355,7 +355,7 @@ int block_publish_devtmpfs(void) {
   return 0;
 }
 
-/* Compatibility wrappers are kept for non-filesystem diagnostics only. */
+// Compatibility wrappers are kept for non-filesystem diagnostics only.
 int blk_read(uint32_t lba, uint32_t count, void *buf) {
   return block_read(block_primary_device(), lba, count, buf);
 }

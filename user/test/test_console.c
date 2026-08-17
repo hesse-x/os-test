@@ -22,21 +22,21 @@
 void setUp(void) {}
 void tearDown(void) {}
 
-/* Node exists and opens as a char device. */
+// Node exists and opens as a char device.
 void test_console_open(void) {
   int fd = open("/dev/console", O_RDWR);
   TEST_ASSERT_TRUE(fd >= 0);
   close(fd);
 }
 
-/* stat reports a character device (S_ISCHR), not a regular file. */
+// stat reports a character device (S_ISCHR), not a regular file.
 void test_console_stat_is_chardev(void) {
   struct stat st;
   TEST_ASSERT_EQUAL_INT(0, stat("/dev/console", &st));
   TEST_ASSERT_TRUE(S_ISCHR(st.st_mode));
 }
 
-/* Write via serial_ops.write reaches the serial TX path and returns count. */
+// Write via serial_ops.write reaches the serial TX path and returns count.
 void test_console_write(void) {
   int fd = open("/dev/console", O_RDWR);
   TEST_ASSERT_TRUE(fd >= 0);
@@ -45,7 +45,7 @@ void test_console_write(void) {
   close(fd);
 }
 
-/* Read is unsupported (serial RX removed) → -1/ENOSYS, same as /dev/serial. */
+// Read is unsupported (serial RX removed) → -1/ENOSYS, same as /dev/serial.
 void test_console_read_unsupported(void) {
   int fd = open("/dev/console", O_RDWR | O_NONBLOCK);
   TEST_ASSERT_TRUE(fd >= 0);
@@ -56,7 +56,7 @@ void test_console_read_unsupported(void) {
   close(fd);
 }
 
-/* poll reports POLLOUT always ready (output-only device). */
+// poll reports POLLOUT always ready (output-only device).
 void test_console_poll(void) {
   int fd = open("/dev/console", O_RDWR);
   TEST_ASSERT_TRUE(fd >= 0);

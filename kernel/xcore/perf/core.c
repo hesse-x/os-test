@@ -93,7 +93,7 @@ static void build_header(uint8_t header[PERF_HEADER_SIZE],
   put16(header + 14, PERF_HEADER_SIZE);
   put32(header + 16, snapshot->complete ? 1U : 0U);
   put32(header + 20, 1);
-  /* GNU SHA-1 note header is 16 bytes; store the first 16 descriptor bytes. */
+  // GNU SHA-1 note header is 16 bytes; store the first 16 descriptor bytes.
   if (__perf_build_id_note_end - __perf_build_id_note_start >= 36)
     __memcpy(header + 24, __perf_build_id_note_start + 16, 16);
   put64(header + 40, perf_boot_tsc);
@@ -124,7 +124,7 @@ static void build_footer(uint8_t footer[PERF_FOOTER_SIZE],
                      snapshot->sample_size);
   put32(footer + 48, crc);
   put32(footer + 52, PERF_FOOTER_SIZE);
-  /* Complete the 20-byte SHA-1 build ID started at header offset 24. */
+  // Complete the 20-byte SHA-1 build ID started at header offset 24.
   if (__perf_build_id_note_end - __perf_build_id_note_start >= 36)
     __memcpy(footer + 56, __perf_build_id_note_start + 32, 4);
 }

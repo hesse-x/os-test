@@ -56,13 +56,13 @@ void test_syslog_state_api_and_gnu_program_name_are_linkable(void) {
   TEST_ASSERT_NOT_NULL(&program_invocation_short_name);
 }
 
-/* End-to-end against the real syslogd (init spawns /usr/bin/syslogd, bound
- * to /dev/log). Exercises musl's syslog() client → kernel AF_UNIX DGRAM →
- * syslogd → /var/log/messages, and guards two syslogd behaviors:
- *  - delivery: the token reaches /var/log/messages.
- *  - <PRI> strip: syslogd strips musl's "<%d>" prefix before appending, so
- *    the delivered line must not carry a leading "<pri>". A regression in
- *    the strip logic leaves the raw "<13>..." framing in the file. */
+// End-to-end against the real syslogd (init spawns /usr/bin/syslogd, bound
+// to /dev/log). Exercises musl's syslog() client → kernel AF_UNIX DGRAM →
+// syslogd → /var/log/messages, and guards two syslogd behaviors:
+//  - delivery: the token reaches /var/log/messages.
+//  - <PRI> strip: syslogd strips musl's "<%d>" prefix before appending, so
+//    the delivered line must not carry a leading "<pri>". A regression in
+//    the strip logic leaves the raw "<13>..." framing in the file.
 void test_syslogd_delivers_to_messages(void) {
   static const char token[] = "syslogd-e2e-token";
   char buf[4096] = {0};
@@ -78,8 +78,8 @@ void test_syslogd_delivers_to_messages(void) {
 
   char *line = strstr(buf, token);
   TEST_ASSERT_NOT_NULL(line);
-  /* Walk back to line start; the <PRI> prefix, if present, is the first
-   * non-space run of the line. */
+  // Walk back to line start; the <PRI> prefix, if present, is the first
+  // non-space run of the line.
   while (line > buf && line[-1] != '\n')
     line--;
   TEST_ASSERT_FALSE(line[0] == '<');

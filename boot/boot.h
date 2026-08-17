@@ -56,4 +56,4 @@ _Static_assert(BOOT_INFO_SIZE == sizeof(boot_info),
                "BOOT_INFO_SIZE out of sync with sizeof(boot_info) — update "
                "arch/x64/start.S `BOOT_INFO_SIZE` .set to match");
 
-#endif /* COMMON_BOOT_H */
+#endif // COMMON_BOOT_H

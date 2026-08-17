@@ -29,17 +29,17 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-/* FAT32-root fixtures. Leading prefix keeps them out of other tests'
- * namespaces. Macros (not const char *) so adjacent literal concatenation
- * FAT "/x" works. */
+// FAT32-root fixtures. Leading prefix keeps them out of other tests'
+// namespaces. Macros (not const char *) so adjacent literal concatenation
+// FAT "/x" works.
 #define FAT "/stat_real_fat"
-/* tmpfs (/run) fixtures. */
+// tmpfs (/run) fixtures.
 #define TFS "/run/stat_real_tfs"
 
 void setUp(void) {
-  /* Create the fixture parent dirs once per test (ok if they already exist).
-   * open(O_CREAT)/mkdir only create the final path component — the parent
-   * (/stat_real_fat, /run/stat_real_tfs) must pre-exist. */
+  // Create the fixture parent dirs once per test (ok if they already exist).
+  // open(O_CREAT)/mkdir only create the final path component — the parent
+  // (/stat_real_fat, /run/stat_real_tfs) must pre-exist.
   mkdir(FAT, 0755);
   mkdir(TFS, 0755);
 }
@@ -53,7 +53,7 @@ static void cleanup(void) {
   rmdir(TFS "/d");
 }
 
-/* umask applied to open(O_CREAT): mode & ~umask lands in st_mode. */
+// umask applied to open(O_CREAT): mode & ~umask lands in st_mode.
 void test_open_umask_applied(void) {
   cleanup();
   mode_t old = umask(0022);
@@ -66,7 +66,7 @@ void test_open_umask_applied(void) {
   TEST_ASSERT_EQUAL_INT(0666 & ~0022, st.st_mode & 0777);
   close(fd);
 
-  /* Path-based stat must agree with fstat (both via inode getattr). */
+  // Path-based stat must agree with fstat (both via inode getattr).
   TEST_ASSERT_EQUAL_INT(0, stat(FAT "/u", &st));
   TEST_ASSERT_TRUE(S_ISREG(st.st_mode));
   TEST_ASSERT_EQUAL_INT(0666 & ~0022, st.st_mode & 0777);
@@ -75,8 +75,8 @@ void test_open_umask_applied(void) {
   unlink(FAT "/u");
 }
 
-/* Newly created file reports creator uid/gid (root=0 here), not a stale
- * hardcoded value, and a non-zero nlink. */
+// Newly created file reports creator uid/gid (root=0 here), not a stale
+// hardcoded value, and a non-zero nlink.
 void test_open_owner_is_creator(void) {
   cleanup();
   int fd = open(FAT "/u", O_CREAT | O_RDWR | O_TRUNC, 0644);
@@ -91,7 +91,7 @@ void test_open_owner_is_creator(void) {
   unlink(FAT "/u");
 }
 
-/* mkdir(mode) applies umask and reports S_IFDIR with masked perms. */
+// mkdir(mode) applies umask and reports S_IFDIR with masked perms.
 void test_mkdir_umask_applied(void) {
   cleanup();
   mode_t old = umask(0022);
@@ -106,8 +106,8 @@ void test_mkdir_umask_applied(void) {
   umask(old);
 }
 
-/* st_blksize reflects the backing fs: FAT32 root = 512, tmpfs /run = 4096.
- * The old code hardcoded 512 for every fd regardless of fs. */
+// st_blksize reflects the backing fs: FAT32 root = 512, tmpfs /run = 4096.
+// The old code hardcoded 512 for every fd regardless of fs.
 void test_blksize_per_fs(void) {
   cleanup();
   int fd = open(FAT "/u", O_CREAT | O_RDWR | O_TRUNC, 0644);
@@ -127,7 +127,7 @@ void test_blksize_per_fs(void) {
   unlink(TFS "/u");
 }
 
-/* tmpfs file also gets umask + creator owner, with S_IFREG preserved. */
+// tmpfs file also gets umask + creator owner, with S_IFREG preserved.
 void test_tmpfs_open_umask_and_owner(void) {
   cleanup();
   mode_t old = umask(0022);

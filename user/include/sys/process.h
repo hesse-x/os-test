@@ -38,4 +38,4 @@ LIBC_EXPORT int setgid(gid_t gid);
 }
 #endif
 
-#endif /* _SYS_PROCESS_H */
+#endif // _SYS_PROCESS_H

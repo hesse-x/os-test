@@ -4,17 +4,21 @@
  * SPDX-License-Identifier: MIT
  */
 
-/* test_symlink.c — 验证 §3.3 symlink(2)/symlinkat(2)/readlink(2)/readlinkat(2)
- * (tmpfs 真实现,Q2)。对齐 test_rename.c/test_stat_real.c 风格:Unity
- * freestanding,FAT32 + tmpfs(/run)双夹具。
- *
- * FAT32 物理不支持 symlink → symlink() 返 -1 errno=ENOSYS(或 EPERM);软链
- * round-trip/ELOOP/lstat 区分仅在 tmpfs 断言。AT_SYMLINK_NOFOLLOW(lstat)
- * 经 vfs_statx 末段 symlink 跟随分支激活(§3.3.4)。
- *
- * ELOOP:tmpfs 建 self-referential 软链 a→a,path_walk 中间段 follow_symlink
- * 经 SYMLINK_MAX=40 触发 → stat 返 ENOENT(本 OS path_walk ELOOP 返 NULL →
- * ENOENT;readlink 直接读 link 本身不需跟随,故 self-link readlink 仍成功)。 */
+// test_symlink.c — verifies §3.3
+// symlink(2)/symlinkat(2)/readlink(2)/readlinkat(2) (real tmpfs implementation,
+// Q2). Styled after test_rename.c/test_stat_real.c: Unity freestanding, dual
+// fixture of FAT32 + tmpfs(/run).
+//
+// FAT32 doesn't physically support symlinks → symlink() returns -1 with
+// errno=ENOSYS (or EPERM); softlink round-trip/ELOOP/lstat distinction is only
+// asserted on tmpfs. AT_SYMLINK_NOFOLLOW (lstat) activates via the symlink
+// following branch in the tail of vfs_statx (§3.3.4).
+//
+// ELOOP: tmpfs builds a self-referential softlink a→a, path_walk's
+// middle-segment follow_symlink triggers at SYMLINK_MAX=40 → stat returns
+// ENOENT (this OS's path_walk returns NULL on ELOOP → ENOENT; readlink reads
+// the link itself without following it, so a self-link readlink still
+// succeeds).
 #include "unity.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -45,8 +49,8 @@ static void cleanup(void) {
   unlink(FAT "/lnk");
 }
 
-/* tmpfs symlink/readlink round-trip:建软链 → readlink 取回 target。
- * readlink 不 NUL 终止,返回长度。 */
+// tmpfs symlink/readlink round-trip: create a softlink → readlink retrieves the
+// target. readlink doesn't NUL-terminate, returns the length.
 void test_symlink_readlink_roundtrip(void) {
   cleanup();
   int fd = open(TFS "/f", O_CREAT | O_WRONLY | O_TRUNC, 0644);
@@ -62,7 +66,8 @@ void test_symlink_readlink_roundtrip(void) {
   TEST_ASSERT_EQUAL_STRING(TFS "/f", buf);
 }
 
-/* readlinkat(AT_FDCWD) ≡ readlink;bufsiz 截断:返回 min(长度, bufsiz)。 */
+// readlinkat(AT_FDCWD) ≡ readlink; bufsiz truncation: returns min(length,
+// bufsiz).
 void test_readlinkat_and_truncate(void) {
   cleanup();
   int fd = open(TFS "/f", O_CREAT | O_WRONLY | O_TRUNC, 0644);
@@ -76,7 +81,8 @@ void test_readlinkat_and_truncate(void) {
   TEST_ASSERT_EQUAL_INT(0, strncmp(TFS "/f", buf, 4));
 }
 
-/* lstat vs stat:lstat 取 link 本身(S_ISLNK),stat 跟随末段取目标(S_ISREG)。 */
+// lstat vs stat: lstat takes the link itself (S_ISLNK), stat follows the final
+// segment to the target (S_ISREG).
 void test_lstat_vs_stat(void) {
   cleanup();
   int fd = open(TFS "/f", O_CREAT | O_WRONLY | O_TRUNC, 0644);
@@ -97,8 +103,8 @@ void test_lstat_vs_stat(void) {
   TEST_ASSERT_TRUE(S_ISREG(st.st_mode));
 }
 
-/* symlinkat 用 dirfd 相对路径:open dirfd 指向 /run/sym_tfs,symlinkat 建
- * "lnk" → target。 */
+// symlinkat uses a dirfd-relative path: open a dirfd pointing at /run/sym_tfs,
+// symlinkat creates "lnk" → target.
 void test_symlinkat_dirfd(void) {
   cleanup();
   int fd = open(TFS "/f", O_CREAT | O_WRONLY | O_TRUNC, 0644);
@@ -116,7 +122,7 @@ void test_symlinkat_dirfd(void) {
   TEST_ASSERT_EQUAL_STRING(TFS "/f", buf);
 }
 
-/* 目标已存在 → EEXIST。 */
+// Target already exists → EEXIST.
 void test_symlink_eexist(void) {
   cleanup();
   int fd = open(TFS "/f", O_CREAT | O_WRONLY | O_TRUNC, 0644);
@@ -126,15 +132,15 @@ void test_symlink_eexist(void) {
   TEST_ASSERT_EQUAL_INT(EEXIST, errno);
 }
 
-/* FAT32 symlink 不支持 → -1,errno ∈ {ENOSYS, EPERM}(物理不支持,内核返
- * ENOSYS via i_op->symlink==NULL)。 */
+// FAT32 doesn't support symlinks → -1, errno ∈ {ENOSYS, EPERM} (no physical
+// support; kernel returns ENOSYS via i_op->symlink==NULL).
 void test_symlink_fat32_nosys(void) {
   cleanup();
   TEST_ASSERT_EQUAL_INT(-1, symlink("/nope", FAT "/lnk"));
   TEST_ASSERT_TRUE(errno == ENOSYS || errno == EPERM);
 }
 
-/* readlink 对非软链(普通文件)→ EINVAL。 */
+// readlink on a non-softlink (regular file) → EINVAL.
 void test_readlink_not_symlink(void) {
   cleanup();
   int fd = open(TFS "/f", O_CREAT | O_WRONLY | O_TRUNC, 0644);
@@ -145,7 +151,7 @@ void test_readlink_not_symlink(void) {
   TEST_ASSERT_EQUAL_INT(EINVAL, errno);
 }
 
-/* readlink 不存在路径 → ENOENT。 */
+// readlink on a nonexistent path → ENOENT.
 void test_readlink_noent(void) {
   cleanup();
   char buf[256];

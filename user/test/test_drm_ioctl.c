@@ -297,7 +297,7 @@ void test_drm_core_device_isolation(void) {
   TEST_ASSERT_EQUAL_STRING("MOCK_VALUE", mock_property.name);
   TEST_ASSERT_EQUAL_UINT64(2, values[0]);
 
-  /* The same numeric property ID resolves in card0's own namespace. */
+  // The same numeric property ID resolves in card0's own namespace.
   struct drm_mode_get_property virtio_property = {.prop_id = properties[0]};
   TEST_ASSERT_EQUAL_INT(
       0, ioctl(virtio_peer, DRM_IOCTL_MODE_GETPROPERTY, &virtio_property));

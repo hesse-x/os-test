@@ -20,7 +20,7 @@
 #define LWIP_NETCONN 0
 #define LWIP_SOCKET 0
 #define LWIP_NETIF_API 0
-/* DHCP only requests and retains DNS options when the DNS table is enabled. */
+// DHCP only requests and retains DNS options when the DNS table is enabled.
 #define LWIP_DNS 1
 #define DNS_MAX_SERVERS 1
 #define LWIP_DHCP_MAX_DNS_SERVERS 1

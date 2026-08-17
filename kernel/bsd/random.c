@@ -6,14 +6,17 @@
 
 // kernel/bsd/random.c — sys_getrandom + /dev/random + /dev/urandom
 //
-// 三条对外路径共用 Xcore 层 csprng_read() 后端，无第二实现。
-// 语义对齐 Linux getrandom(2)：
-//   - 永不阻塞（Linux 5.6+ 行为），不返回 EAGAIN/EINTR
-//   - flags 三值（GRND_NONBLOCK/GRND_RANDOM/GRND_INSECURE）语义同义：单池
-//   - 单次上限 32MiB-1（Linux urandom 上限），超出短读
-//   - 不被信号中断：池恒就绪（csprng_read 同步），循环到 done==len；
-//     Linux getrandom(2) 在池就绪后亦不返回短读。仅 copy_to_user 失败时
-//     以短读形式返回（EFAULT 语义，Linux 同款）。
+// All three external paths share the Xcore-layer csprng_read() backend; there
+// is no second implementation.
+// Semantics match Linux getrandom(2):
+//   - Never blocks (Linux 5.6+ behavior); never returns EAGAIN/EINTR
+//   - The three flag values (GRND_NONBLOCK/GRND_RANDOM/GRND_INSECURE) are
+//     synonymous: single pool
+//   - Single-call limit 32MiB-1 (Linux urandom limit); beyond that, short read
+//   - Not interrupted by signals: the pool is always ready (csprng_read is
+//     synchronous), loops until done==len; Linux getrandom(2) also never
+//     returns a short read once the pool is ready. Only on copy_to_user failure
+//     does it return a short read (EFAULT semantics, same as Linux).
 
 #include "kernel/bsd/random.h"
 
@@ -39,10 +42,11 @@ size_t copy_to_user(void *dst, const void *src, size_t size);
 #define GRND_INSECURE 0x0004
 #define GRND_VALID_MASK (GRND_NONBLOCK | GRND_RANDOM | GRND_INSECURE)
 
-#define GETRANDOM_MAX 33554431 // 32MiB-1，Linux urandom 单次上限
-#define RANDOM_CHUNK 256 // 单块 ≤256B，保持 Linux ≤256B 原子性保证
+#define GETRANDOM_MAX 33554431 // 32MiB-1, Linux urandom single-call limit
+#define RANDOM_CHUNK 256       // block ≤256B, keeping Linux ≤256B atomicity
 
-// 核心：循环 csprng_read 取内核小块 → copy_to_user 追加；不被信号中断
+// Core: loop csprng_read to fetch small kernel chunks → copy_to_user append;
+// never interrupted by signals
 static int64_t random_read_common(void __user *ubuf, size_t len) {
   uint8_t chunk[RANDOM_CHUNK];
   size_t done = 0;
@@ -52,7 +56,8 @@ static int64_t random_read_common(void __user *ubuf, size_t len) {
     if (copy_to_user((void __force *)(uint8_t __user *)ubuf + done, chunk, n)) {
       if (done == 0)
         return -EFAULT;
-      break; // 已拷部分以短读形式返回（EFAULT 语义，Linux 同款）
+      break; // copied part returns as a short read (EFAULT semantics,
+             // Linux-like)
     }
     done += n;
   }
@@ -91,7 +96,8 @@ static ssize_t random_dev_read(xtask *proc, int fd, void *buf, size_t count) {
   return (ssize_t)random_read_common((void __user *__force)buf, count);
 }
 
-// 熵注入不做（无混合池写入路径）：接收并丢弃，返回 count
+// Entropy injection is not done (no mixing-pool write path): accept and
+// discard, return count
 static ssize_t random_dev_write(xtask *proc, int fd, const void *buf,
                                 size_t count) {
   (void)proc;
@@ -107,7 +113,7 @@ static __poll random_dev_poll(xtask *proc, int events) {
 }
 
 static struct dev_ops random_ops = {
-    .driver_pid = 0, // 内核设备
+    .driver_pid = 0, // kernel device
     .is_block = false,
     .subsystem = "misc",
     .devtype = "random",
@@ -118,5 +124,5 @@ static struct dev_ops random_ops = {
 
 void random_dev_init(void) {
   devtmpfs_create("random", &random_ops, NULL);
-  devtmpfs_create("urandom", &random_ops, NULL); // 同一 ops，同义
+  devtmpfs_create("urandom", &random_ops, NULL); // same ops, synonyms
 }

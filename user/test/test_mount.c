@@ -18,7 +18,7 @@
 void setUp(void) {}
 void tearDown(void) {}
 
-/* ===== mount syscall error paths ===== */
+// ===== mount syscall error paths =====
 
 void test_mount_dup(void) {
   int r = mount(NULL, "/dev", "devtmpfs", 0, NULL);
@@ -37,7 +37,7 @@ void test_mount_null_target(void) {
   TEST_ASSERT_EQUAL_INT(-1, r);
 }
 
-/* ===== devtmpfs traversal (regression) ===== */
+// ===== devtmpfs traversal (regression) =====
 
 void test_open_dev_serial(void) {
   int fd = open("/dev/serial", O_RDWR);
@@ -61,7 +61,7 @@ void test_stat_dev_dir(void) {
   TEST_ASSERT_TRUE(S_ISDIR(st.st_mode));
 }
 
-/* ===== devtmpfs getdents ===== */
+// ===== devtmpfs getdents =====
 
 void test_getdents_dev(void) {
   DIR *d = opendir("/dev");
@@ -78,7 +78,7 @@ void test_getdents_dev(void) {
   TEST_ASSERT_TRUE(found);
 }
 
-/* ===== FAT32 root regression ===== */
+// ===== FAT32 root regression =====
 
 void test_fat32_open(void) {
   int fd = open("/test/mount.elf", O_RDONLY);
@@ -109,17 +109,17 @@ void test_fat32_getdents_root(void) {
   TEST_ASSERT_TRUE(found_dev);
 }
 
-/* ===== ino uniqueness ===== */
+// ===== ino uniqueness =====
 
 void test_ino_unique(void) {
   struct stat st1, st2;
   TEST_ASSERT_EQUAL_INT(0, stat("/dev/serial", &st1));
-  /* sda block device should have a different ino */
+  // sda block device should have a different ino
   int r2 = stat("/dev/sda", &st2);
   if (r2 == 0) {
     TEST_ASSERT_TRUE(st1.st_ino != st2.st_ino);
   } else {
-    TEST_ASSERT_TRUE(1); /* sda may not exist */
+    TEST_ASSERT_TRUE(1); // sda may not exist
   }
 }
 

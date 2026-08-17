@@ -14,7 +14,7 @@
 void setUp(void) {}
 void tearDown(void) {}
 
-/* 1. poll on pipe with data → POLLIN */
+// 1. poll on pipe with data → POLLIN
 void test_poll_pipe_readable(void) {
   int fd[2];
   pipe(fd);
@@ -34,7 +34,7 @@ void test_poll_pipe_readable(void) {
   close(fd[1]);
 }
 
-/* 2. poll on empty pipe write end → POLLOUT */
+// 2. poll on empty pipe write end → POLLOUT
 void test_poll_pipe_writable(void) {
   int fd[2];
   pipe(fd);
@@ -52,7 +52,7 @@ void test_poll_pipe_writable(void) {
   close(fd[1]);
 }
 
-/* 3. poll on empty pipe read end with timeout=0 → no events */
+// 3. poll on empty pipe read end with timeout=0 → no events
 void test_poll_pipe_empty(void) {
   int fd[2];
   pipe(fd);
@@ -69,12 +69,12 @@ void test_poll_pipe_empty(void) {
   close(fd[1]);
 }
 
-/* 4. poll timeout with no events */
+// 4. poll timeout with no events
 void test_poll_timeout(void) {
   int fd[2];
   pipe(fd);
 
-  /* Set read end non-blocking so it never has data */
+  // Set read end non-blocking so it never has data
   fcntl(fd[0], F_SETFL, O_NONBLOCK);
 
   struct pollfd pfd;
@@ -89,8 +89,7 @@ void test_poll_timeout(void) {
   close(fd[1]);
 }
 
-/* ppoll is the musl wrapper over SYS_PPOLL; cover both timeout and readiness.
- */
+// ppoll is the musl wrapper over SYS_PPOLL; cover both timeout and readiness.
 void test_ppoll_timeout_and_ready(void) {
   int fd[2];
   pipe(fd);
@@ -108,7 +107,7 @@ void test_ppoll_timeout_and_ready(void) {
   close(fd[1]);
 }
 
-/* 5. poll on socketpair */
+// 5. poll on socketpair
 void test_poll_socketpair(void) {
   int sv[2];
   socketpair(AF_UNIX, SOCK_STREAM, 0, sv);
@@ -123,7 +122,7 @@ void test_poll_socketpair(void) {
 
   int r = poll(pfds, 2, 100);
   TEST_ASSERT_TRUE(r > 0);
-  /* Both ends should be writable */
+  // Both ends should be writable
   TEST_ASSERT_TRUE(pfds[0].revents & POLLOUT);
   TEST_ASSERT_TRUE(pfds[1].revents & POLLOUT);
 
@@ -131,7 +130,7 @@ void test_poll_socketpair(void) {
   close(sv[1]);
 }
 
-/* 6. poll multiple fds */
+// 6. poll multiple fds
 void test_poll_multiple_fd(void) {
   int p1[2], p2[2];
   pipe(p1);
@@ -150,7 +149,7 @@ void test_poll_multiple_fd(void) {
   int r = poll(pfds, 2, 100);
   TEST_ASSERT_TRUE(r > 0);
   TEST_ASSERT_TRUE(pfds[0].revents & POLLIN);
-  /* p2 has no data */
+  // p2 has no data
   TEST_ASSERT_TRUE(!(pfds[1].revents & POLLIN));
 
   close(p1[0]);
@@ -159,10 +158,10 @@ void test_poll_multiple_fd(void) {
   close(p2[1]);
 }
 
-/* 7. poll wakeup by child (multi-process — deferred) */
+// 7. poll wakeup by child (multi-process — deferred)
 void test_poll_wakeup(void) { TEST_ASSERT_TRUE(1); }
 
-/* 8. poll on /dev/serial → POLLOUT (serial is always writable) */
+// 8. poll on /dev/serial → POLLOUT (serial is always writable)
 void test_poll_dev_serial(void) {
   int fd = open("/dev/serial", O_RDWR);
   if (fd >= 0) {
@@ -177,12 +176,12 @@ void test_poll_dev_serial(void) {
 
     close(fd);
   } else {
-    /* Serial may not be available in test env */
+    // Serial may not be available in test env
     TEST_ASSERT_TRUE(1);
   }
 }
 
-/* 9. poll on /dev/dri/card0 with no pending page-flip event → no events */
+// 9. poll on /dev/dri/card0 with no pending page-flip event → no events
 void test_poll_dev_kms(void) {
   int fd = open("/dev/dri/card0", O_RDWR);
   if (fd >= 0) {
@@ -192,8 +191,8 @@ void test_poll_dev_kms(void) {
     pfd.revents = 0;
 
     int r = poll(&pfd, 1, 0);
-    /* No page-flip event submitted → should return 0 events with
-     * timeout=0 (DRM poll callback returns 0 when nothing pending). */
+    // No page-flip event submitted → should return 0 events with
+    // timeout=0 (DRM poll callback returns 0 when nothing pending).
     if (r == 0) {
       TEST_ASSERT_TRUE(!(pfd.revents & POLLIN));
     }
@@ -203,9 +202,9 @@ void test_poll_dev_kms(void) {
   }
 }
 
-/* 10. poll on bad fd → POLLNVAL. S16 aligned this with Linux: an invalid fd
- * (negative, out of range, or closed) returns POLLNVAL, not POLLERR — POLLERR
- * is reserved for "fd valid but underlying error" (e.g. socket error). */
+// 10. poll on bad fd → POLLNVAL. S16 aligned this with Linux: an invalid fd
+// (negative, out of range, or closed) returns POLLNVAL, not POLLERR — POLLERR
+// is reserved for "fd valid but underlying error" (e.g. socket error).
 void test_poll_bad_fd(void) {
   struct pollfd pfd;
   pfd.fd = -1;
@@ -217,7 +216,7 @@ void test_poll_bad_fd(void) {
   TEST_ASSERT_TRUE(pfd.revents & POLLNVAL);
 }
 
-/* 11. poll on /dev/serial with O_NONBLOCK + timeout=0 */
+// 11. poll on /dev/serial with O_NONBLOCK + timeout=0
 void test_poll_dev_serial_nonblock(void) {
   int fd = open("/dev/serial", O_RDWR | O_NONBLOCK);
   if (fd >= 0) {
@@ -229,7 +228,7 @@ void test_poll_dev_serial_nonblock(void) {
     int r = poll(&pfd, 1, 0);
     TEST_ASSERT_TRUE(r > 0);
     TEST_ASSERT_TRUE(pfd.revents & POLLOUT);
-    /* POLLIN only if rx buffer has data (unlikely in test) */
+    // POLLIN only if rx buffer has data (unlikely in test)
 
     close(fd);
   } else {
@@ -237,7 +236,7 @@ void test_poll_dev_serial_nonblock(void) {
   }
 }
 
-/* 12. poll on regular file fd → POLLOUT always */
+// 12. poll on regular file fd → POLLOUT always
 void test_poll_regular_file(void) {
   int fd = open("/local/poll_test.txt", O_WRONLY | O_CREAT);
   if (fd >= 0) {
@@ -253,7 +252,7 @@ void test_poll_regular_file(void) {
     pfd.revents = 0;
 
     int r = poll(&pfd, 1, 0);
-    /* Regular files are always readable/writable */
+    // Regular files are always readable/writable
     if (r > 0) {
       TEST_ASSERT_TRUE(pfd.revents & (POLLIN | POLLOUT));
     }
@@ -263,7 +262,7 @@ void test_poll_regular_file(void) {
   }
 }
 
-/* 13. poll on multiple dev fds */
+// 13. poll on multiple dev fds
 void test_poll_multiple_dev(void) {
   int serial_fd = open("/dev/serial", O_RDWR);
   int kms_fd = open("/dev/dri/card0", O_RDWR);
@@ -278,7 +277,7 @@ void test_poll_multiple_dev(void) {
     pfds[1].revents = 0;
 
     int r = poll(pfds, 2, 100);
-    /* serial should report POLLOUT at minimum */
+    // serial should report POLLOUT at minimum
     if (r > 0) {
       TEST_ASSERT_TRUE(pfds[0].revents & POLLOUT);
     }

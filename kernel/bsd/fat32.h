@@ -50,7 +50,7 @@ struct fat32_inode_info {
   uint32_t cluster_map_capacity;
 };
 extern const struct file_operations fat32_file_fops;
-/* FAT32 directory entry (32 bytes) */
+// FAT32 directory entry (32 bytes)
 struct fat_dir_entry {
   uint8_t name[11];
   uint8_t attr;
@@ -66,19 +66,19 @@ struct fat_dir_entry {
   uint32_t file_size;
 } __attribute__((packed));
 
-/* Volume geometry accessors (used by page_cache) */
+// Volume geometry accessors (used by page_cache)
 uint32_t fat32_data_start_lba(void);
 uint32_t fat32_sectors_per_cluster(void);
 uint32_t fat32_bytes_per_cluster(void);
 
-/* Core operations */
+// Core operations
 int fat32_init(struct block_partition *part);
 struct block_partition *fat32_partition(void);
 void fat32_dump_cache_stats(void);
 uint32_t fat32_walk_chain(uint32_t start_cluster, uint64_t page_index);
-/* Map a logical cluster through the inode's lazily populated cluster map.
- * Allocation failure falls back to the forward cursor. Returns the cluster or
- * an EOF marker (<2 / >=0x0FFFFFF8). */
+// Map a logical cluster through the inode's lazily populated cluster map.
+// Allocation failure falls back to the forward cursor. Returns the cluster or
+// an EOF marker (<2 / >=0x0FFFFFF8).
 uint32_t fat32_walk_chain_cached(struct inode *ip, uint64_t cluster_index,
                                  enum fat32_walk_source source);
 void fat32_get_stats(struct fat32_stats *out);
@@ -86,7 +86,7 @@ void fat32_account_mapped_sector(enum fat32_walk_source source);
 void fat32_account_mapped_sectors(enum fat32_walk_source source,
                                   uint32_t count);
 
-/* File operations */
+// File operations
 int fat32_read(struct inode *ip, uint64_t offset, void *buf, size_t count);
 int fat32_write(struct inode *ip, uint64_t offset, const void *buf,
                 size_t count);

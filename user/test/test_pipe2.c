@@ -4,15 +4,14 @@
  * SPDX-License-Identifier: MIT
  */
 
-/* test_pipe2.c — pipe2(fd, flags) syscall tests.
- *
- * pipe2 extends pipe with a flags argument (Linux semantics):
- *   - flags == 0 behaves exactly like pipe().
- *   - O_CLOEXEC marks both fds close-on-exec (per-fd bitmap, F_GETFD).
- *   - O_NONBLOCK sets nonblocking mode on both ends (F_GETFL), so a read on
- *     an empty pipe returns -1/EAGAIN instead of blocking.
- *   - Any other flag is rejected with EINVAL.
- */
+// test_pipe2.c — pipe2(fd, flags) syscall tests.
+//
+// pipe2 extends pipe with a flags argument (Linux semantics):
+//   - flags == 0 behaves exactly like pipe().
+//   - O_CLOEXEC marks both fds close-on-exec (per-fd bitmap, F_GETFD).
+//   - O_NONBLOCK sets nonblocking mode on both ends (F_GETFL), so a read on
+//     an empty pipe returns -1/EAGAIN instead of blocking.
+//   - Any other flag is rejected with EINVAL.
 #include "unity.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -22,8 +21,8 @@
 void setUp(void) {}
 void tearDown(void) {}
 
-/* pipe2(fd, 0) is equivalent to pipe(): plain blocking pipe, no cloexec,
- * data roundtrips. */
+// pipe2(fd, 0) is equivalent to pipe(): plain blocking pipe, no cloexec,
+// data roundtrips.
 void test_pipe2_zero_equals_pipe(void) {
   int fd[2];
   TEST_ASSERT_EQUAL_INT(0, pipe2(fd, 0));
@@ -43,7 +42,7 @@ void test_pipe2_zero_equals_pipe(void) {
   close(fd[1]);
 }
 
-/* O_CLOEXEC sets FD_CLOEXEC on both fds. */
+// O_CLOEXEC sets FD_CLOEXEC on both fds.
 void test_pipe2_cloexec(void) {
   int fd[2];
   TEST_ASSERT_EQUAL_INT(0, pipe2(fd, O_CLOEXEC));
@@ -55,8 +54,8 @@ void test_pipe2_cloexec(void) {
   close(fd[1]);
 }
 
-/* O_NONBLOCK lands in f->flags on both ends (F_GETFL) and makes an empty
- * read fail with EAGAIN instead of blocking. */
+// O_NONBLOCK lands in f->flags on both ends (F_GETFL) and makes an empty
+// read fail with EAGAIN instead of blocking.
 void test_pipe2_nonblock(void) {
   int fd[2];
   TEST_ASSERT_EQUAL_INT(0, pipe2(fd, O_NONBLOCK));
@@ -73,7 +72,7 @@ void test_pipe2_nonblock(void) {
   close(fd[1]);
 }
 
-/* Flags other than O_CLOEXEC|O_NONBLOCK are rejected with EINVAL. */
+// Flags other than O_CLOEXEC|O_NONBLOCK are rejected with EINVAL.
 void test_pipe2_invalid_flags(void) {
   int fd[2];
   errno = 0;

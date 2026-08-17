@@ -55,4 +55,4 @@ void serial_dev_register(void);
 
 extern struct dev_driver serial_driver;
 
-#endif /* KERNEL_SERIAL_H */
+#endif // KERNEL_SERIAL_H

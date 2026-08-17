@@ -342,12 +342,11 @@ ssize_t sysfs_getdents(struct inode *dir, struct dir_context *ctx) {
     return 0;
   }
   size_t cur_pos = 0;
-  /* Synthetic "." and ".." precede real children (in-memory fs has no on-disk
-   * dot entries). sysfs_node.parent is NULL at the root, so root ".." → self.
-   */
+  // Synthetic "." and ".." precede real children (in-memory fs has no on-disk
+  // dot entries). sysfs_node.parent is NULL at the root, so root ".." → self.
   uint64_t parent_ino = n->parent ? n->parent->ino : n->ino;
   {
-    size_t nl = 1; /* "." */
+    size_t nl = 1; // "."
     uint16_t r = (uint16_t)((sizeof(struct dirent64) + nl + 1 + 7) & ~7);
     if (cur_pos >= ctx->pos &&
         !dir_emit(ctx, ".", (int)nl, cur_pos, n->ino, DT_DIR))
@@ -355,7 +354,7 @@ ssize_t sysfs_getdents(struct inode *dir, struct dir_context *ctx) {
     cur_pos += r;
   }
   {
-    size_t nl = 2; /* ".." */
+    size_t nl = 2; // ".."
     uint16_t r = (uint16_t)((sizeof(struct dirent64) + nl + 1 + 7) & ~7);
     if (cur_pos >= ctx->pos &&
         !dir_emit(ctx, "..", (int)nl, cur_pos, parent_ino, DT_DIR))
@@ -724,6 +723,6 @@ const struct sysfs_attr evdev_attr_version = {.name = "version",
 const struct sysfs_attr uevent_attr = {
     .name = "uevent", .show = NULL, .store = uevent_store};
 
-/* ringbuf_fops (SHM ring consumer read/poll/mmap) removed — the evdev broker
- * (kernel/bsd/evdev_broker.c) now owns per-fd kfifo consumer state directly,
- * replacing the SHM output ring. See refact_evdev.md §5. */
+// ringbuf_fops (SHM ring consumer read/poll/mmap) removed — the evdev broker
+// (kernel/bsd/evdev_broker.c) now owns per-fd kfifo consumer state directly,
+// replacing the SHM output ring. See refact_evdev.md §5.

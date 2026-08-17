@@ -4,9 +4,9 @@
  * SPDX-License-Identifier: MIT
  */
 
-/* test_dirent_seek.c — S05: readdir thread-safety + seekdir/telldir/
- * rewinddir/dirfd on the user side. Uses the kernel getdents d_off cookie via
- * lseek on the dir fd. Runs against fat32 root entries created here. */
+// test_dirent_seek.c — S05: readdir thread-safety + seekdir/telldir/
+// rewinddir/dirfd on the user side. Uses the kernel getdents d_off cookie via
+// lseek on the dir fd. Runs against fat32 root entries created here.
 #include "unity.h"
 #include <dirent.h>
 #include <errno.h>
@@ -21,8 +21,8 @@
 void setUp(void) {}
 void tearDown(void) {}
 
-/* Distinct filenames so we can identify seekdir targets. Created fresh; the
- * leading "dirent_test_" prefix keeps them out of other tests' namespaces. */
+// Distinct filenames so we can identify seekdir targets. Created fresh; the
+// leading "dirent_test_" prefix keeps them out of other tests' namespaces.
 static const char *SEEK_DIR = "/dirent_seek_dir";
 static const char *FILES[] = {"dirent_seek_dir/a", "dirent_seek_dir/b",
                               "dirent_seek_dir/c"};
@@ -53,14 +53,14 @@ void test_dirfd(void) {
   remove_fixtures();
 }
 
-/* seekdir/telldir: capture the location of an entry, walk past it, then
- * seekdir back and confirm the same entry is returned. */
+// seekdir/telldir: capture the location of an entry, walk past it, then
+// seekdir back and confirm the same entry is returned.
 void test_seekdir_telldir(void) {
   create_fixtures();
   DIR *d = opendir(SEEK_DIR);
   TEST_ASSERT_NOT_NULL(d);
 
-  /* Walk to the third real entry (skipping ./..), recording its tellpos. */
+  // Walk to the third real entry (skipping ./..), recording its tellpos.
   long loc = -1;
   char target[256] = {0};
   int seen = 0;
@@ -78,11 +78,11 @@ void test_seekdir_telldir(void) {
   TEST_ASSERT_GREATER_OR_EQUAL_INT(0, loc);
   TEST_ASSERT_TRUE(target[0] != '\0');
 
-  /* Drain the rest. */
+  // Drain the rest.
   while (readdir(d) != NULL)
     ;
 
-  /* Seek back to the recorded cookie and read one entry: it must match. */
+  // Seek back to the recorded cookie and read one entry: it must match.
   seekdir(d, loc);
   e = readdir(d);
   TEST_ASSERT_NOT_NULL(e);
@@ -92,7 +92,7 @@ void test_seekdir_telldir(void) {
   remove_fixtures();
 }
 
-/* rewinddir: after draining, rewind returns to the first entry. */
+// rewinddir: after draining, rewind returns to the first entry.
 void test_rewinddir(void) {
   create_fixtures();
   DIR *d = opendir(SEEK_DIR);
@@ -118,7 +118,7 @@ void test_rewinddir(void) {
   rewinddir(d);
   e = readdir(d);
   TEST_ASSERT_NOT_NULL(e);
-  /* First entry overall is "."; the first real entry comes after ./.. */
+  // First entry overall is "."; the first real entry comes after ./..
   int got_first_real = 0;
   while ((e = readdir(d)) != NULL) {
     if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0)
@@ -133,7 +133,7 @@ void test_rewinddir(void) {
   remove_fixtures();
 }
 
-/* readdir_r: returns 0 and fills the caller buffer; NULL result at EOF. */
+// readdir_r: returns 0 and fills the caller buffer; NULL result at EOF.
 void test_readdir_r(void) {
   create_fixtures();
   DIR *d = opendir(SEEK_DIR);
@@ -144,14 +144,14 @@ void test_readdir_r(void) {
   int rc = readdir_r(d, &entry, &res);
   TEST_ASSERT_EQUAL_INT(0, rc);
   TEST_ASSERT_NOT_NULL(res);
-  /* First non-dot entry should be one of our files. */
+  // First non-dot entry should be one of our files.
   int is_ours =
       (strcmp(res->d_name, "a") == 0 || strcmp(res->d_name, "b") == 0 ||
        strcmp(res->d_name, "c") == 0);
   TEST_ASSERT_TRUE(is_ours || strcmp(res->d_name, ".") == 0 ||
                    strcmp(res->d_name, "..") == 0);
 
-  /* Drain to EOF. */
+  // Drain to EOF.
   while (readdir(d) != NULL)
     ;
   res = (struct dirent *)0x1;
@@ -163,8 +163,8 @@ void test_readdir_r(void) {
   remove_fixtures();
 }
 
-/* readdir is reentrant across distinct DIR streams: the per-DIR result buffer
- * means interleaved readdir on two streams no longer clobber each other. */
+// readdir is reentrant across distinct DIR streams: the per-DIR result buffer
+// means interleaved readdir on two streams no longer clobber each other.
 void test_readdir_two_streams_independent(void) {
   create_fixtures();
   mkdir("/dirent_seek_dir2", 0755);
@@ -177,8 +177,8 @@ void test_readdir_two_streams_independent(void) {
   TEST_ASSERT_NOT_NULL(d1);
   TEST_ASSERT_NOT_NULL(d2);
 
-  /* Read one entry from d1, then fully drain d2, then read the NEXT entry
-   * from d1 — d1's result must not have been overwritten by d2's reads. */
+  // Read one entry from d1, then fully drain d2, then read the NEXT entry
+  // from d1 — d1's result must not have been overwritten by d2's reads.
   struct dirent *e1 = readdir(d1);
   TEST_ASSERT_NOT_NULL(e1);
   char first1[256];
@@ -189,11 +189,11 @@ void test_readdir_two_streams_independent(void) {
   while ((e2 = readdir(d2)) != NULL)
     (void)e2;
 
-  /* Continue d1: results must still come from d1's stream and be stable. */
-  int count = 1; /* we already read one */
+  // Continue d1: results must still come from d1's stream and be stable.
+  int count = 1; // we already read one
   while ((e1 = readdir(d1)) != NULL)
     count++;
-  /* d1 has at least ".", "..", and 3 files = 5 entries. */
+  // d1 has at least ".", "..", and 3 files = 5 entries.
   TEST_ASSERT_GREATER_OR_EQUAL_INT(5, count);
 
   closedir(d1);

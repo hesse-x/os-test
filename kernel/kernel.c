@@ -131,8 +131,8 @@ __attribute__((no_sanitize("kernel-address"))) void kernel_main(boot_info *bi) {
                      : "m"(src));
 
     if (dst != 3.14) {
-      /* Kernel printk does not support %f (built with -mno-sse); the
-       * self-test only needs a pass/fail signal. */
+      // Kernel printk does not support %f (built with -mno-sse); the
+      // self-test only needs a pass/fail signal.
       panic("kernel_sse_selftest: SSE result wrong\n");
     }
     printk(LOG_INFO, "kernel_sse_selftest: PASS (BSP)\n");

@@ -2,24 +2,23 @@
  * Copyright (c) 2026 hesse
  *
  * SPDX-License-Identifier: MIT
- *
- * S17 — AF_UNIX SOCK_DGRAM + recvmsg msg_name:
- *   - socket(AF_UNIX, SOCK_DGRAM) / socketpair(..., SOCK_DGRAM) accepted
- *   - bind + sendto(dest) reaches a bound DGRAM server (path resolution)
- *   - message boundaries preserved (two 2B sends → two 2B recvs)
- *   - recvfrom/recvmsg report the sender address (msg_name)
- *   - connect() fixes the default send target for a DGRAM socket
- *   - MSG_PEEK does not consume a datagram
- *   - MSG_TRUNC reports the true datagram length when the buffer is smaller
- *   - SCM_RIGHTS passes an fd over a DGRAM socketpair
- *   - EPROTOTYPE: sending DGRAM to a STREAM-bound path
- *   - ENOENT/ECONNREFUSED: sending to a missing / non-bound path
- *
- * Lengths use sizeof(str)-1 so asserted byte counts can't drift from the
- * payload. Cross-process tests fork: the child binds the server path and the
- * parent acts as the client (paths derived from the child's pid so concurrent
- * test_runner invocations don't collide).
  */
+// S17 — AF_UNIX SOCK_DGRAM + recvmsg msg_name:
+//   - socket(AF_UNIX, SOCK_DGRAM) / socketpair(..., SOCK_DGRAM) accepted
+//   - bind + sendto(dest) reaches a bound DGRAM server (path resolution)
+//   - message boundaries preserved (two 2B sends → two 2B recvs)
+//   - recvfrom/recvmsg report the sender address (msg_name)
+//   - connect() fixes the default send target for a DGRAM socket
+//   - MSG_PEEK does not consume a datagram
+//   - MSG_TRUNC reports the true datagram length when the buffer is smaller
+//   - SCM_RIGHTS passes an fd over a DGRAM socketpair
+//   - EPROTOTYPE: sending DGRAM to a STREAM-bound path
+//   - ENOENT/ECONNREFUSED: sending to a missing / non-bound path
+//
+// Lengths use sizeof(str)-1 so asserted byte counts can't drift from the
+// payload. Cross-process tests fork: the child binds the server path and the
+// parent acts as the client (paths derived from the child's pid so concurrent
+// test_runner invocations don't collide).
 
 #include <errno.h>
 #include <fcntl.h>
@@ -41,7 +40,7 @@
 void setUp(void) {}
 void tearDown(void) {}
 
-/* ---- thin wrappers: libc has no sendto/recvfrom in this OS ---- */
+// ---- thin wrappers: libc has no sendto/recvfrom in this OS ----
 static ssize_t sendto_fd(int fd, const void *buf, size_t len, int flags,
                          const struct sockaddr *addr, socklen_t addrlen) {
   int64_t r =
@@ -66,14 +65,14 @@ static ssize_t recvfrom_fd(int fd, void *buf, size_t len, int flags,
   return (ssize_t)r;
 }
 
-/* build a unique /run path from a pid + tag so forked runs never collide */
+// build a unique /run path from a pid + tag so forked runs never collide
 static void path_of(struct sockaddr_un *a, const char *path) {
   memset(a, 0, sizeof(*a));
   a->sun_family = AF_UNIX;
   strncpy(a->sun_path, path, sizeof(a->sun_path) - 1);
 }
 
-/* 1. socket() / socketpair() accept SOCK_DGRAM. */
+// 1. socket() / socketpair() accept SOCK_DGRAM.
 void test_dgram_socket_and_socketpair_accepted(void) {
   int s = socket(AF_UNIX, SOCK_DGRAM, 0);
   TEST_ASSERT(s >= 0);
@@ -84,12 +83,12 @@ void test_dgram_socket_and_socketpair_accepted(void) {
   close(sv[0]);
   close(sv[1]);
 
-  /* SEQPACKET is not implemented (todo). */
+  // SEQPACKET is not implemented (todo).
   TEST_ASSERT_EQUAL_INT(-1, socket(AF_UNIX, SOCK_SEQPACKET, 0));
 }
 
-/* 2. socketpair DGRAM preserves message boundaries: two 2B sends → two 2B
- * reads (a STREAM socket would coalesce them into one 4B read). */
+// 2. socketpair DGRAM preserves message boundaries: two 2B sends → two 2B
+// reads (a STREAM socket would coalesce them into one 4B read).
 void test_dgram_socketpair_boundaries(void) {
   int sv[2];
   TEST_ASSERT_EQUAL_INT(0, socketpair(AF_UNIX, SOCK_DGRAM, 0, sv));
@@ -110,7 +109,7 @@ void test_dgram_socketpair_boundaries(void) {
   close(sv[1]);
 }
 
-/* 3. socketpair DGRAM recvfrom reports an anonymous sender (family only). */
+// 3. socketpair DGRAM recvfrom reports an anonymous sender (family only).
 void test_dgram_socketpair_sender_anonymous(void) {
   int sv[2];
   TEST_ASSERT_EQUAL_INT(0, socketpair(AF_UNIX, SOCK_DGRAM, 0, sv));
@@ -124,7 +123,7 @@ void test_dgram_socketpair_sender_anonymous(void) {
   TEST_ASSERT_EQUAL_INT(5, (int)recvfrom_fd(sv[1], buf, sizeof(buf), 0,
                                             (struct sockaddr *)&src, &slen));
   TEST_ASSERT_EQUAL_MEMORY("hello", buf, 5);
-  /* socketpair ends are unbound: only the family is reported. */
+  // socketpair ends are unbound: only the family is reported.
   TEST_ASSERT_EQUAL_INT(sizeof(sa_family_t), (size_t)slen);
   TEST_ASSERT_EQUAL_INT(AF_UNIX, (int)src.sun_family);
 
@@ -132,22 +131,22 @@ void test_dgram_socketpair_sender_anonymous(void) {
   close(sv[1]);
 }
 
-/* 4. bind + sendto(dest) reaches a bound DGRAM server; recvfrom reports the
- * sender's path. Cross-process: child = server, parent = client. */
+// 4. bind + sendto(dest) reaches a bound DGRAM server; recvfrom reports the
+// sender's path. Cross-process: child = server, parent = client.
 void test_dgram_bind_sendto_recvfrom(void) {
   pid_t pid = fork();
   if (pid == 0) {
-    /* child: server. bind, recv, exit 0 on success. */
+    // child: server. bind, recv, exit 0 on success.
     int s = socket(AF_UNIX, SOCK_DGRAM, 0);
     if (s < 0)
       _exit(1);
     struct sockaddr_un a;
     path_of(&a, "/run/dgchild-srv");
-    /* self-bind under the child's own pid-tagged path so the parent can find
-     * it: but the parent computed the path from the child pid. The child does
-     * not know its pid relative to the parent's naming, so we pass the path via
-     * the shared literal and accept one fixed path (test_runner runs tests
-     * sequentially, so no collision). */
+    // self-bind under the child's own pid-tagged path so the parent can find
+    // it: but the parent computed the path from the child pid. The child does
+    // not know its pid relative to the parent's naming, so we pass the path via
+    // the shared literal and accept one fixed path (test_runner runs tests
+    // sequentially, so no collision).
     if (bind(s, (struct sockaddr *)&a, sizeof(a)) != 0)
       _exit(2);
     char buf[64] = {0};
@@ -158,7 +157,7 @@ void test_dgram_bind_sendto_recvfrom(void) {
         recvfrom_fd(s, buf, sizeof(buf), 0, (struct sockaddr *)&src, &slen);
     if (r != 6 || memcmp(buf, "pingup", 6) != 0)
       _exit(3);
-    /* sender path must echo back the client's bound path. */
+    // sender path must echo back the client's bound path.
     if (slen < sizeof(sa_family_t))
       _exit(4);
     if (src.sun_family != AF_UNIX)
@@ -169,14 +168,14 @@ void test_dgram_bind_sendto_recvfrom(void) {
     _exit(0);
   }
 
-  /* parent: client. Bind its own path, send to the server's path. */
+  // parent: client. Bind its own path, send to the server's path.
   int c = socket(AF_UNIX, SOCK_DGRAM, 0);
   TEST_ASSERT(c >= 0);
   struct sockaddr_un cli;
   path_of(&cli, "/run/dgparent-cli");
   TEST_ASSERT_EQUAL_INT(0, bind(c, (struct sockaddr *)&cli, sizeof(cli)));
 
-  /* Give the child a moment to bind before we send. */
+  // Give the child a moment to bind before we send.
   struct timespec ts = {.tv_sec = 0, .tv_nsec = 50 * 1000 * 1000};
   nanosleep(&ts, NULL);
 
@@ -193,8 +192,8 @@ void test_dgram_bind_sendto_recvfrom(void) {
   close(c);
 }
 
-/* 5. connect() fixes the default send target for a DGRAM socket; a bare
- * send() (no addr) then reaches the server. */
+// 5. connect() fixes the default send target for a DGRAM socket; a bare
+// send() (no addr) then reaches the server.
 void test_dgram_connect_then_send(void) {
   pid_t pid = fork();
   if (pid == 0) {
@@ -231,7 +230,7 @@ void test_dgram_connect_then_send(void) {
   struct sockaddr_un srv;
   path_of(&srv, "/run/dgc-srv");
   TEST_ASSERT_EQUAL_INT(0, connect(c, (struct sockaddr *)&srv, sizeof(srv)));
-  /* send() with no address now routes to the connected target. */
+  // send() with no address now routes to the connected target.
   TEST_ASSERT_EQUAL_INT(4, (int)sendto_fd(c, "pong", 4, 0, NULL, 0));
 
   int status;
@@ -241,7 +240,7 @@ void test_dgram_connect_then_send(void) {
   close(c);
 }
 
-/* 6. MSG_PEEK on a DGRAM socketpair leaves the datagram queued. */
+// 6. MSG_PEEK on a DGRAM socketpair leaves the datagram queued.
 void test_dgram_peek_does_not_consume(void) {
   int sv[2];
   TEST_ASSERT_EQUAL_INT(0, socketpair(AF_UNIX, SOCK_DGRAM, 0, sv));
@@ -251,7 +250,7 @@ void test_dgram_peek_does_not_consume(void) {
   TEST_ASSERT_EQUAL_INT(
       3, (int)recvfrom_fd(sv[1], b1, sizeof(b1), MSG_PEEK, NULL, NULL));
   TEST_ASSERT_EQUAL_MEMORY("xyz", b1, 3);
-  /* a second plain recv still sees the same datagram (PEEK did not dequeue). */
+  // a second plain recv still sees the same datagram (PEEK did not dequeue).
   TEST_ASSERT_EQUAL_INT(3,
                         (int)recvfrom_fd(sv[1], b2, sizeof(b2), 0, NULL, NULL));
   TEST_ASSERT_EQUAL_MEMORY("xyz", b2, 3);
@@ -260,8 +259,8 @@ void test_dgram_peek_does_not_consume(void) {
   close(sv[1]);
 }
 
-/* 7. MSG_TRUNC: recv a 10B datagram into a 4B buffer with MSG_TRUNC → returns
- * the true length (10) and sets MSG_TRUNC in msg_flags. */
+// 7. MSG_TRUNC: recv a 10B datagram into a 4B buffer with MSG_TRUNC → returns
+// the true length (10) and sets MSG_TRUNC in msg_flags.
 void test_dgram_trunc_reports_true_length(void) {
   int sv[2];
   TEST_ASSERT_EQUAL_INT(0, socketpair(AF_UNIX, SOCK_DGRAM, 0, sv));
@@ -280,13 +279,13 @@ void test_dgram_trunc_reports_true_length(void) {
   close(sv[1]);
 }
 
-/* 8. SCM_RIGHTS over a DGRAM socketpair: pass an fd, receiver reads its
- * contents. */
+// 8. SCM_RIGHTS over a DGRAM socketpair: pass an fd, receiver reads its
+// contents.
 void test_dgram_scm_rights(void) {
   int sv[2];
   TEST_ASSERT_EQUAL_INT(0, socketpair(AF_UNIX, SOCK_DGRAM, 0, sv));
 
-  /* Open a temp file, write a sentinel, pass its fd. */
+  // Open a temp file, write a sentinel, pass its fd.
   int tf = open("/run/dgscm.txt", O_CREAT | O_RDWR | O_TRUNC, 0644);
   TEST_ASSERT(tf >= 0);
   TEST_ASSERT_EQUAL_INT(5, (int)write(tf, "scmok", 5));
@@ -306,7 +305,7 @@ void test_dgram_scm_rights(void) {
   TEST_ASSERT_EQUAL_INT(2, (int)sendmsg(sv[0], &msg, 0));
   close(tf);
 
-  /* receive */
+  // receive
   char rbuf[8] = {0};
   char rcbuf[CMSG_SPACE(sizeof(int))] = {0};
   struct iovec riov = {.iov_base = rbuf, .iov_len = sizeof(rbuf)};
@@ -326,9 +325,9 @@ void test_dgram_scm_rights(void) {
   int passed_fd = *(int *)CMSG_DATA(rcm);
   TEST_ASSERT(passed_fd >= 0);
 
-  /* read the sentinel through the passed fd. SCM_RIGHTS passes the open file
-   * description (shared offset), which sits at EOF after the sender wrote —
-   * rewind first. */
+  // read the sentinel through the passed fd. SCM_RIGHTS passes the open file
+  // description (shared offset), which sits at EOF after the sender wrote —
+  // rewind first.
   lseek(passed_fd, 0, SEEK_SET);
   char fbuf[8] = {0};
   TEST_ASSERT_EQUAL_INT(5, (int)read(passed_fd, fbuf, sizeof(fbuf)));
@@ -340,7 +339,7 @@ void test_dgram_scm_rights(void) {
   unlink("/run/dgscm.txt");
 }
 
-/* 9. EPROTOTYPE: a DGRAM sendto to a path bound by a STREAM socket. */
+// 9. EPROTOTYPE: a DGRAM sendto to a path bound by a STREAM socket.
 void test_dgram_sendto_stream_path_eprototype(void) {
   int s = socket(AF_UNIX, SOCK_STREAM, 0);
   TEST_ASSERT(s >= 0);
@@ -358,7 +357,7 @@ void test_dgram_sendto_stream_path_eprototype(void) {
   close(s);
 }
 
-/* 10. sendto to a non-existent path → ENOENT (no socket inode, hash miss). */
+// 10. sendto to a non-existent path → ENOENT (no socket inode, hash miss).
 void test_dgram_sendto_missing_path(void) {
   int c = socket(AF_UNIX, SOCK_DGRAM, 0);
   TEST_ASSERT(c >= 0);
@@ -366,7 +365,7 @@ void test_dgram_sendto_missing_path(void) {
   path_of(&a, "/run/dgnone-such-path");
   TEST_ASSERT_EQUAL_INT(
       -1, sendto_fd(c, "x", 1, 0, (struct sockaddr *)&a, sizeof(a)));
-  /* VFS lookup misses → unix_bind_lookup_dgram returns -ENOENT. */
+  // VFS lookup misses → unix_bind_lookup_dgram returns -ENOENT.
   TEST_ASSERT_EQUAL_INT(ENOENT, errno);
   close(c);
 }

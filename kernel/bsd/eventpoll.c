@@ -96,7 +96,7 @@ static void ep_poll_callback(wait_queue_t *wq, unsigned long flags) {
 // can't diverge — a divergence left sys_poll waiters on an unwoken wq).
 static wait_queue_head *ep_target_wq(struct file *f) { return file_wq_get(f); }
 
-/* Linux permits epoll-on-epoll while rejecting cycles and overly deep nests. */
+// Linux permits epoll-on-epoll while rejecting cycles and overly deep nests.
 static bool ep_graph_reaches(eventpoll *from, eventpoll *target, int depth);
 
 static bool ep_tree_reaches(rb_node *node, eventpoll *target, int depth) {

@@ -154,9 +154,9 @@ __poll file_poll(struct file *f, __poll events) {
       }
     }
   } else if (f->type == FD_SYNC_FILE) {
-    /* FD_SYNC_FILE (plan2): POLLIN once the bound fence is signaled. The
-     * probe is a driver-layer accessor (drm_fence_is_signaled) so this BSD
-     * file does not include the driver-layer drm_internal.h. */
+    // FD_SYNC_FILE (plan2): POLLIN once the bound fence is signaled. The
+    // probe is a driver-layer accessor (drm_fence_is_signaled) so this BSD
+    // file does not include the driver-layer drm_internal.h.
     extern bool drm_fence_is_signaled(struct drm_fence * fence);
     struct drm_fence *fence = f->sync_file_fence;
     if (fence && drm_fence_is_signaled(fence))
@@ -184,12 +184,12 @@ __poll file_poll(struct file *f, __poll events) {
   } else if (f->type == FD_NETLINK) {
     struct netlink_sock *nlsock = f->nlsock;
     if (nlsock) {
-      /* nl_group_broadcast holds nl_group_lock while waking this fd's epoll
-       * callback, which takes ep->lock.  epoll_wait probes readiness while
-       * holding ep->lock, so taking nl_group_lock here would invert those two
-       * locks and deadlock under a burst of uevents.  Poll readiness is only a
-       * snapshot; recvmsg still serializes queue consumption, and a concurrent
-       * enqueue also issues a wakeup, so an acquire-load is sufficient here. */
+      // nl_group_broadcast holds nl_group_lock while waking this fd's epoll
+      // callback, which takes ep->lock.  epoll_wait probes readiness while
+      // holding ep->lock, so taking nl_group_lock here would invert those two
+      // locks and deadlock under a burst of uevents.  Poll readiness is only a
+      // snapshot; recvmsg still serializes queue consumption, and a concurrent
+      // enqueue also issues a wakeup, so an acquire-load is sufficient here.
       if (__atomic_load_n(&nlsock->recv_queue_head, __ATOMIC_ACQUIRE)) {
         if (events & POLLIN)
           revents |= POLLIN;

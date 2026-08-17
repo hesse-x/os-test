@@ -60,9 +60,9 @@ struct virtio_gpu_backend {
   bool hardware_live;
 };
 
-/* IRQ and timer hooks have no callback context. Only one virtio-gpu is
- * supported today, but its owned state lives in the PCI driver's private
- * allocation rather than DRM globals. */
+// IRQ and timer hooks have no callback context. Only one virtio-gpu is
+// supported today, but its owned state lives in the PCI driver's private
+// allocation rather than DRM globals.
 static struct virtio_gpu_backend *virtio_gpu_backend;
 static uint32_t drm_page_flip_log_count;
 struct drm_gem_object;
@@ -72,17 +72,17 @@ struct drm_gem_object;
 #define DRM_ENCODER_ID (virtio_gpu_backend->drm.encoder_id)
 #define DRM_PLANE_ID (virtio_gpu_backend->drm.plane_id)
 
-/* Single vring completion callback shared by sync and async paths. The ctx is
- * either a struct virtgpu_sync_ctx (sync send_cmd path) or a
- * struct virtgpu_cmd_pending (async EXECBUFFER path); the tag discriminates.
- * Runs in ISR (under cmd_lock via vring_poll_used). Both ctx structs are
- * defined in virtio_gpu.h. */
+// Single vring completion callback shared by sync and async paths. The ctx is
+// either a struct virtgpu_sync_ctx (sync send_cmd path) or a
+// struct virtgpu_cmd_pending (async EXECBUFFER path); the tag discriminates.
+// Runs in ISR (under cmd_lock via vring_poll_used). Both ctx structs are
+// defined in virtio_gpu.h.
 static void virtio_gpu_cmd_callback(void *ctx, uint32_t len) {
-  /* Defensive: ctx must never be NULL in normal operation (it is the
-     per-cmd context set in vring_add_buf).  A NULL here means the used
-     ring was drained against a descriptor whose ctx had already been
-     cleared/reused by a concurrent drain — historically the direct cause
-     of the NULL-write #PF.  Harmless-ize it rather than crashing. */
+  // Defensive: ctx must never be NULL in normal operation (it is the
+  // per-cmd context set in vring_add_buf).  A NULL here means the used
+  // ring was drained against a descriptor whose ctx had already been
+  // cleared/reused by a concurrent drain — historically the direct cause
+  // of the NULL-write #PF.  Harmless-ize it rather than crashing.
   if (!ctx)
     return;
   enum virtgpu_cmd_ctx_tag tag = *(enum virtgpu_cmd_ctx_tag *)ctx;
@@ -98,7 +98,7 @@ static void virtio_gpu_cmd_callback(void *ctx, uint32_t len) {
   (void)len;
 }
 
-/* Forward declarations */
+// Forward declarations
 static void virtio_gpu_isr(trapframe *tf);
 static int virtio_gpu_send_cmd(struct virtio_gpu_device *vgpu, void *cmd_buf,
                                size_t cmd_len, void *resp_buf, size_t resp_len);
@@ -107,22 +107,22 @@ static bool drm_dev_alloc(void);
 static void virtio_gpu_backend_release(void *driver_private);
 static void virtio_gpu_remove(pci_device *pdev);
 
-/* plan2 forward declarations: these are defined later in the file but used by
- * the ISR (drm_fence_find/signal) and the EXECBUFFER ioctl (drm_file_current)
- * which precede their definitions. */
+// plan2 forward declarations: these are defined later in the file but used by
+// the ISR (drm_fence_find/signal) and the EXECBUFFER ioctl (drm_file_current)
+// which precede their definitions.
 static struct drm_fence *drm_fence_find(uint32_t ctx_id, uint8_t ring_idx,
                                         uint64_t fence_id);
 static void virtio_drm_fence_signal(struct drm_fence *fence, uint32_t ctx_id,
                                     uint8_t ring_idx, uint64_t fence_id);
 
-/* ===== 2.B: ctrlq initialization ===== */
+// ===== 2.B: ctrlq initialization =====
 
-/* Initialize ctrlq: query queue size, allocate rings, set up common cfg */
+// Initialize ctrlq: query queue size, allocate rings, set up common cfg
 static int virtio_gpu_init_ctrlq(struct virtio_gpu_device *vgpu) {
   struct virtio_pci_dev *vpci = &vgpu->vpci;
   struct virtio_pci_common_cfg __iomem *common = vpci->common;
 
-  /* Select queue 0 (ctrlq) */
+  // Select queue 0 (ctrlq)
   common->queue_select = VIRTIO_GPU_CTRLQ_INDEX;
   uint16_t size = common->queue_size;
   uint16_t notify_off = common->queue_notify_off;
@@ -133,14 +133,14 @@ static int virtio_gpu_init_ctrlq(struct virtio_gpu_device *vgpu) {
   printk(LOG_INFO, "virtio_gpu: ctrlq size=%u notify_off=%u\n", size,
          notify_off);
 
-  /* Allocate and initialize the virtqueue */
+  // Allocate and initialize the virtqueue
   int rc = vring_create(&vgpu->ctrlq, VIRTIO_GPU_CTRLQ_INDEX, size, notify_off);
   if (rc < 0) {
     printk(LOG_ERROR, "virtio_gpu: vring_create failed: %d\n", rc);
     return rc;
   }
 
-  /* Program queue addresses into common config */
+  // Program queue addresses into common config
   common->queue_desc_lo = (uint32_t)(vgpu->ctrlq.desc_phys & 0xFFFFFFFF);
   common->queue_desc_hi = (uint32_t)(vgpu->ctrlq.desc_phys >> 32);
   common->queue_avail_lo = (uint32_t)(vgpu->ctrlq.avail_phys & 0xFFFFFFFF);
@@ -148,29 +148,29 @@ static int virtio_gpu_init_ctrlq(struct virtio_gpu_device *vgpu) {
   common->queue_used_lo = (uint32_t)(vgpu->ctrlq.used_phys & 0xFFFFFFFF);
   common->queue_used_hi = (uint32_t)(vgpu->ctrlq.used_phys >> 32);
 
-  /* Assign MSI-X vector to this queue (set before enable).
-     Per virtio spec 1.1 §4.1.4.3, queue_msix_vector is the MSI-X **table entry
-     index** (0-based), NOT the LAPIC vector number.  The device maps entry
-     index → LAPIC vector via its internal MSI-X table.  Writing the LAPIC
-     vector (69) causes the device to reject it (0xFFFF) since only entries 0..1
-     exist. */
-  common->queue_msix_vector = 0; /* MSI-X table entry 0 (queue interrupt) */
+  // Assign MSI-X vector to this queue (set before enable).
+  // Per virtio spec 1.1 §4.1.4.3, queue_msix_vector is the MSI-X **table entry
+  // index** (0-based), NOT the LAPIC vector number.  The device maps entry
+  // index → LAPIC vector via its internal MSI-X table.  Writing the LAPIC
+  // vector (69) causes the device to reject it (0xFFFF) since only entries 0..1
+  // exist.
+  common->queue_msix_vector = 0; // MSI-X table entry 0 (queue interrupt)
   uint16_t accepted_vec = common->queue_msix_vector;
   printk(LOG_INFO,
          "virtio_gpu: queue_msix_vector entry=%u readback=%u (lapic_vec=%u)\n",
          0, accepted_vec, vgpu->vpci.msix_vector);
 
-  /* Enable queue */
+  // Enable queue
   common->queue_enable = 1;
 
   return 0;
 }
 
-/* ===== 2.C: ISR + sleep/wake command synchronization ===== */
+// ===== 2.C: ISR + sleep/wake command synchronization =====
 
-/* ISR: called when virtio-gpu raises MSI-X interrupt.
-   Reads ISR capability to distinguish queue interrupt vs config change,
-   drains used ring, wakes any waiting task. */
+// ISR: called when virtio-gpu raises MSI-X interrupt.
+// Reads ISR capability to distinguish queue interrupt vs config change,
+// drains used ring, wakes any waiting task.
 static void virtio_gpu_isr(trapframe *tf) {
   if (!virtio_gpu_backend ||
       !__atomic_load_n(&virtio_gpu_backend->hardware_live, __ATOMIC_ACQUIRE)) {
@@ -181,24 +181,24 @@ static void virtio_gpu_isr(trapframe *tf) {
   uint8_t isr_status = virtio_pci_read_isr(&vgpu->vpci);
 
   if (isr_status & VIRTIO_ISR_QUEUE_INTR) {
-    /* Drain the used ring under cmd_lock so vring_poll_used (frees descs,
-       clears ctx[], advances used_idx) is mutually exclusive with the
-       process side's vring_add_buf (allocates descs, sets ctx[], publishes
-       avail).  This is the single place the used ring is drained now.
-       irqsave is symmetric with send_cmd's process-side acquisition: while
-       cmd_lock is held here, the originating CPU cannot re-enter this ISR.
-       vring_poll_used invokes virtio_gpu_cmd_callback for each used desc,
-       which sets cmd_ctx.completed (sync path) or pending->response_ready
-       (async path). */
+    // Drain the used ring under cmd_lock so vring_poll_used (frees descs,
+    // clears ctx[], advances used_idx) is mutually exclusive with the
+    // process side's vring_add_buf (allocates descs, sets ctx[], publishes
+    // avail).  This is the single place the used ring is drained now.
+    // irqsave is symmetric with send_cmd's process-side acquisition: while
+    // cmd_lock is held here, the originating CPU cannot re-enter this ISR.
+    // vring_poll_used invokes virtio_gpu_cmd_callback for each used desc,
+    // which sets cmd_ctx.completed (sync path) or pending->response_ready
+    // (async path).
     uint64_t flags;
     spin_lock_irqsave(&vgpu->cmd_lock, &flags);
     vring_poll_used(&vgpu->ctrlq);
     spin_unlock_irqrestore(&vgpu->cmd_lock, flags);
 
-    /* Walk pending_list: for each completed async cmd, signal its fence, wake
-     * any waiter, unlink and free (cmd_buf/resp_buf owned by the node). Lock
-     * order is non-nested with cmd_lock above (both fully released between),
-     * matching the async submit path. */
+    // Walk pending_list: for each completed async cmd, signal its fence, wake
+    // any waiter, unlink and free (cmd_buf/resp_buf owned by the node). Lock
+    // order is non-nested with cmd_lock above (both fully released between),
+    // matching the async submit path.
     spin_lock_irqsave(&vgpu->pending_lock, &flags);
     struct virtgpu_cmd_pending *p = vgpu->pending_list;
     struct virtgpu_cmd_pending *prev = NULL;
@@ -211,7 +211,7 @@ static void virtio_gpu_isr(trapframe *tf) {
               drm_fence_find(p->hdr.ctx_id, p->hdr.ring_idx, p->hdr.fence_id);
           virtio_drm_fence_signal(f, p->hdr.ctx_id, p->hdr.ring_idx,
                                   p->hdr.fence_id);
-          drm_fence_put(f); /* drop the in-flight submission reference */
+          drm_fence_put(f); // drop the in-flight submission reference
         }
         if (p->waiter)
           wake_wq_target(p->waiter);
@@ -234,17 +234,17 @@ static void virtio_gpu_isr(trapframe *tf) {
     }
     spin_unlock_irqrestore(&vgpu->pending_lock, flags);
   }
-  /* config change: not handled (no EDID) */
+  // config change: not handled (no EDID)
 
   lapic_eoi();
 }
 
-/* Send a command and wait for response (synchronous).
-   cmd_buf: pointer to command struct (e.g. virtio_gpu_resource_create_2d)
-   cmd_len: command size in bytes
-   resp_buf: pointer to response buffer (caller-allocated)
-   resp_len: response buffer size
-   Returns 0 on success (response received), negative on error. */
+// Send a command and wait for response (synchronous).
+// cmd_buf: pointer to command struct (e.g. virtio_gpu_resource_create_2d)
+// cmd_len: command size in bytes
+// resp_buf: pointer to response buffer (caller-allocated)
+// resp_len: response buffer size
+// Returns 0 on success (response received), negative on error.
 static int virtio_gpu_send_cmd(struct virtio_gpu_device *vgpu, void *cmd_buf,
                                size_t cmd_len, void *resp_buf,
                                size_t resp_len) {
@@ -253,25 +253,25 @@ static int virtio_gpu_send_cmd(struct virtio_gpu_device *vgpu, void *cmd_buf,
                        __ATOMIC_ACQUIRE) ||
       !__atomic_load_n(&virtio_gpu_backend->hardware_live, __ATOMIC_ACQUIRE))
     return -ENODEV;
-  /* Per-command completion context: vring callback sets completed=true
-     when the device processes this descriptor.  Each caller has its own
-     ctx on the stack, so concurrent send_cmd invocations don't clobber
-     each other's state. */
+  // Per-command completion context: vring callback sets completed=true
+  // when the device processes this descriptor.  Each caller has its own
+  // ctx on the stack, so concurrent send_cmd invocations don't clobber
+  // each other's state.
   struct virtgpu_sync_ctx cmd_ctx = {
       .tag = VIRTGPU_CTX_SYNC, .completed = false, .waiter = current_task};
 
-  /* Physical addresses for descriptors (must be guest-physical) */
+  // Physical addresses for descriptors (must be guest-physical)
   uint64_t cmd_phys = (uint64_t)PHY_ADDR((uintptr_t)cmd_buf);
   uint64_t resp_phys = (uint64_t)PHY_ADDR((uintptr_t)resp_buf);
 
-  /* Set up 2 descriptors: cmd (device-readable) + resp (device-writable) */
+  // Set up 2 descriptors: cmd (device-readable) + resp (device-writable)
   uint64_t addrs[2] = {cmd_phys, resp_phys};
   uint32_t lens[2] = {(uint32_t)cmd_len, (uint32_t)resp_len};
-  uint16_t flags[2] = {0, VRING_DESC_F_WRITE}; /* cmd: read-only; resp: write */
+  uint16_t flags[2] = {0, VRING_DESC_F_WRITE}; // cmd: read-only; resp: write
 
-  /* During early boot (driver_init, before idle process exists) there is no
-     process context to sleep in: current_task is NULL and schedule() cannot
-     block. Poll the used ring synchronously instead. */
+  // During early boot (driver_init, before idle process exists) there is no
+  // process context to sleep in: current_task is NULL and schedule() cannot
+  // block. Poll the used ring synchronously instead.
   if (current_task == NULL) {
     spin_lock(&vgpu->cmd_lock);
     int head = vring_add_buf(&vgpu->ctrlq, addrs, lens, flags, 2, &cmd_ctx);
@@ -285,17 +285,17 @@ static int virtio_gpu_send_cmd(struct virtio_gpu_device *vgpu, void *cmd_buf,
     while (!vring_has_used(&vgpu->ctrlq)) {
       __asm__ volatile("pause" ::: "memory");
     }
-    vring_poll_used(&vgpu->ctrlq); /* callback sets cmd_ctx.completed */
+    vring_poll_used(&vgpu->ctrlq); // callback sets cmd_ctx.completed
     spin_unlock(&vgpu->cmd_lock);
     return cmd_ctx.completed ? 0 : -1;
   }
 
-  /* Hold cmd_lock with interrupts disabled: the virtio-gpu ISR also takes
-     cmd_lock to drain the used ring, so acquiring it irqsave on the
-     process side prevents a same-CPU ISR re-entry from deadlocking, and
-     makes the alloc/publish side of vring_add_buf mutually exclusive with
-     the ISR's drain side.  Use irq_flags to avoid clashing with the
-     descriptor flags[] array below. */
+  // Hold cmd_lock with interrupts disabled: the virtio-gpu ISR also takes
+  // cmd_lock to drain the used ring, so acquiring it irqsave on the
+  // process side prevents a same-CPU ISR re-entry from deadlocking, and
+  // makes the alloc/publish side of vring_add_buf mutually exclusive with
+  // the ISR's drain side.  Use irq_flags to avoid clashing with the
+  // descriptor flags[] array below.
   uint64_t irq_flags;
   spin_lock_irqsave(&vgpu->cmd_lock, &irq_flags);
   int head = vring_add_buf(&vgpu->ctrlq, addrs, lens, flags, 2, &cmd_ctx);
@@ -305,9 +305,9 @@ static int virtio_gpu_send_cmd(struct virtio_gpu_device *vgpu, void *cmd_buf,
     return -1;
   }
 
-  /* cmd_lock is also held by the completion callback.  Arm the task while
-     holding both cmd_lock and its scheduler lock, so completion cannot race
-     between the completion test and BLOCKED transition. */
+  // cmd_lock is also held by the completion callback.  Arm the task while
+  // holding both cmd_lock and its scheduler lock, so completion cannot race
+  // between the completion test and BLOCKED transition.
   xtask *waiter = current_task;
   int wait_cpu = waiter->assigned_cpu;
   spin_lock(&cpu_locals[wait_cpu].scheduler_lock);
@@ -317,8 +317,8 @@ static int virtio_gpu_send_cmd(struct virtio_gpu_device *vgpu, void *cmd_buf,
   vring_kick(&vgpu->ctrlq);
   virtio_pci_notify(&vgpu->vpci, vgpu->ctrlq.index, vgpu->ctrlq.notify_off);
 
-  /* Release cmd_lock before sleeping; the ISR completes this exact context
-     and wakes only its submitter. */
+  // Release cmd_lock before sleeping; the ISR completes this exact context
+  // and wakes only its submitter.
   spin_unlock_irqrestore(&vgpu->cmd_lock, irq_flags);
 
   for (;;) {
@@ -326,9 +326,9 @@ static int virtio_gpu_send_cmd(struct virtio_gpu_device *vgpu, void *cmd_buf,
     if (cmd_ctx.completed)
       break;
 
-    /* Signals may wake a blocked task without completing the command.  Take
-       cmd_lock before re-arming so the ISR cannot publish completion between
-       this check and the BLOCKED transition. */
+    // Signals may wake a blocked task without completing the command.  Take
+    // cmd_lock before re-arming so the ISR cannot publish completion between
+    // this check and the BLOCKED transition.
     spin_lock_irqsave(&vgpu->cmd_lock, &irq_flags);
     if (!cmd_ctx.completed) {
       wait_cpu = waiter->assigned_cpu;
@@ -342,23 +342,23 @@ static int virtio_gpu_send_cmd(struct virtio_gpu_device *vgpu, void *cmd_buf,
   return 0;
 }
 
-/* 3D/context/blob commands: identical to send_cmd (2-descriptor cmd+resp,
- * synchronous). Kept as a separate entry point so plan2 can swap in an async
- * variant without touching the 2D path. */
+// 3D/context/blob commands: identical to send_cmd (2-descriptor cmd+resp,
+// synchronous). Kept as a separate entry point so plan2 can swap in an async
+// variant without touching the 2D path.
 int virtio_gpu_send_cmd_3d(struct virtio_gpu_device *vgpu, void *cmd_buf,
                            size_t cmd_len, void *resp_buf, size_t resp_len) {
   return virtio_gpu_send_cmd(vgpu, cmd_buf, cmd_len, resp_buf, resp_len);
 }
 
-/* Async 3D submit: kmalloc private cmd+resp copies owned by a pending node,
- * enqueue on pending_list, add_buf+kick under cmd_lock (NOT held across any
- * sleep), return immediately. ISR completes via pending_list walk and frees
- * the node + buffers. Multiple commands may be in-flight concurrently
- * (bounded by vring desc count). Returns 0 on submitted, negative on error.
- *
- * caller_cmd/caller_resp are only used as copy sources; their lifetime after
- * return is irrelevant. fence_id/ring_idx/ctx_id are recorded into the node's
- * hdr copy so the ISR can find the matching fence. */
+// Async 3D submit: kmalloc private cmd+resp copies owned by a pending node,
+// enqueue on pending_list, add_buf+kick under cmd_lock (NOT held across any
+// sleep), return immediately. ISR completes via pending_list walk and frees
+// the node + buffers. Multiple commands may be in-flight concurrently
+// (bounded by vring desc count). Returns 0 on submitted, negative on error.
+//
+// caller_cmd/caller_resp are only used as copy sources; their lifetime after
+// return is irrelevant. fence_id/ring_idx/ctx_id are recorded into the node's
+// hdr copy so the ISR can find the matching fence.
 static int virtio_gpu_send_cmd_3d_async(struct virtio_gpu_device *vgpu,
                                         const void *caller_cmd, size_t cmd_len,
                                         const void *caller_resp,
@@ -388,25 +388,25 @@ static int virtio_gpu_send_cmd_3d_async(struct virtio_gpu_device *vgpu,
   }
   __memcpy(pn->cmd_buf, caller_cmd, cmd_len);
   __memset(pn->resp_buf, 0, resp_len);
-  /* Copy the ctrl_hdr (first sizeof(ctrl_hdr) bytes of cmd) for ISR fence
-   * lookup. */
+  // Copy the ctrl_hdr (first sizeof(ctrl_hdr) bytes of cmd) for ISR fence
+  // lookup.
   __memcpy(&pn->hdr, pn->cmd_buf, sizeof(struct virtio_gpu_ctrl_hdr));
-  /* Ensure the fence fields in the node hdr match what we tell the host. */
+  // Ensure the fence fields in the node hdr match what we tell the host.
   pn->hdr.fence_id = fence_id;
   pn->hdr.ring_idx = ring_idx;
   pn->hdr.ctx_id = ctx_id;
 
-  /* Link onto pending_list (under pending_lock) before submit so the ISR can
-   * always find the node. */
+  // Link onto pending_list (under pending_lock) before submit so the ISR can
+  // always find the node.
   uint64_t pflags;
   spin_lock_irqsave(&vgpu->pending_lock, &pflags);
   pn->next = vgpu->pending_list;
   vgpu->pending_list = pn;
   spin_unlock_irqrestore(&vgpu->pending_lock, pflags);
 
-  /* Submit: cmd_lock ONLY covers add_buf+kick (free-list serialization), NOT
-   * any sleep. This is what lets the next EXECBUFFER submit while this one is
-   * still on the host. */
+  // Submit: cmd_lock ONLY covers add_buf+kick (free-list serialization), NOT
+  // any sleep. This is what lets the next EXECBUFFER submit while this one is
+  // still on the host.
   uint64_t cmd_phys = (uint64_t)PHY_ADDR((uintptr_t)pn->cmd_buf);
   uint64_t resp_phys = (uint64_t)PHY_ADDR((uintptr_t)pn->resp_buf);
   uint64_t addrs[2] = {cmd_phys, resp_phys};
@@ -418,7 +418,7 @@ static int virtio_gpu_send_cmd_3d_async(struct virtio_gpu_device *vgpu,
   int head = vring_add_buf(&vgpu->ctrlq, addrs, lens, dflags, 2, pn);
   if (head < 0) {
     spin_unlock_irqrestore(&vgpu->cmd_lock, cflags);
-    /* unlink pending node and free */
+    // unlink pending node and free
     spin_lock_irqsave(&vgpu->pending_lock, &pflags);
     vgpu->pending_list = pn->next;
     spin_unlock_irqrestore(&vgpu->pending_lock, pflags);
@@ -433,7 +433,7 @@ static int virtio_gpu_send_cmd_3d_async(struct virtio_gpu_device *vgpu,
   return 0;
 }
 
-/* ===== 2.D: high-level command wrappers ===== */
+// ===== 2.D: high-level command wrappers =====
 
 int virtio_gpu_create_2d(uint32_t resource_id, uint32_t width, uint32_t height,
                          uint32_t format) {
@@ -462,7 +462,7 @@ int virtio_gpu_create_2d(uint32_t resource_id, uint32_t width, uint32_t height,
 
 int virtio_gpu_attach_backing(uint32_t resource_id, uint64_t guest_phys,
                               uint32_t length) {
-  /* Command + 1 mem entry in a single buffer */
+  // Command + 1 mem entry in a single buffer
   struct {
     struct virtio_gpu_resource_attach_backing cmd;
     struct virtio_gpu_mem_entry entry;
@@ -591,9 +591,9 @@ int virtio_gpu_resource_unref(uint32_t resource_id) {
   return 0;
 }
 
-/* ===== 2.E: real init + driver definition ===== */
+// ===== 2.E: real init + driver definition =====
 
-/* ===== DRM ioctl implementation ===== */
+// ===== DRM ioctl implementation =====
 
 static struct drm_dumb_buffer *drm_find_dumb(int handle) {
   if (handle <= 0 || handle > MAX_DUMB_BUFFERS)
@@ -614,7 +614,7 @@ static int drm_alloc_dumb_handle(void) {
     if (virtio_gpu_backend->drm.dumbs[i].handle == 0 &&
         virtio_gpu_backend->drm.dumbs[i].release_work.state == WORK_IDLE) {
       virtio_gpu_backend->drm.dumbs[i].handle =
-          i + 1; /* handle = slot index + 1 */
+          i + 1; // handle = slot index + 1
       virtio_gpu_backend->drm.dumbs[i].refcount = 1;
       return virtio_gpu_backend->drm.dumbs[i].handle;
     }
@@ -707,9 +707,9 @@ static const struct drm_gem_object_ops drm_virgl_gem_ops = {
     .release = drm_virgl_gem_release,
 };
 
-/* ===== Fence (plan2) ===== */
+// ===== Fence (plan2) =====
 
-/* Register a common DRM fence in virtio's completion lookup table. */
+// Register a common DRM fence in virtio's completion lookup table.
 static struct drm_fence *
 virtio_drm_fence_create(uint32_t ctx_id, uint8_t ring_idx, uint64_t fence_id) {
   struct drm_fence *fence = drm_fence_create(false);
@@ -733,7 +733,7 @@ virtio_drm_fence_create(uint32_t ctx_id, uint8_t ring_idx, uint64_t fence_id) {
   return NULL;
 }
 
-/* Completion consumes the table's in-flight reference. */
+// Completion consumes the table's in-flight reference.
 static struct drm_fence *drm_fence_find(uint32_t ctx_id, uint8_t ring_idx,
                                         uint64_t fence_id) {
   uint64_t flags;
@@ -784,7 +784,7 @@ static void virtio_drm_fence_signal(struct drm_fence *fence, uint32_t ctx_id,
 static int drm_alloc_fb_id(void) {
   for (int i = 0; i < MAX_FRAMEBUFFERS; i++) {
     if (virtio_gpu_backend->drm.fbs[i].fb_id == 0) {
-      virtio_gpu_backend->drm.fbs[i].fb_id = i + 1; /* fb_id = slot index + 1 */
+      virtio_gpu_backend->drm.fbs[i].fb_id = i + 1; // fb_id = slot index + 1
       virtio_gpu_backend->drm.fbs[i].refcount = 1;
       return virtio_gpu_backend->drm.fbs[i].fb_id;
     }
@@ -792,7 +792,7 @@ static int drm_alloc_fb_id(void) {
   return -1;
 }
 
-/* DRM_IOCTL_VERSION */
+// DRM_IOCTL_VERSION
 static long drm_ioctl_version(void *arg) {
   struct drm_version *v = (struct drm_version *)arg;
   static const char driver_name[] = "virtio_gpu";
@@ -802,9 +802,9 @@ static long drm_ioctl_version(void *arg) {
   v->version_minor = 1;
   v->version_patchlevel = 0;
 
-  /* Second pass: copy driver name to user buffer.
-   * v->name is a user-space pointer (copied verbatim by sys_ioctl's
-   * copy_from_user). v->name_len is the buffer size libdrm allocated. */
+  // Second pass: copy driver name to user buffer.
+  // v->name is a user-space pointer (copied verbatim by sys_ioctl's
+  // copy_from_user). v->name_len is the buffer size libdrm allocated.
   if (v->name != NULL && v->name_len > 0) {
     size_t copy_len = (name_len < v->name_len - 1) ? name_len : v->name_len - 1;
     if (copy_to_user((void *)(uintptr_t)v->name, driver_name, copy_len))
@@ -822,9 +822,9 @@ static long drm_ioctl_version(void *arg) {
   return 0;
 }
 
-/* DRM_IOCTL_VIRTGPU_GETPARAM — return Venus runtime params.
- * drm_virtgpu_getparam.value is a user-space __u64 pointer; the kernel
- * writes the low 32 bits of the value and zeros the high 32 bits. */
+// DRM_IOCTL_VIRTGPU_GETPARAM — return Venus runtime params.
+// drm_virtgpu_getparam.value is a user-space __u64 pointer; the kernel
+// writes the low 32 bits of the value and zeros the high 32 bits.
 static long drm_ioctl_virtgpu_getparam(void *arg) {
   struct drm_virtgpu_getparam *p = (struct drm_virtgpu_getparam *)arg;
   uint32_t val = 0;
@@ -837,21 +837,21 @@ static long drm_ioctl_virtgpu_getparam(void *arg) {
     val = 1;
     break;
   case VIRTGPU_PARAM_RESOURCE_BLOB:
-    val = 0; /* blob path retired (Venus-only); virgl uses v1 RESOURCE_CREATE */
+    val = 0; // blob path retired (Venus-only); virgl uses v1 RESOURCE_CREATE
     break;
   case VIRTGPU_PARAM_HOST_VISIBLE:
-    val = 0; /* was a HOST3D blob property; blob path retired */
+    val = 0; // was a HOST3D blob property; blob path retired
     break;
   case VIRTGPU_PARAM_CONTEXT_INIT:
     val = 1;
     break;
   case VIRTGPU_PARAM_CROSS_DEVICE:
-    val = 0; /* not supported */
+    val = 0; // not supported
     break;
   case VIRTGPU_PARAM_SUPPORTED_CAPSET_IDs:
-    /* Bitmask: bit N advertises capset id N (bit1=VIRGL, bit2=VIRGL2).
-     * Built from whatever the host advertised; nothing is synthesized, so the
-     * mask is 0 when the host exposes no capsets (e.g. no virgl back-end). */
+    // Bitmask: bit N advertises capset id N (bit1=VIRGL, bit2=VIRGL2).
+    // Built from whatever the host advertised; nothing is synthesized, so the
+    // mask is 0 when the host exposes no capsets (e.g. no virgl back-end).
     val = 0;
     spin_lock(&virtio_gpu_backend->drm.capset_lock);
     for (uint32_t i = 0; i < virtio_gpu_backend->drm.num_capsets; i++)
@@ -865,8 +865,7 @@ static long drm_ioctl_virtgpu_getparam(void *arg) {
     break;
   }
 
-  /* value is a user-space uint64_t pointer; write low 32 bits + zero high 32.
-   */
+  // value is a user-space uint64_t pointer; write low 32 bits + zero high 32.
   uint32_t zero_hi = 0;
   if (copy_to_user((void *)(uintptr_t)p->value, &val, sizeof(val)))
     return -EFAULT;
@@ -878,21 +877,21 @@ static long drm_ioctl_virtgpu_getparam(void *arg) {
   return 0;
 }
 
-/* Forward declarations (plan1: ctx_id pool helpers, defined later). */
+// Forward declarations (plan1: ctx_id pool helpers, defined later).
 static uint32_t alloc_ctx_id(void);
 static void free_ctx_id(uint32_t id);
 
-/* virgl legacy (v1) helpers + capset probe, defined later. */
+// virgl legacy (v1) helpers + capset probe, defined later.
 static uint32_t alloc_virgl_handle(void);
 static void free_virgl_handle(uint32_t handle);
 static struct drm_virgl_resource *drm_find_virgl_resource(uint32_t handle);
 static bool virgl_capset_present(uint32_t capset_id);
 
-/* DRM_IOCTL_VIRTGPU_GET_CAPS — return cached capset payload. addr is a
- * user-space pointer; copy up to c->size bytes. Serves any host-cached capset
- * (virgl id=1/2 when the host advertises them). An unknown id returns -EINVAL:
- * the virgl winsys checks errno==EINVAL to fall back from capset 2 (VIRGL2) to
- * capset 1 (VIRGL), so -ENOENT would break that path. */
+// DRM_IOCTL_VIRTGPU_GET_CAPS — return cached capset payload. addr is a
+// user-space pointer; copy up to c->size bytes. Serves any host-cached capset
+// (virgl id=1/2 when the host advertises them). An unknown id returns -EINVAL:
+// the virgl winsys checks errno==EINVAL to fall back from capset 2 (VIRGL2) to
+// capset 1 (VIRGL), so -ENOENT would break that path.
 static long drm_ioctl_virtgpu_get_caps(void *arg) {
   struct drm_virtgpu_get_caps *c = (struct drm_virtgpu_get_caps *)arg;
 
@@ -918,8 +917,8 @@ static long drm_ioctl_virtgpu_get_caps(void *arg) {
   return 0;
 }
 
-/* DRM_IOCTL_VIRTGPU_CONTEXT_INIT — translate drm_virtgpu_context_set_param[]
- * into VIRTIO_GPU_CMD_CTX_CREATE. ctx_set_params is a user-space pointer. */
+// DRM_IOCTL_VIRTGPU_CONTEXT_INIT — translate drm_virtgpu_context_set_param[]
+// into VIRTIO_GPU_CMD_CTX_CREATE. ctx_set_params is a user-space pointer.
 static long drm_ioctl_virtgpu_context_init(void *arg, struct drm_file *df) {
   struct drm_virtgpu_context_init *ci = (struct drm_virtgpu_context_init *)arg;
 
@@ -951,14 +950,14 @@ static long drm_ioctl_virtgpu_context_init(void *arg, struct drm_file *df) {
       poll_rings_mask = (uint32_t)params[i].value;
       break;
     case VIRTGPU_CONTEXT_PARAM_DEBUG_NAME:
-      break; /* ignored */
+      break; // ignored
     }
   }
   kfree(params);
 
-  /* Accept any capset the host advertised (Venus 4, virgl 1/2). The virgl
-   * winsys only sets CAPSET_ID (num_params=1) and never NUM_RINGS, so default
-   * to a single ring in that case — EXECBUFFER then accepts ring_idx=0. */
+  // Accept any capset the host advertised (Venus 4, virgl 1/2). The virgl
+  // winsys only sets CAPSET_ID (num_params=1) and never NUM_RINGS, so default
+  // to a single ring in that case — EXECBUFFER then accepts ring_idx=0.
   if (!virgl_capset_present(capset_id))
     return -EINVAL;
   if (!have_num_rings)
@@ -1007,7 +1006,7 @@ static long drm_ioctl_virtgpu_context_init(void *arg, struct drm_file *df) {
 
   df->ring_fence_counters = kmalloc(num_rings * sizeof(uint64_t));
   if (!df->ring_fence_counters) {
-    /* rollback: destroy ctx on host + free id */
+    // rollback: destroy ctx on host + free id
     struct virtio_gpu_ctx_create destroy;
     __memset(&destroy, 0, sizeof(destroy));
     destroy.hdr.type = VIRTIO_GPU_CMD_CTX_DESTROY;
@@ -1025,19 +1024,19 @@ static long drm_ioctl_virtgpu_context_init(void *arg, struct drm_file *df) {
   return 0;
 }
 
-/* DRM_IOCTL_VIRTGPU_RESOURCE_CREATE — virgl legacy v1 path. The winsys passes
- * target/format/bind/dims/stride/size in and reads back res_handle (host id)
- * + bo_handle (new GEM). It never calls ATTACH_BACKING separately, so the
- * kernel allocates guest backing and attaches it to the host resource here.
- * The bo_handle→res_handle mapping is persisted in
- * virtio_gpu_backend->drm.virgl_res[] so later TRANSFER_TO/FROM_HOST and WAIT
- * (which pass only bo_handle) can resolve it. */
+// DRM_IOCTL_VIRTGPU_RESOURCE_CREATE — virgl legacy v1 path. The winsys passes
+// target/format/bind/dims/stride/size in and reads back res_handle (host id)
+// + bo_handle (new GEM). It never calls ATTACH_BACKING separately, so the
+// kernel allocates guest backing and attaches it to the host resource here.
+// The bo_handle→res_handle mapping is persisted in
+// virtio_gpu_backend->drm.virgl_res[] so later TRANSFER_TO/FROM_HOST and WAIT
+// (which pass only bo_handle) can resolve it.
 static long drm_ioctl_virtgpu_resource_create(void *arg, struct drm_file *df,
                                               struct file *file) {
   struct drm_virtgpu_resource_create *rc =
       (struct drm_virtgpu_resource_create *)arg;
 
-  if (rc->bo_handle != 0) /* winsys always passes 0 in */
+  if (rc->bo_handle != 0) // winsys always passes 0 in
     return -EINVAL;
   if (rc->size == 0 || rc->width == 0 || rc->height == 0)
     return -EINVAL;
@@ -1047,7 +1046,7 @@ static long drm_ioctl_virtgpu_resource_create(void *arg, struct drm_file *df,
   uint32_t handle = alloc_virgl_handle();
   if (handle == 0)
     return -ENOMEM;
-  uint32_t res_id = handle; /* host resource id == GEM handle */
+  uint32_t res_id = handle; // host resource id == GEM handle
 
   uint32_t npages = (rc->size + PAGE_SIZE - 1) / PAGE_SIZE;
   void *vaddr = bfc_alloc_page_data(npages);
@@ -1152,8 +1151,8 @@ drm_virgl_lookup_file(struct file *file, uint32_t handle,
   return resource;
 }
 
-/* DRM_IOCTL_VIRTGPU_RESOURCE_INFO — return res_handle/size/blob_mem.
- * virgl legacy (v1) resources only; handles live at/above VIRGL_HANDLE_BASE. */
+// DRM_IOCTL_VIRTGPU_RESOURCE_INFO — return res_handle/size/blob_mem.
+// virgl legacy (v1) resources only; handles live at/above VIRGL_HANDLE_BASE.
 static long drm_ioctl_virtgpu_resource_info(void *arg, struct file *file) {
   struct drm_virtgpu_resource_info *ri =
       (struct drm_virtgpu_resource_info *)arg;
@@ -1171,7 +1170,7 @@ static long drm_ioctl_virtgpu_resource_info(void *arg, struct file *file) {
   return 0;
 }
 
-/* DRM_IOCTL_VIRTGPU_MAP — return an mmap offset for a legacy virgl BO. */
+// DRM_IOCTL_VIRTGPU_MAP — return an mmap offset for a legacy virgl BO.
 static long drm_ioctl_virtgpu_map(void *arg, struct file *file) {
   struct drm_virtgpu_map *map = (struct drm_virtgpu_map *)arg;
   if (!map || !file)
@@ -1183,8 +1182,8 @@ static long drm_ioctl_virtgpu_map(void *arg, struct file *file) {
   return drm_core_gem_mmap_offset(file, map->handle, &map->offset);
 }
 
-/* Make a host resource visible to a virgl context before SUBMIT_3D refers to
- * it. Mesa supplies the required GEM handles in EXECBUFFER.bo_handles. */
+// Make a host resource visible to a virgl context before SUBMIT_3D refers to
+// it. Mesa supplies the required GEM handles in EXECBUFFER.bo_handles.
 static int drm_virgl_attach_resource(uint32_t handle, uint32_t ctx_id) {
   uint32_t bit = ctx_id - 1;
   uint32_t word = bit / 32;
@@ -1241,15 +1240,15 @@ static void drm_virgl_forget_context(uint32_t ctx_id) {
   spin_unlock(&virtio_gpu_backend->drm.virgl_lock);
 }
 
-/* Build + send a 3D host transfer (TO/FROM) for a virgl v1 resource. The
- * winsys passes only bo_handle; resolve to the host res_handle here. v1
- * transfers are not context-bound on the host (ctx_id=0); virglrenderer
- * reaches the guest backing via the resource id. */
+// Build + send a 3D host transfer (TO/FROM) for a virgl v1 resource. The
+// winsys passes only bo_handle; resolve to the host res_handle here. v1
+// transfers are not context-bound on the host (ctx_id=0); virglrenderer
+// reaches the guest backing via the resource id.
 static long virgl_transfer_host_3d(void *arg, uint32_t cmd_type,
                                    struct file *file) {
   struct drm_virtgpu_3d_transfer_to_host *t =
       (struct drm_virtgpu_3d_transfer_to_host *)arg;
-  /* drm_virtgpu_3d_transfer_from_host has an identical field layout. */
+  // drm_virtgpu_3d_transfer_from_host has an identical field layout.
 
   struct drm_gem_object *object = NULL;
   struct drm_virgl_resource *r =
@@ -1283,25 +1282,25 @@ static long virgl_transfer_host_3d(void *arg, uint32_t cmd_type,
   return 0;
 }
 
-/* DRM_IOCTL_VIRTGPU_TRANSFER_TO_HOST — upload guest backing → host resource. */
+// DRM_IOCTL_VIRTGPU_TRANSFER_TO_HOST — upload guest backing → host resource.
 static long drm_ioctl_virtgpu_transfer_to_host(void *arg, struct file *file) {
   return virgl_transfer_host_3d(arg, VIRTIO_GPU_CMD_TRANSFER_TO_HOST_3D, file);
 }
 
-/* DRM_IOCTL_VIRTGPU_TRANSFER_FROM_HOST — download host resource → guest
- * backing. */
+// DRM_IOCTL_VIRTGPU_TRANSFER_FROM_HOST — download host resource → guest
+// backing.
 static long drm_ioctl_virtgpu_transfer_from_host(void *arg, struct file *file) {
   return virgl_transfer_host_3d(arg, VIRTIO_GPU_CMD_TRANSFER_FROM_HOST_3D,
                                 file);
 }
 
-/* DRM_IOCTL_VIRTGPU_WAIT — virgl legacy busy/block query. `handle` is a GEM
- * bo_handle. v1 TRANSFERs are synchronous (send_cmd_3d blocks until the host
- * responds), so only in-flight EXECBUFFER (SUBMIT_3D) fences can make a
- * resource busy. Granularity is approximated to the owning context: a resource
- * is reported busy if any unsignaled fence for the current fd's context exists.
- * This is conservative (a different resource's submit may be in flight) but
- * never races — virgl only uses this to decide whether to stall. */
+// DRM_IOCTL_VIRTGPU_WAIT — virgl legacy busy/block query. `handle` is a GEM
+// bo_handle. v1 TRANSFERs are synchronous (send_cmd_3d blocks until the host
+// responds), so only in-flight EXECBUFFER (SUBMIT_3D) fences can make a
+// resource busy. Granularity is approximated to the owning context: a resource
+// is reported busy if any unsignaled fence for the current fd's context exists.
+// This is conservative (a different resource's submit may be in flight) but
+// never races — virgl only uses this to decide whether to stall.
 static long drm_ioctl_virtgpu_3d_wait(void *arg, struct drm_file *df,
                                       struct file *file) {
   struct drm_virtgpu_3d_wait *w = (struct drm_virtgpu_3d_wait *)arg;
@@ -1358,8 +1357,8 @@ static long drm_ioctl_virtgpu_3d_wait(void *arg, struct drm_file *df,
       return -EBUSY;
     }
 
-    /* Completion may reclaim the fence between the completed-id probe and
-     * table scan. Retry so the completed-id check observes that completion. */
+    // Completion may reclaim the fence between the completed-id probe and
+    // table scan. Retry so the completed-id check observes that completion.
     if (!fence)
       continue;
 
@@ -1368,9 +1367,9 @@ static long drm_ioctl_virtgpu_3d_wait(void *arg, struct drm_file *df,
   }
 }
 
-/* DRM_IOCTL_VIRTGPU_EXECBUFFER — submit a 3D command stream on a ring.
- * Out-fence: optional sync_file fd (FENCE_FD_OUT) signaled when the host
- * completes this submission. */
+// DRM_IOCTL_VIRTGPU_EXECBUFFER — submit a 3D command stream on a ring.
+// Out-fence: optional sync_file fd (FENCE_FD_OUT) signaled when the host
+// completes this submission.
 static long drm_ioctl_virtgpu_execbuffer(void *arg, struct drm_file *df,
                                          struct file *file) {
   struct drm_virtgpu_execbuffer *eb = (struct drm_virtgpu_execbuffer *)arg;
@@ -1382,7 +1381,7 @@ static long drm_ioctl_virtgpu_execbuffer(void *arg, struct drm_file *df,
   if (eb->ring_idx >= df->num_rings)
     return -EINVAL;
   if (eb->flags & VIRTGPU_EXECBUF_FENCE_FD_IN)
-    return -EINVAL; /* in-fence fd not supported */
+    return -EINVAL; // in-fence fd not supported
 
   if (eb->num_bo_handles > MAX_VIRGL_RESOURCES)
     return -EINVAL;
@@ -1409,8 +1408,8 @@ static long drm_ioctl_virtgpu_execbuffer(void *arg, struct drm_file *df,
       return -EFAULT;
     }
 
-    /* Reject handles which aren't present in this DRM file before changing
-     * host context state. This also excludes non-virgl GEM objects. */
+    // Reject handles which aren't present in this DRM file before changing
+    // host context state. This also excludes non-virgl GEM objects.
     for (uint32_t i = 0; i < eb->num_bo_handles; i++) {
       if (!drm_virgl_lookup_file(file, bo_handles[i], &bo_objects[i])) {
         rc = -ENOENT;
@@ -1428,7 +1427,7 @@ static long drm_ioctl_virtgpu_execbuffer(void *arg, struct drm_file *df,
 
   uint64_t fence_id = ++df->ring_fence_counters[eb->ring_idx];
 
-  /* Copy user command stream into the SUBMIT_3D buffer. */
+  // Copy user command stream into the SUBMIT_3D buffer.
   void *cmd_data = kmalloc(eb->size);
   if (!cmd_data)
     goto err_free_handles;
@@ -1456,7 +1455,7 @@ static long drm_ioctl_virtgpu_execbuffer(void *arg, struct drm_file *df,
   __memcpy((char *)submit_buf + sizeof(*sh), cmd_data, eb->size);
   kfree(cmd_data);
 
-  /* Create fence BEFORE submit so the ISR can find it on completion. */
+  // Create fence BEFORE submit so the ISR can find it on completion.
   struct drm_fence *fence =
       virtio_drm_fence_create(df->ctx_id, eb->ring_idx, fence_id);
   if (!fence) {
@@ -1477,13 +1476,13 @@ static long drm_ioctl_virtgpu_execbuffer(void *arg, struct drm_file *df,
   }
   bo_objects = NULL;
 
-  /* Reserve a reference for the async completion before publishing the
-   * descriptor. The creator's reference remains live until out-fence setup is
-   * finished, even if the host completes immediately on another CPU. */
+  // Reserve a reference for the async completion before publishing the
+  // descriptor. The creator's reference remains live until out-fence setup is
+  // finished, even if the host completes immediately on another CPU.
   drm_fence_get(fence);
 
-  /* Submit async: send_cmd_3d_async copies submit_buf/resp into heap nodes
-   * it owns, so freeing submit_buf here is safe. */
+  // Submit async: send_cmd_3d_async copies submit_buf/resp into heap nodes
+  // it owns, so freeing submit_buf here is safe.
   struct virtio_gpu_ctrl_hdr_response resp_template;
   __memset(&resp_template, 0, sizeof(resp_template));
   rc = virtio_gpu_send_cmd_3d_async(
@@ -1493,7 +1492,7 @@ static long drm_ioctl_virtgpu_execbuffer(void *arg, struct drm_file *df,
   if (rc) {
     virtio_drm_fence_remove(fence);
     drm_fence_signal(fence);
-    drm_fence_put(fence); /* unused async-completion reference */
+    drm_fence_put(fence); // unused async-completion reference
     drm_fence_put(fence);
     goto err_free_handles;
   }
@@ -1513,20 +1512,20 @@ static long drm_ioctl_virtgpu_execbuffer(void *arg, struct drm_file *df,
   kfree(bo_handles);
   bo_handles = NULL;
 
-  /* Out-fence sync_file fd: install a fd bound to this fence (takes a ref). */
+  // Out-fence sync_file fd: install a fd bound to this fence (takes a ref).
   if (eb->flags & VIRTGPU_EXECBUF_FENCE_FD_OUT) {
     int fd = drm_fence_install_sync_file(fence, current_task);
     if (fd < 0) {
-      /* fence still valid and will signal; just no fd. Report error. */
-      drm_fence_put(fence); /* creator reference */
+      // fence still valid and will signal; just no fd. Report error.
+      drm_fence_put(fence); // creator reference
       return fd;
     }
     eb->fence_fd = fd;
   }
 
-  /* The ISR owns the async-completion reference; an optional sync_file owns
-   * another. Drop the creator reference now that fd installation cannot race
-   * completion-driven reclamation. */
+  // The ISR owns the async-completion reference; an optional sync_file owns
+  // another. Drop the creator reference now that fd installation cannot race
+  // completion-driven reclamation.
   drm_fence_put(fence);
 
   printk(LOG_DEBUG, "drm: EXECBUFFER ring=%u fence_id=%llu size=%u -> fd=%d\n",
@@ -1541,7 +1540,7 @@ err_free_handles:
   return rc;
 }
 
-/* DRM_IOCTL_GET_CAP */
+// DRM_IOCTL_GET_CAP
 static long drm_ioctl_get_cap(void *arg) {
   struct drm_get_cap *c = (struct drm_get_cap *)arg;
   switch (c->capability) {
@@ -1560,8 +1559,8 @@ static long drm_ioctl_get_cap(void *arg) {
   case DRM_CAP_PRIME:
     c->value = DRM_PRIME_CAP_IMPORT | DRM_PRIME_CAP_EXPORT;
     return 0;
-  case 0x0D:      /* DRM_CAP_ATOMIC */
-    c->value = 0; /* force legacy path */
+  case 0x0D:      // DRM_CAP_ATOMIC
+    c->value = 0; // force legacy path
     return 0;
   case DRM_CAP_TIMESTAMP_MONOTONIC:
     c->value = 1;
@@ -1571,7 +1570,7 @@ static long drm_ioctl_get_cap(void *arg) {
     return 0;
   case 0x10:
     c->value = 0;
-    return 0; /* DRM_CAP_ADDFB2_MODIFIERS */
+    return 0; // DRM_CAP_ADDFB2_MODIFIERS
   case DRM_CAP_CRTC_IN_VBLANK_EVENT:
     c->value = 1;
     return 0;
@@ -1580,15 +1579,15 @@ static long drm_ioctl_get_cap(void *arg) {
   }
 }
 
-/* DRM_IOCTL_SET_CLIENT_CAP */
-/* DROP_MASTER 清理 — 重置 master 相关状态 */
+// DRM_IOCTL_SET_CLIENT_CAP
+// DROP_MASTER cleanup — reset master-related state
 static void drm_master_cleanup(void) {
-  /* 1. Clear current FB (unbind CRTC scanout) */
+  // 1. Clear current FB (unbind CRTC scanout)
   if (virtio_gpu_backend->drm.current_fb_id != 0) {
     virtio_gpu_backend->drm.current_fb_id = 0;
   }
 
-  /* Disable cursor. Per-file events are cancelled by drm_core first. */
+  // Disable cursor. Per-file events are cancelled by drm_core first.
   virtio_gpu_backend->drm.cursor.enabled = false;
   virtio_gpu_backend->drm.cursor.dirty = false;
 }
@@ -1598,7 +1597,7 @@ static void drm_master_drop(void *driver_private) {
   drm_master_cleanup();
 }
 
-/* ===== EDID generation (Phase C) ===== */
+// ===== EDID generation (Phase C) =====
 
 struct edid_block {
   uint8_t header[8];
@@ -1652,7 +1651,7 @@ static void drm_generate_edid(uint8_t *buf, size_t bufsz, uint32_t width,
   struct edid_block *e = (struct edid_block *)buf;
   __memset(e, 0, 128);
 
-  /* 1. Header */
+  // 1. Header
   e->header[0] = 0x00;
   e->header[1] = 0xFF;
   e->header[2] = 0xFF;
@@ -1662,15 +1661,15 @@ static void drm_generate_edid(uint8_t *buf, size_t bufsz, uint32_t width,
   e->header[6] = 0xFF;
   e->header[7] = 0x00;
 
-  /* 2. Manufacturer: "VBO" (close enough to VirtualBox PNP) */
+  // 2. Manufacturer: "VBO" (close enough to VirtualBox PNP)
   e->id_manufacturer = 0x0914;
   e->id_product_code = 0x0001;
   e->edid_version = 1;
   e->edid_revision = 3;
-  e->video_input_def = 0x80; /* digital */
-  e->features = 0x06;        /* RGB, preferred timing mode */
+  e->video_input_def = 0x80; // digital
+  e->features = 0x06;        // RGB, preferred timing mode
 
-  /* 3. Detailed Timing Descriptor (Descriptor #1) */
+  // 3. Detailed Timing Descriptor (Descriptor #1)
   uint32_t total_h = width + 160;
   uint32_t total_v = height + 50;
   uint32_t clock_khz = total_h * total_v * 60 / 1000;
@@ -1713,7 +1712,7 @@ static void drm_generate_edid(uint8_t *buf, size_t bufsz, uint32_t width,
 
   e->detailed_timings[0].flags = 0x00;
 
-  /* 4. Descriptor #2: Monitor name ("Virtual OS") */
+  // 4. Descriptor #2: Monitor name ("Virtual OS")
   uint8_t *desc2 = (uint8_t *)&e->detailed_timings[1];
   desc2[0] = desc2[1] = desc2[2] = 0x00;
   desc2[3] = 0xFC;
@@ -1721,7 +1720,7 @@ static void drm_generate_edid(uint8_t *buf, size_t bufsz, uint32_t width,
   for (int i = 0; i < 13; i++)
     desc2[4 + i] = (i < (int)sizeof(vname) - 1) ? vname[i] : ' ';
 
-  /* 5. Descriptor #3: Monitor range limits */
+  // 5. Descriptor #3: Monitor range limits
   uint8_t *desc3 = (uint8_t *)&e->detailed_timings[2];
   desc3[0] = desc3[1] = desc3[2] = 0x00;
   desc3[3] = 0xFD;
@@ -1731,7 +1730,7 @@ static void drm_generate_edid(uint8_t *buf, size_t bufsz, uint32_t width,
   desc3[7] = 80;
   desc3[8] = 100;
 
-  /* 6. Descriptor #4: Serial number placeholder */
+  // 6. Descriptor #4: Serial number placeholder
   uint8_t *desc4 = (uint8_t *)&e->detailed_timings[3];
   desc4[0] = desc4[1] = desc4[2] = 0x00;
   desc4[3] = 0xFF;
@@ -1739,15 +1738,15 @@ static void drm_generate_edid(uint8_t *buf, size_t bufsz, uint32_t width,
   for (int i = 0; i < 13; i++)
     desc4[4 + i] = (i < (int)sizeof(serial) - 1) ? serial[i] : ' ';
 
-  /* 7. Checksum */
+  // 7. Checksum
   uint8_t sum = 0;
   for (int i = 0; i < 127; i++)
     sum += buf[i];
   buf[127] = (uint8_t)(256 - sum);
 }
 
-/* Fill m->name with "<w>x<h>" (no refresh suffix; buffer is
- * DRM_DISPLAY_INFO_LEN). */
+// Fill m->name with "<w>x<h>" (no refresh suffix; buffer is
+// DRM_DISPLAY_INFO_LEN).
 static void drm_mode_fill_name(struct drm_mode_modeinfo *m) {
   uint32_t w = virtio_gpu_backend->drm.fb_width,
            h = virtio_gpu_backend->drm.fb_height;
@@ -1755,7 +1754,7 @@ static void drm_mode_fill_name(struct drm_mode_modeinfo *m) {
   int n = 0;
   char tmp[10];
   int i;
-  /* width */
+  // width
   i = 0;
   if (w == 0)
     tmp[i++] = '0';
@@ -1766,7 +1765,7 @@ static void drm_mode_fill_name(struct drm_mode_modeinfo *m) {
   while (i)
     buf[n++] = tmp[--i];
   buf[n++] = 'x';
-  /* height */
+  // height
   i = 0;
   if (h == 0)
     tmp[i++] = '0';
@@ -1781,7 +1780,7 @@ static void drm_mode_fill_name(struct drm_mode_modeinfo *m) {
   __memcpy(m->name, buf, n + 1);
 }
 
-/* DRM_IOCTL_MODE_GETRESOURCES */
+// DRM_IOCTL_MODE_GETRESOURCES
 static long drm_ioctl_getresources(void *arg) {
   struct drm_mode_card_res *r = (struct drm_mode_card_res *)arg;
   printk(LOG_DEBUG, "drm_getresources: fb_w=%u fb_h=%u\n",
@@ -1794,7 +1793,7 @@ static long drm_ioctl_getresources(void *arg) {
   r->min_height = virtio_gpu_backend->drm.fb_height;
   r->max_height = virtio_gpu_backend->drm.fb_height;
 
-  /* Fill ID buffers (second ioctl call, after libdrm allocates buffers) */
+  // Fill ID buffers (second ioctl call, after libdrm allocates buffers)
   if (r->crtc_id_ptr) {
     uint32_t id = DRM_CRTC_ID;
     if (copy_to_user((void *)(uintptr_t)r->crtc_id_ptr, &id, sizeof(id)))
@@ -1811,7 +1810,7 @@ static long drm_ioctl_getresources(void *arg) {
       return -EFAULT;
   }
 
-  /* count_fbs + fb_id_ptr fill — B-1 fix */
+  // count_fbs + fb_id_ptr fill — B-1 fix
   spin_lock(&virtio_gpu_backend->drm.fb_lock);
 
   int count = 0;
@@ -1821,7 +1820,7 @@ static long drm_ioctl_getresources(void *arg) {
   }
   r->count_fbs = count;
 
-  /* Fill fb ID buffer (second ioctl call) */
+  // Fill fb ID buffer (second ioctl call)
   if (count > 0 && r->fb_id_ptr) {
     uint32_t *fb_buf = (uint32_t *)kmalloc(count * sizeof(uint32_t));
     if (!fb_buf) {
@@ -1847,7 +1846,7 @@ static long drm_ioctl_getresources(void *arg) {
   return 0;
 }
 
-/* DRM_IOCTL_MODE_GETCRTC */
+// DRM_IOCTL_MODE_GETCRTC
 static long drm_ioctl_getcrtc(void *arg) {
   struct drm_mode_crtc *c = (struct drm_mode_crtc *)arg;
   if (c->crtc_id != DRM_CRTC_ID)
@@ -1875,7 +1874,7 @@ static long drm_ioctl_getcrtc(void *arg) {
   return 0;
 }
 
-/* DRM_IOCTL_MODE_SETCRTC */
+// DRM_IOCTL_MODE_SETCRTC
 static long drm_ioctl_setcrtc(void *arg) {
   struct drm_mode_crtc *c = (struct drm_mode_crtc *)arg;
   if (c->crtc_id != DRM_CRTC_ID)
@@ -1903,14 +1902,14 @@ static long drm_ioctl_setcrtc(void *arg) {
   return 0;
 }
 
-/* DRM_IOCTL_MODE_GETCONNECTOR */
+// DRM_IOCTL_MODE_GETCONNECTOR
 static long drm_ioctl_getconnector(void *arg) {
   struct drm_mode_get_connector *c = (struct drm_mode_get_connector *)arg;
   if (c->connector_id != DRM_CONNECTOR_ID)
     return -EINVAL;
   c->connector_type = DRM_MODE_CONNECTOR_VIRTUAL;
   c->connector_type_id = 1;
-  c->connection = 1; /* drm_connector_status_connected */
+  c->connection = 1; // drm_connector_status_connected
   c->mm_width = 0;
   c->mm_height = 0;
   c->subpixel = 0;
@@ -1934,10 +1933,10 @@ static long drm_ioctl_getconnector(void *arg) {
       return -EFAULT;
   }
 
-  /* Fill mode data buffer (second ioctl call).
-     Always report the default/configured mode as the connector's native
-     capability, regardless of whether the CRTC has been set via SETCRTC
-     yet. */
+  // Fill mode data buffer (second ioctl call).
+  // Always report the default/configured mode as the connector's native
+  // capability, regardless of whether the CRTC has been set via SETCRTC
+  // yet.
   if (c->modes_ptr) {
     struct drm_mode_modeinfo km;
     __memset(&km, 0, sizeof(km));
@@ -1957,7 +1956,7 @@ static long drm_ioctl_getconnector(void *arg) {
       return -EFAULT;
   }
 
-  /* Fill encoder ID buffer (second ioctl call) */
+  // Fill encoder ID buffer (second ioctl call)
   if (c->encoders_ptr) {
     uint32_t eid = DRM_ENCODER_ID;
     if (copy_to_user((void *)(uintptr_t)c->encoders_ptr, &eid, sizeof(eid)))
@@ -1966,7 +1965,7 @@ static long drm_ioctl_getconnector(void *arg) {
   return 0;
 }
 
-/* DRM_IOCTL_MODE_GETENCODER */
+// DRM_IOCTL_MODE_GETENCODER
 static long drm_ioctl_getencoder(void *arg) {
   struct drm_mode_get_encoder *e = (struct drm_mode_get_encoder *)arg;
   if (e->encoder_id != DRM_ENCODER_ID)
@@ -1978,7 +1977,7 @@ static long drm_ioctl_getencoder(void *arg) {
   return 0;
 }
 
-/* DRM_IOCTL_MODE_GETPLANERESOURCES */
+// DRM_IOCTL_MODE_GETPLANERESOURCES
 static long drm_ioctl_getplaneres(void *arg) {
   struct drm_mode_get_plane_res *p = (struct drm_mode_get_plane_res *)arg;
   p->count_planes = 1;
@@ -1990,7 +1989,7 @@ static long drm_ioctl_getplaneres(void *arg) {
   return 0;
 }
 
-/* DRM_IOCTL_MODE_GETPLANE */
+// DRM_IOCTL_MODE_GETPLANE
 static long drm_ioctl_getplane(void *arg) {
   struct drm_mode_get_plane *p = (struct drm_mode_get_plane *)arg;
   if (p->plane_id != DRM_PLANE_ID)
@@ -2013,7 +2012,7 @@ static long drm_ioctl_getplane(void *arg) {
   return 0;
 }
 
-/* DRM_IOCTL_MODE_CREATE_DUMB */
+// DRM_IOCTL_MODE_CREATE_DUMB
 static long drm_ioctl_create_dumb(void *arg, struct file *file) {
   struct drm_mode_create_dumb *d = (struct drm_mode_create_dumb *)arg;
   if (d->width != virtio_gpu_backend->drm.fb_width ||
@@ -2046,8 +2045,8 @@ static long drm_ioctl_create_dumb(void *arg, struct file *file) {
     spin_unlock(&virtio_gpu_backend->drm.dumb_lock);
     return -ENOMEM;
   }
-  /* PRIME mappings expose the last whole page, so keep its logical EOF tail
-   * deterministic even when pitch * height is not page aligned. */
+  // PRIME mappings expose the last whole page, so keep its logical EOF tail
+  // deterministic even when pitch * height is not page aligned.
   __memset(buf->kernel_vaddr, 0, (size_t)npages * PAGE_SIZE);
   buf->guest_phys = (uint64_t)PHY_ADDR((uintptr_t)buf->kernel_vaddr);
   printk(LOG_INFO, "drm gem alloc dumb handle=%d vaddr=%p pages=%u\n", handle,
@@ -2101,21 +2100,21 @@ static long drm_ioctl_create_dumb(void *arg, struct file *file) {
   return 0;
 }
 
-/* DRM_IOCTL_MODE_MAP_DUMB */
+// DRM_IOCTL_MODE_MAP_DUMB
 static long drm_ioctl_map_dumb(void *arg, struct file *file) {
   struct drm_mode_map_dumb *m = (struct drm_mode_map_dumb *)arg;
   return drm_core_gem_mmap_offset(file, m->handle, &m->offset);
 }
 
-/* DRM_IOCTL_MODE_DESTROY_DUMB */
+// DRM_IOCTL_MODE_DESTROY_DUMB
 static long drm_ioctl_destroy_dumb(void *arg, struct file *file) {
   struct drm_mode_destroy_dumb *d = (struct drm_mode_destroy_dumb *)arg;
   return drm_core_gem_handle_delete(file, d->handle);
 }
 
-/* DRM_IOCTL_GEM_CLOSE
- * Called by Mesa after ADDFB2 to release the handle reference.
- * In this simplified model, same semantics as DESTROY_DUMB. */
+// DRM_IOCTL_GEM_CLOSE
+// Called by Mesa after ADDFB2 to release the handle reference.
+// In this simplified model, same semantics as DESTROY_DUMB.
 static long drm_ioctl_gem_close(void *arg, struct file *file) {
   struct drm_gem_close *c = (struct drm_gem_close *)arg;
   if (!c)
@@ -2124,7 +2123,7 @@ static long drm_ioctl_gem_close(void *arg, struct file *file) {
   return drm_core_gem_handle_delete(file, c->handle);
 }
 
-/* DRM_IOCTL_MODE_ADDFB */
+// DRM_IOCTL_MODE_ADDFB
 static long drm_ioctl_addfb(void *arg, struct drm_file *cf, struct file *file) {
   struct drm_mode_fb_cmd *f = (struct drm_mode_fb_cmd *)arg;
   struct drm_gem_object *gem = drm_core_gem_object_lookup(file, f->handle);
@@ -2155,7 +2154,7 @@ static long drm_ioctl_addfb(void *arg, struct drm_file *cf, struct file *file) {
 
   f->fb_id = (uint32_t)fb_id;
 
-  /* Track in per-fd list (Phase C) */
+  // Track in per-fd list (Phase C)
   if (cf && cf->created_fb_count < MAX_FRAMEBUFFERS) {
     cf->created_fb_ids[cf->created_fb_count++] = (int)fb_id;
   }
@@ -2163,7 +2162,7 @@ static long drm_ioctl_addfb(void *arg, struct drm_file *cf, struct file *file) {
   return 0;
 }
 
-/* Helper: bpp from DRM pixel format */
+// Helper: bpp from DRM pixel format
 static int bpp_from_format(uint32_t pixel_format) {
   switch (pixel_format) {
   case DRM_FORMAT_XRGB8888:
@@ -2178,7 +2177,7 @@ static int bpp_from_format(uint32_t pixel_format) {
   }
 }
 
-/* DRM_IOCTL_MODE_ADDFB2 */
+// DRM_IOCTL_MODE_ADDFB2
 static long drm_ioctl_addfb2(void *arg, struct drm_file *cf,
                              struct file *file) {
   struct drm_mode_fb_cmd2 *c = (struct drm_mode_fb_cmd2 *)arg;
@@ -2192,12 +2191,12 @@ static long drm_ioctl_addfb2(void *arg, struct drm_file *cf,
   if (!c->handles[0] || c->offsets[0] != 0 || c->modifier[0] != 0)
     return -EINVAL;
 
-  /* Validate pixel format */
+  // Validate pixel format
   int bpp = bpp_from_format(c->pixel_format);
   if (bpp == 0)
     return -EINVAL;
 
-  /* Validate flags (no modifiers currently) */
+  // Validate flags (no modifiers currently)
   if (c->flags != 0)
     return -EINVAL;
 
@@ -2240,7 +2239,7 @@ static long drm_ioctl_addfb2(void *arg, struct drm_file *cf,
     return -EINVAL;
   }
 
-  /* Allocate fb_id (shared with ADDFB) */
+  // Allocate fb_id (shared with ADDFB)
   spin_lock(&virtio_gpu_backend->drm.fb_lock);
   int fb_id = drm_alloc_fb_id();
   if (fb_id < 0) {
@@ -2289,7 +2288,7 @@ static long drm_ioctl_addfb2(void *arg, struct drm_file *cf,
 
   c->fb_id = (uint32_t)fb_id;
 
-  /* Track in per-fd list (Phase C) */
+  // Track in per-fd list (Phase C)
   {
     if (cf && cf->created_fb_count < MAX_FRAMEBUFFERS) {
       cf->created_fb_ids[cf->created_fb_count++] = (int)fb_id;
@@ -2299,7 +2298,7 @@ static long drm_ioctl_addfb2(void *arg, struct drm_file *cf,
   return 0;
 }
 
-/* DRM_IOCTL_MODE_GETFB (old-style) */
+// DRM_IOCTL_MODE_GETFB (old-style)
 static long drm_ioctl_getfb(void *arg) {
   struct drm_mode_fb_cmd *f = (struct drm_mode_fb_cmd *)arg;
   if (!f)
@@ -2318,7 +2317,7 @@ static long drm_ioctl_getfb(void *arg) {
   return 0;
 }
 
-/* DRM_IOCTL_MODE_RMFB */
+// DRM_IOCTL_MODE_RMFB
 static long drm_ioctl_rmfb(void *arg) {
   uint32_t fb_id = *(uint32_t *)arg;
   spin_lock(&virtio_gpu_backend->drm.fb_lock);
@@ -2341,7 +2340,7 @@ static long drm_ioctl_rmfb(void *arg) {
   return 0;
 }
 
-/* ===== Cursor overlay (Phase C) ===== */
+// ===== Cursor overlay (Phase C) =====
 static void drm_cursor_overlay(struct drm_dumb_buffer *target) {
   if (!virtio_gpu_backend->drm.cursor.dirty ||
       !virtio_gpu_backend->drm.cursor.enabled)
@@ -2366,11 +2365,11 @@ static void drm_cursor_overlay(struct drm_dumb_buffer *target) {
           virtio_gpu_backend->drm.cursor.buffer[cy * CURSOR_WIDTH + cx];
       uint8_t a = (cpixel >> 24) & 0xFF;
       if (a == 0)
-        continue; /* fully transparent */
+        continue; // fully transparent
       if (a == 255) {
-        fb[fy * fb_w + fx] = cpixel; /* opaque: replace */
+        fb[fy * fb_w + fx] = cpixel; // opaque: replace
       } else {
-        /* alpha blend */
+        // alpha blend
         uint32_t *dst = &fb[fy * fb_w + fx];
         uint32_t bg = *dst;
         uint8_t r = ((cpixel >> 16) & 0xFF) * a / 255 +
@@ -2386,7 +2385,7 @@ static void drm_cursor_overlay(struct drm_dumb_buffer *target) {
   virtio_gpu_backend->drm.cursor.dirty = false;
 }
 
-/* DRM_IOCTL_MODE_CURSOR2 */
+// DRM_IOCTL_MODE_CURSOR2
 static long drm_ioctl_cursor2(void *arg) {
   struct drm_mode_cursor2 *c = (struct drm_mode_cursor2 *)arg;
   if (!c)
@@ -2401,8 +2400,8 @@ static long drm_ioctl_cursor2(void *arg) {
       virtio_gpu_backend->drm.cursor.dirty = true;
       return 0;
     }
-    /* Set cursor bitmap: c->handle is a dumb buffer handle containing cursor
-     * image data */
+    // Set cursor bitmap: c->handle is a dumb buffer handle containing cursor
+    // image data
     spin_lock(&virtio_gpu_backend->drm.dumb_lock);
     struct drm_dumb_buffer *d = drm_find_dumb((int)c->handle);
     if (!d || d->size < CURSOR_SIZE) {
@@ -2428,7 +2427,7 @@ static long drm_ioctl_cursor2(void *arg) {
   }
 }
 
-/* Legacy cursor ioctl has the same fields as CURSOR2 except for hotspots. */
+// Legacy cursor ioctl has the same fields as CURSOR2 except for hotspots.
 static long drm_ioctl_cursor(void *arg) {
   struct drm_mode_cursor *c = (struct drm_mode_cursor *)arg;
   if (!c)
@@ -2448,7 +2447,7 @@ static long drm_ioctl_cursor(void *arg) {
   return drm_ioctl_cursor2(&c2);
 }
 
-/* DRM_IOCTL_MODE_PAGE_FLIP */
+// DRM_IOCTL_MODE_PAGE_FLIP
 static long drm_ioctl_page_flip(struct file *file, void *arg) {
   struct drm_mode_crtc_page_flip *p = (struct drm_mode_crtc_page_flip *)arg;
   if (p->crtc_id != DRM_CRTC_ID)
@@ -2508,13 +2507,13 @@ void virtio_gpu_poll(void) {
       !virtio_gpu_backend->event_wq)
     return;
 
-  /* timer_poll_hook runs in hard-IRQ context; file_mutex may sleep. A single
-   * work item coalesces ticks while queued/running and performs the scan from
-   * a kthread where taking the mutex is legal. */
+  // timer_poll_hook runs in hard-IRQ context; file_mutex may sleep. A single
+  // work item coalesces ticks while queued/running and performs the scan from
+  // a kthread where taking the mutex is legal.
   queue_work(virtio_gpu_backend->event_wq, &virtio_gpu_backend->event_work);
 }
 
-/* DRM_IOCTL_MODE_DIRTYFB */
+// DRM_IOCTL_MODE_DIRTYFB
 static long drm_ioctl_dirtyfb(void *arg) {
   struct drm_mode_fb_dirty_cmd *c = (struct drm_mode_fb_dirty_cmd *)arg;
   struct drm_framebuffer *fb = drm_find_fb((int)c->fb_id);
@@ -2540,7 +2539,7 @@ static long drm_ioctl_dirtyfb(void *arg) {
   return 0;
 }
 
-/* Main DRM ioctl dispatcher */
+// Main DRM ioctl dispatcher
 static long drm_ioctl_file(xtask *proc, struct file *file, uint32_t cmd,
                            void *arg) {
   (void)proc;
@@ -2594,7 +2593,7 @@ static long drm_ioctl_file(xtask *proc, struct file *file, uint32_t cmd,
   case DRM_IOCTL_GET_CAP:
     return drm_ioctl_get_cap(arg);
   case DRM_IOCTL_SET_CLIENT_CAP:
-    return -ENOTTY; /* handled by drm_core's common ioctl table */
+    return -ENOTTY; // handled by drm_core's common ioctl table
   case DRM_IOCTL_SET_MASTER:
     return -ENOTTY;
   case DRM_IOCTL_DROP_MASTER:
@@ -2652,7 +2651,7 @@ static long drm_ioctl_file(xtask *proc, struct file *file, uint32_t cmd,
   case DRM_IOCTL_MODE_OBJ_GETPROPERTIES:
     return -ENOTTY;
   case DRM_IOCTL_MODE_CREATE_LEASE:
-    /* Empty leases are optional. wlroots falls back to reopening the node. */
+    // Empty leases are optional. wlroots falls back to reopening the node.
     return -EOPNOTSUPP;
   case DRM_IOCTL_PRIME_HANDLE_TO_FD:
     return -ENOTTY;
@@ -2664,7 +2663,7 @@ static long drm_ioctl_file(xtask *proc, struct file *file, uint32_t cmd,
   }
 }
 
-/* ctx_id pool: ctx_id 0 is reserved ("no context"), ids 1..MAX_CTX_IDS. */
+// ctx_id pool: ctx_id 0 is reserved ("no context"), ids 1..MAX_CTX_IDS.
 static uint32_t alloc_ctx_id(void) {
   spin_lock(&virtio_gpu_backend->drm.ctx_id_lock);
   for (uint32_t i = 0; i < MAX_CTX_IDS; i++) {
@@ -2687,9 +2686,9 @@ static void free_ctx_id(uint32_t id) {
   spin_unlock(&virtio_gpu_backend->drm.ctx_id_lock);
 }
 
-/* blob handle: monotonic 1-based; slot reuse keyed by bo_handle. */
-/* Virgl v1 handles mirror table indices. Probe from the last allocation so
- * GEM_CLOSE slots are reusable instead of permanently exhausting the pool. */
+// blob handle: monotonic 1-based; slot reuse keyed by bo_handle.
+// Virgl v1 handles mirror table indices. Probe from the last allocation so
+// GEM_CLOSE slots are reusable instead of permanently exhausting the pool.
 static uint32_t alloc_virgl_handle(void) {
   spin_lock(&virtio_gpu_backend->drm.virgl_lock);
   uint32_t start =
@@ -2701,7 +2700,7 @@ static uint32_t alloc_virgl_handle(void) {
       continue;
 
     uint32_t h = VIRGL_HANDLE_BASE + index;
-    r->bo_handle = h; /* reserve the slot until resource creation completes */
+    r->bo_handle = h; // reserve the slot until resource creation completes
     virtio_gpu_backend->drm.next_virgl_handle =
         VIRGL_HANDLE_BASE + ((index + 1) % MAX_VIRGL_RESOURCES);
     spin_unlock(&virtio_gpu_backend->drm.virgl_lock);
@@ -2731,7 +2730,7 @@ static void free_virgl_handle(uint32_t handle) {
   __memset(r, 0, sizeof(*r));
 }
 
-/* True if capset_id was cached from the host. */
+// True if capset_id was cached from the host.
 static bool virgl_capset_present(uint32_t capset_id) {
   bool found = false;
   spin_lock(&virtio_gpu_backend->drm.capset_lock);
@@ -2745,7 +2744,7 @@ static bool virgl_capset_present(uint32_t capset_id) {
   return found;
 }
 
-/* ===== DRM device ops ===== */
+// ===== DRM device ops =====
 static int drm_files_grow_locked(void) {
   if (virtio_gpu_backend->files_capacity >= DRM_FD_MAX_CAPACITY)
     return -ENFILE;
@@ -2822,13 +2821,13 @@ static int drm_open_file(xtask *proc, struct file *file) {
   return drm_open_file_common(proc, file, false);
 }
 
-/* Render node open shares the backend file table with the primary node, but
- * marks is_render. Render fds reject SET_MASTER/GET_MAGIC/AUTH_MAGIC. */
+// Render node open shares the backend file table with the primary node, but
+// marks is_render. Render fds reject SET_MASTER/GET_MAGIC/AUTH_MAGIC.
 static int drm_render_open_file(xtask *proc, struct file *file) {
   return drm_open_file_common(proc, file, true);
 }
 
-/* Helper: release a framebuffer (refcount decrement + cleanup) */
+// Helper: release a framebuffer (refcount decrement + cleanup)
 static void drm_release_fb(int fb_id, struct drm_file *owner) {
   spin_lock(&virtio_gpu_backend->drm.fb_lock);
   struct drm_framebuffer *fb = drm_find_fb(fb_id);
@@ -2872,7 +2871,7 @@ static int drm_close_file(xtask *proc, struct file *file) {
     goto detached;
   }
   spin_unlock(&virtio_gpu_backend->files_lock);
-  return 0; /* ignore close on unknown fd */
+  return 0; // ignore close on unknown fd
 
 detached:
   for (int j = 0; j < target->created_fb_count; j++)
@@ -2905,8 +2904,8 @@ static const struct dev_ops virtio_gpu_primary_ops = {
     .ioctl_file = drm_ioctl_file,
 };
 
-/* Render node ops: shares ioctl/mmap/close with the paired primary node and
- * rejects read/poll (no vblank events on render nodes). */
+// Render node ops: shares ioctl/mmap/close with the paired primary node and
+// rejects read/poll (no vblank events on render nodes).
 static const struct dev_ops virtio_gpu_render_ops = {
     .driver_pid = 0,
     .is_block = false,
@@ -2917,12 +2916,12 @@ static const struct dev_ops virtio_gpu_render_ops = {
     .poll = NULL,
 };
 
-/* DRM PCI 设备访问 (设计 C1) */
+// DRM PCI device access (design C1)
 static struct pci_device *drm_pci_dev(void) {
   return virtio_gpu_backend->vgpu.vpci.pdev;
 }
 
-/* sysfs show 回调 (priv=NULL, 读内核全局) */
+// sysfs show callback (priv=NULL, read kernel globals)
 static ssize_t drm_show_vendor(char *buf, size_t len, void *priv) {
   (void)priv;
   struct pci_device *pdev = drm_pci_dev();
@@ -3095,11 +3094,11 @@ static int drm_dev_register(void) {
   return 0;
 }
 
-/* Pre-query all capsets via GET_CAPSET_INFO + GET_CAPSET and cache them in
- * virtio_gpu_backend->drm.capsets[]. The bitmask surfaced by
- * GETPARAM(SUPPORTED_CAPSET_IDs) and the capsets served by GET_CAPS reflect
- * exactly what the host advertises — nothing is synthesized. The Venus path is
- * retired; only host-provided virgl capsets (1/2) drive the GL winsys. */
+// Pre-query all capsets via GET_CAPSET_INFO + GET_CAPSET and cache them in
+// virtio_gpu_backend->drm.capsets[]. The bitmask surfaced by
+// GETPARAM(SUPPORTED_CAPSET_IDs) and the capsets served by GET_CAPS reflect
+// exactly what the host advertises — nothing is synthesized. The Venus path is
+// retired; only host-provided virgl capsets (1/2) drive the GL winsys.
 static void drm_query_capsets(struct virtio_gpu_device *vgpu) {
   virtio_gpu_backend->drm.capset_lock = SPINLOCK_INIT;
   uint32_t n = vgpu->config.num_capsets;
@@ -3190,15 +3189,15 @@ static int virtio_gpu_probe(pci_device *pdev, const struct pci_device_id *id) {
   printk(LOG_INFO, "virtio_gpu: found PCI device bus=%d dev=%d func=%d\n",
          pdev->bus, pdev->dev, pdev->func);
 
-  /* Initialize transport */
+  // Initialize transport
   stage = "transport-init";
   rc = virtio_pci_init(&vgpu->vpci, pdev);
   if (rc < 0)
     goto fail;
 
-  /* Negotiate features: VERSION_1 + VIRGL(3D/context) + CONTEXT_INIT(multi-
-   * ring). The blob feature (Venus resource model) is retired; virgl uses the
-   * legacy v1 RESOURCE_CREATE path and does not need it. */
+  // Negotiate features: VERSION_1 + VIRGL(3D/context) + CONTEXT_INIT(multi-
+  // ring). The blob feature (Venus resource model) is retired; virgl uses the
+  // legacy v1 RESOURCE_CREATE path and does not need it.
   uint64_t want = (1ULL << VIRTIO_F_VERSION_1) | (1ULL << VIRTIO_GPU_F_VIRGL) |
                   (1ULL << VIRTIO_GPU_F_CONTEXT_INIT);
   stage = "feature-negotiation";
@@ -3206,7 +3205,7 @@ static int virtio_gpu_probe(pci_device *pdev, const struct pci_device_id *id) {
   if (rc < 0)
     goto fail;
 
-  /* Allocate single MSI-X vector for ctrlq + config change */
+  // Allocate single MSI-X vector for ctrlq + config change
   stage = "msix-enable";
   int nvectors = pci_enable_msix(pdev, 1);
   if (nvectors <= 0) {
@@ -3216,32 +3215,32 @@ static int virtio_gpu_probe(pci_device *pdev, const struct pci_device_id *id) {
   vgpu->vpci.msix_vector = pdev->msix_vector_base;
   printk(LOG_INFO, "virtio_gpu: MSI-X vector %d\n", vgpu->vpci.msix_vector);
 
-  /* Initialize ctrlq */
+  // Initialize ctrlq
   stage = "ctrlq-init";
   rc = virtio_gpu_init_ctrlq(vgpu);
   if (rc < 0)
     goto fail;
 
-  /* Wire up vring completion callback: vring_poll_used calls this for each
-     completed descriptor, setting the per-command completed flag so each
-     sleeping caller can independently detect its own response. */
+  // Wire up vring completion callback: vring_poll_used calls this for each
+  // completed descriptor, setting the per-command completed flag so each
+  // sleeping caller can independently detect its own response.
   vgpu->ctrlq.callback = virtio_gpu_cmd_callback;
 
-  /* Register ISR */
+  // Register ISR
   stage = "irq-registration";
   rc = pci_request_irq(pdev, 0, virtio_gpu_isr);
   if (rc < 0)
     goto fail;
   pci_msix_unmask_entry(pdev, 0);
 
-  /* Set DRIVER_OK status (preserve FEATURES_OK negotiated earlier) */
+  // Set DRIVER_OK status (preserve FEATURES_OK negotiated earlier)
   virtio_pci_write_status(
       &vgpu->vpci, VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER |
                        VIRTIO_STATUS_FEATURES_OK | VIRTIO_STATUS_DRIVER_OK);
   __atomic_store_n(&backend->hardware_live, true, __ATOMIC_RELEASE);
   __atomic_store_n(&backend->accepting_commands, true, __ATOMIC_RELEASE);
 
-  /* Read device config (num_scanouts) */
+  // Read device config (num_scanouts)
   rc = virtio_pci_read_dev_cfg(&vgpu->vpci, 0, &vgpu->config,
                                sizeof(vgpu->config));
   if (rc < 0) {
@@ -3251,7 +3250,7 @@ static int virtio_gpu_probe(pci_device *pdev, const struct pci_device_id *id) {
   printk(LOG_INFO, "virtio_gpu: num_scanouts=%u num_capsets=%u\n",
          vgpu->config.num_scanouts, vgpu->config.num_capsets);
 
-  /* Initialize DRM device state */
+  // Initialize DRM device state
   stage = "drm-device-allocation";
   __memset(&virtio_gpu_backend->drm, 0, sizeof(virtio_gpu_backend->drm));
   virtio_gpu_backend->drm.initialized = true;
@@ -3283,20 +3282,20 @@ static int virtio_gpu_probe(pci_device *pdev, const struct pci_device_id *id) {
   virtio_gpu_backend->drm.next_virgl_handle = VIRGL_HANDLE_BASE;
   virtio_gpu_backend->drm.next_dumb_handle = 1;
   virtio_gpu_backend->drm.next_fb_id = 1;
-  /* Query capsets after virtio_gpu_backend->drm is zeroed/initialized. */
+  // Query capsets after virtio_gpu_backend->drm is zeroed/initialized.
   drm_query_capsets(vgpu);
 
-  /* Default display mode (runtime-overridable; see
-     virtio_gpu_backend->drm.fb_*). Change DRM_FB_WIDTH/HEIGHT to alter the
-     default. */
+  // Default display mode (runtime-overridable; see
+  // virtio_gpu_backend->drm.fb_*). Change DRM_FB_WIDTH/HEIGHT to alter the
+  // default.
   virtio_gpu_backend->drm.fb_width = DRM_FB_WIDTH;
   virtio_gpu_backend->drm.fb_height = DRM_FB_HEIGHT;
   virtio_gpu_backend->drm.fb_bpp = DRM_FB_BPP;
   virtio_gpu_backend->drm.fb_pitch =
       virtio_gpu_backend->drm.fb_width * (virtio_gpu_backend->drm.fb_bpp / 8);
 
-  /* ===== Property infrastructure initialization (Phase C) ===== */
-  /* Create properties */
+  // ===== Property infrastructure initialization (Phase C) =====
+  // Create properties
   uint32_t p_src_x = drm_core_property_create_range(
       virtio_gpu_backend->core, "SRC_X", 0, 0xFFFFFFFF, true);
   uint32_t p_src_y = drm_core_property_create_range(
@@ -3337,7 +3336,7 @@ static int virtio_gpu_probe(pci_device *pdev, const struct pci_device_id *id) {
     goto fail;
   }
 
-  /* Generate IN_FORMATS blob */
+  // Generate IN_FORMATS blob
   struct drm_format_modifier_blob {
     uint32_t version;
     uint32_t count_formats;
@@ -3395,7 +3394,7 @@ static int virtio_gpu_probe(pci_device *pdev, const struct pci_device_id *id) {
     goto fail;
   }
 
-  /* Generate EDID blob */
+  // Generate EDID blob
   uint8_t edid_data[128];
   extern void drm_generate_edid(uint8_t * buf, size_t bufsz, uint32_t width,
                                 uint32_t height);
@@ -3449,7 +3448,7 @@ static int virtio_gpu_probe(pci_device *pdev, const struct pci_device_id *id) {
     goto fail;
   }
 
-  /* Publish minors only after every hardware and software dependency exists. */
+  // Publish minors only after every hardware and software dependency exists.
   stage = "drm-device-registration";
   rc = drm_dev_register();
   if (rc < 0)
@@ -3518,7 +3517,7 @@ static void virtio_gpu_remove(pci_device *pdev) {
     backend->event_wq = NULL;
   }
 
-  /* Driver-owned work has drained, so no waiter still needs queue IRQs. */
+  // Driver-owned work has drained, so no waiter still needs queue IRQs.
   __atomic_store_n(&backend->hardware_live, false, __ATOMIC_RELEASE);
   pci_disable_interrupts(pdev);
   if (backend->vgpu.vpci.common && pdev->enabled)

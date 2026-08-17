@@ -41,4 +41,4 @@ struct exception_table_entry {
 // fault_rip is tf->rip for a kernel-mode #PF/#GP.
 uint64_t fixup_exception(struct trapframe *tf);
 
-#endif /* KERNEL_XCORE_MEM_EXTABLE_H */
+#endif // KERNEL_XCORE_MEM_EXTABLE_H

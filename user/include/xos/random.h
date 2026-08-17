@@ -3,7 +3,7 @@
  *
  * SPDX-License-Identifier: MIT
  */
-/* Non-standard random APIs implemented by the XOS libc. */
+// Non-standard random APIs implemented by the XOS libc.
 #ifndef XOS_RANDOM_H
 #define XOS_RANDOM_H
 

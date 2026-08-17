@@ -46,7 +46,7 @@ enum page_cache_ra_bucket {
 struct cache_page {
   struct inode *inode;
   uint64_t page_index;
-  uint8_t *data; /* kmalloc(4096) on fill, kfree on evict */
+  uint8_t *data; // kmalloc(4096) on fill, kfree on evict
   atomic_t pin_count;
   uint32_t flags;
   int error;

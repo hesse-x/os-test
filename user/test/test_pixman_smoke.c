@@ -4,13 +4,16 @@
  * SPDX-License-Identifier: MIT
  */
 
-// test_pixman_smoke — wlroots 前置依赖 pixman 的目标端冒烟测试。
+// test_pixman_smoke — target-side smoke test for pixman, a wlroots
+// prerequisite.
 //
-// 仅验证纯计算路径：image 创建、region 运算、fill，不触及任何设备或
-// wlroots 渲染。证明 build/libpixman-1.so 能被 musl loader 加载、符号可解析、
-// 最小 API 行为正确。这是 WF-3（pixman 移植）的运行时验证，与 build.sh
-// staging 的产物对应。无 Unity——每步打印标记，任一失败 _exit 非零，
-// test_runner 报 [FAIL]。参考 test_egl_smoke.c 的诊断式风格。
+// Exercises only the pure-compute paths: image creation, region ops, fill.
+// Touches no device and no wlroots rendering. Proves build/libpixman-1.so can
+// be loaded by the musl loader, its symbols resolve, and the minimal API
+// behaves correctly. This is the runtime verification for WF-3 (pixman
+// port), matching the build.sh staging artifacts. No Unity — each step prints
+// a marker and any failure _exit's non-zero, and test_runner reports [FAIL].
+// Follows the diagnostic style of test_egl_smoke.c.
 
 #include <pixman.h>
 #include <stdio.h>
@@ -26,14 +29,15 @@ static int fail(const char *what) {
 int main(void) {
   printf("pixman: version %s\n", pixman_version_string());
 
-  // 1. 创建一个 a8r8g8b8 位图 image（8x8），首字节非零说明分配成功。
+  // 1. Create an a8r8g8b8 bitmap image (8x8); a non-zero first byte proves
+  // the allocation succeeded.
   pixman_image_t *img =
       pixman_image_create_bits(PIXMAN_a8r8g8b8, 8, 8, NULL, 0);
   if (!img)
     fail("pixman_image_create_bits");
   printf("pixman: created a8r8g8b8 8x8 image %p\n", (void *)img);
 
-  // 2. 用纯色填充整个 image：pixman_image_fill_rectangles。
+  // 2. Fill the whole image with a solid color: pixman_image_fill_rectangles.
   pixman_color_t red;
   red.red = 0xffff;
   red.green = 0;
@@ -44,9 +48,10 @@ int main(void) {
       pixman_image_fill_rectangles(PIXMAN_OP_SRC, img, &red, 1, &rect);
   if (!ok)
     fail("pixman_image_fill_rectangles");
-  // 首像素应为红色。PIXMAN_a8r8g8b8 (format 0x00020004) 通道顺序
-  // a@24 r@16 g@8 b@0（每通道 8 bit），红色值 0xFFFF0000。按 little-endian
-  // uint32 读出 4 字节即该值（最低字节 0x00=b，次 0x00=g，0xff=r，0xff=a）。
+  // The first pixel should be red. PIXMAN_a8r8g8b8 (format 0x00020004) channel
+  // order is a@24 r@16 g@8 b@0 (8 bits per channel), so red is 0xFFFF0000.
+  // Read as a little-endian uint32, the 4 bytes equal that value (byte 0
+  // 0x00=b, next 0x00=g, 0xff=r, 0xff=a).
   uint32_t *data = (uint32_t *)pixman_image_get_data(img);
   uint32_t px = data[0];
   printf("pixman: filled pixel 0x%08x\n", px);
@@ -54,7 +59,7 @@ int main(void) {
     fail("fill_rectangles produced wrong pixel");
   pixman_image_unref(img);
 
-  // 3. region 运算：两个矩形 region 的并集，检查边界框。
+  // 3. Region ops: union of two rectangle regions, check the bounding box.
   pixman_region16_t r1, r2, ru;
   pixman_region_init_rect(&r1, 0, 0, 10, 10);
   pixman_region_init_rect(&r2, 20, 20, 10, 10);

@@ -24,7 +24,7 @@ void mutex_init(mutex *m) {
 }
 
 void mutex_lock(mutex *m) {
-  /* Early boot is single-threaded and cannot call schedule(). */
+  // Early boot is single-threaded and cannot call schedule().
   if (!current_task) {
     for (;;) {
       spin_lock(&m->guard);

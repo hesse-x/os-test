@@ -10,7 +10,7 @@
 #include "kernel/xcore/spinlock.h"
 #include "kernel/xcore/wait_queue.h"
 
-/* A non-recursive, sleepable mutex for process-context critical sections. */
+// A non-recursive, sleepable mutex for process-context critical sections.
 typedef struct mutex {
   spinlock guard;
   int locked;

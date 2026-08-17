@@ -88,7 +88,7 @@ static void expect_unmapped(void *fault_page) {
   TEST_ASSERT_EQUAL_INT(SEGV_MAPERR, reap_child_code(pid));
 }
 
-/* TC1: full-region unmap. */
+// TC1: full-region unmap.
 void test_munmap_full(void) {
   char *p = mmap(NULL, 3 * PAGE, PROT_READ | PROT_WRITE,
                  MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -98,7 +98,7 @@ void test_munmap_full(void) {
   expect_unmapped(p);
 }
 
-/* TC2: middle hole-punch — front and tail residue survive. */
+// TC2: middle hole-punch — front and tail residue survive.
 void test_munmap_hole_middle(void) {
   char *p = mmap(NULL, 3 * PAGE, PROT_READ | PROT_WRITE,
                  MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -113,7 +113,7 @@ void test_munmap_hole_middle(void) {
   munmap(p, 3 * PAGE);
 }
 
-/* TC3: tail truncation — head survives. */
+// TC3: tail truncation — head survives.
 void test_munmap_tail_truncate(void) {
   char *p = mmap(NULL, 3 * PAGE, PROT_READ | PROT_WRITE,
                  MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -126,7 +126,7 @@ void test_munmap_tail_truncate(void) {
   munmap(p, PAGE);
 }
 
-/* TC4: head truncation — tail survives. */
+// TC4: head truncation — tail survives.
 void test_munmap_head_truncate(void) {
   char *p = mmap(NULL, 3 * PAGE, PROT_READ | PROT_WRITE,
                  MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -139,7 +139,7 @@ void test_munmap_head_truncate(void) {
   munmap(p + PAGE, 2 * PAGE);
 }
 
-/* TC5: cross-region unmap drops both. Two anon pages bump-adjacent. */
+// TC5: cross-region unmap drops both. Two anon pages bump-adjacent.
 void test_munmap_cross_region(void) {
   char *a = mmap(NULL, PAGE, PROT_READ | PROT_WRITE,
                  MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -156,14 +156,13 @@ void test_munmap_cross_region(void) {
   expect_unmapped(b);
 }
 
-/* TC6: empty interval (nothing mapped there) is a silent no-op success. */
+// TC6: empty interval (nothing mapped there) is a silent no-op success.
 void test_munmap_empty_interval(void) {
   // 0x3f000000 is in free user space (above mmap_brk, below stack/trampoline).
   TEST_ASSERT_EQUAL_INT(0, munmap((void *)0x3f000000UL, PAGE));
 }
 
-/* TC7: unaligned addr is rejected with -EINVAL (Linux requires page alignment).
- */
+// TC7: unaligned addr is rejected with -EINVAL (Linux requires page alignment).
 void test_munmap_unaligned_addr(void) {
   char *p = mmap(NULL, 3 * PAGE, PROT_READ | PROT_WRITE,
                  MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -173,7 +172,7 @@ void test_munmap_unaligned_addr(void) {
   munmap(p, 3 * PAGE);
 }
 
-/* TC8: SHM hole-punch keeps the object + data; remap sees old contents. */
+// TC8: SHM hole-punch keeps the object + data; remap sees old contents.
 void test_munmap_shm_hole(void) {
   int fd = -1;
   fd = memfd_create("s13_shm_hole", 0);

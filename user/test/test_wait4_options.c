@@ -4,18 +4,18 @@
  * SPDX-License-Identifier: MIT
  */
 
-/* wait4 extension flags __WALL / __WCLONE / __WNOTHREAD.
- *
- * This kernel has no thread-group vs clone-child distinction (child_matches
- * keys on signal->parent_pid, so every child already matches), hence:
- *   - __WALL       : no-op (already matches all children) → reaps normally
- *   - __WNOTHREAD  : no-op (wait never crosses threads)   → reaps normally
- *   - __WCLONE     : accepted, treated like __WALL        → reaps normally
- *   - unknown bits : rejected with -EINVAL (whitelist tightening, mirrors
- *                    Linux do_wait)
- *
- * We call wait4 directly (raw syscall) so the libc waitpid wrapper does not
- * discard the extension flags. */
+// wait4 extension flags __WALL / __WCLONE / __WNOTHREAD.
+//
+// This kernel has no thread-group vs clone-child distinction (child_matches
+// keys on signal->parent_pid, so every child already matches), hence:
+//   - __WALL       : no-op (already matches all children) → reaps normally
+//   - __WNOTHREAD  : no-op (wait never crosses threads)   → reaps normally
+//   - __WCLONE     : accepted, treated like __WALL        → reaps normally
+//   - unknown bits : rejected with -EINVAL (whitelist tightening, mirrors
+//                    Linux do_wait)
+//
+// We call wait4 directly (raw syscall) so the libc waitpid wrapper does not
+// discard the extension flags.
 
 #include <errno.h>
 #include <stdint.h>
@@ -37,7 +37,7 @@ static int64_t wait4_raw(int pid, int *wstatus, int options) {
                     (int64_t)options, 0);
 }
 
-/* Spawn a child that exits with `code`; return its pid. */
+// Spawn a child that exits with `code`; return its pid.
 static pid_t spawn_child(int code) {
   pid_t pid = fork();
   if (pid == 0)
@@ -45,7 +45,7 @@ static pid_t spawn_child(int code) {
   return pid;
 }
 
-/* Reap via wait4 with `options`; assert the reaped pid + exit status. */
+// Reap via wait4 with `options`; assert the reaped pid + exit status.
 static void reap_with_options(int options, int expect_code) {
   pid_t child = spawn_child(expect_code);
   TEST_ASSERT_TRUE(child > 0);
@@ -57,16 +57,16 @@ static void reap_with_options(int options, int expect_code) {
   TEST_ASSERT_EQUAL_INT(expect_code, WEXITSTATUS(status));
 }
 
-/* ---- 1. __WALL reaps a child normally ---- */
+// ---- 1. __WALL reaps a child normally ----
 void test_wait4_wall_reaps(void) { reap_with_options(__WALL, 11); }
 
-/* ---- 2. __WNOTHREAD reaps a child normally (no-op here) ---- */
+// ---- 2. __WNOTHREAD reaps a child normally (no-op here) ----
 void test_wait4_wnothread_reaps(void) { reap_with_options(__WNOTHREAD, 22); }
 
-/* ---- 3. __WCLONE accepted, behaves like __WALL ---- */
+// ---- 3. __WCLONE accepted, behaves like __WALL ----
 void test_wait4_wclone_reaps(void) { reap_with_options(__WCLONE, 33); }
 
-/* ---- 4. __WALL|WNOHANG composes: child not ready → 0, then reap ---- */
+// ---- 4. __WALL|WNOHANG composes: child not ready → 0, then reap ----
 void test_wait4_wall_compose_wnohang(void) {
   int pfd[2];
   TEST_ASSERT_EQUAL_INT(0, pipe(pfd));
@@ -75,7 +75,7 @@ void test_wait4_wall_compose_wnohang(void) {
   if (child == 0) {
     close(pfd[1]);
     char c;
-    /* Block until parent releases us. */
+    // Block until parent releases us.
     while (read(pfd[0], &c, 1) != 1)
       ;
     _exit(0);
@@ -83,12 +83,12 @@ void test_wait4_wall_compose_wnohang(void) {
   close(pfd[0]);
   TEST_ASSERT_TRUE(child > 0);
 
-  /* Child still running (blocked in read) → WNOHANG|__WALL returns 0. */
+  // Child still running (blocked in read) → WNOHANG|__WALL returns 0.
   int status = 0;
   int64_t r = wait4_raw(child, &status, WNOHANG | __WALL);
   TEST_ASSERT_EQUAL_INT(0, r);
 
-  /* Release + reap. */
+  // Release + reap.
   char c = 1;
   TEST_ASSERT_EQUAL_INT(1, write(pfd[1], &c, 1));
   close(pfd[1]);
@@ -97,24 +97,24 @@ void test_wait4_wall_compose_wnohang(void) {
   TEST_ASSERT_TRUE(WIFEXITED(status));
 }
 
-/* ---- 5. unknown option bit rejected with -EINVAL ---- */
+// ---- 5. unknown option bit rejected with -EINVAL ----
 void test_wait4_unknown_option_einval(void) {
   pid_t child = spawn_child(0);
   TEST_ASSERT_TRUE(child > 0);
 
-  /* 0x80 is not in __W_KNOWN. */
+  // 0x80 is not in __W_KNOWN.
   int status = 0;
   int64_t r = wait4_raw(child, &status, 0x80);
   TEST_ASSERT_EQUAL_INT(-EINVAL, r);
 
-  /* Child still alive (not reaped) → reap it. */
+  // Child still alive (not reaped) → reap it.
   r = wait4_raw(child, &status, 0);
   TEST_ASSERT_EQUAL_INT(child, r);
 }
 
-/* WCONTINUED is bit 3 in the Linux/musl wait ABI. Keep this direct syscall
- * check so the kernel cannot accidentally confuse it with waitid's WEXITED
- * bit (4), which makes shell foreground waits fail with EINVAL. */
+// WCONTINUED is bit 3 in the Linux/musl wait ABI. Keep this direct syscall
+// check so the kernel cannot accidentally confuse it with waitid's WEXITED
+// bit (4), which makes shell foreground waits fail with EINVAL.
 void test_wait4_accepts_wcontinued_bit(void) {
   pid_t child = fork();
   TEST_ASSERT_TRUE(child >= 0);

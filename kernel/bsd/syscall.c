@@ -93,7 +93,7 @@
 
 // OS-unique mmap flags (not in uapi mman.h, collision-free in 1024+ namespace)
 #define MAP_PHYSICAL 0x80000000
-#define MAP_UC 0x08 /* Map as uncacheable (device MMIO) */
+#define MAP_UC 0x08 // Map as uncacheable (device MMIO)
 
 // Every MAP_* bit the kernel recognizes — uapi standard flags plus the two
 // OS-internal ones. Unknown bits (outside this set) are rejected with
@@ -242,30 +242,29 @@ int64_t do_exit_with_code(int32_t encoded_exit_code) {
   int esig = proc->proc->exit_signal;
   atomic_dec(&sig->live_count);
   int notify_parent = atomic_dec_and_test(&sig->thread_count);
-  /* 02 SA_NOCLDWAIT: the parent opted out of zombies — skip SIGCHLD posting
-   * and have init reap this child. We can NOT sched_task_reap() here: the
-   * dying task is still current and its cr3 is live, so freeing its mm/PML4
-   * mid-exit would triple-fault. Instead reparent the child to init (mirrors
-   * orphan adoption in step 3) and wake init's WAIT_CHILD — init reaps the
-   * zombie in its own context. Read the original parent here (step 5, sig
-   * alive); after ZOMBIE only the local bool + reparented parent_pid are
-   * used. */
+  // 02 SA_NOCLDWAIT: the parent opted out of zombies — skip SIGCHLD posting
+  // and have init reap this child. We can NOT sched_task_reap() here: the
+  // dying task is still current and its cr3 is live, so freeing its mm/PML4
+  // mid-exit would triple-fault. Instead reparent the child to init (mirrors
+  // orphan adoption in step 3) and wake init's WAIT_CHILD — init reaps the
+  // zombie in its own context. Read the original parent here (step 5, sig
+  // alive); after ZOMBIE only the local bool + reparented parent_pid are
+  // used.
   bool auto_reap = false;
   if (notify_parent && ppid >= 0 && ppid < MAX_PROC &&
       task_get(ppid)->pid == ppid) {
     xtask *parent = task_get(ppid);
     if (parent->proc) {
-      /* Linux do_exit autoreap semantics: a child whose parent will not reap
-       * it is reparented to init and reaped in init's context (we cannot
-       * sched_task_reap here — the dying task's cr3 is still live). Two
-       * independent triggers, both matching Linux:
-       *   - SA_NOCLDWAIT: the parent explicitly opted out of zombies.
-       *   - SIGCHLD set to SIG_IGN: the parent ignores child exits, so the
-       *     kernel auto-reaps instead of leaving a zombie. Without this, a
-       *     service that does signal(SIGCHLD, SIG_IGN) and never waitpid()s
-       *     (e.g. the desktop shell spawning terminals) leaks every child's
-       *     fd table — including DRM render-node slots — as permanent zombies.
-       */
+      // Linux do_exit autoreap semantics: a child whose parent will not reap
+      // it is reparented to init and reaped in init's context (we cannot
+      // sched_task_reap here — the dying task's cr3 is still live). Two
+      // independent triggers, both matching Linux:
+      //   - SA_NOCLDWAIT: the parent explicitly opted out of zombies.
+      //   - SIGCHLD set to SIG_IGN: the parent ignores child exits, so the
+      //     kernel auto-reaps instead of leaving a zombie. Without this, a
+      //     service that does signal(SIGCHLD, SIG_IGN) and never waitpid()s
+      //     (e.g. the desktop shell spawning terminals) leaks every child's
+      //     fd table — including DRM render-node slots — as permanent zombies.
       bool parent_ignores_sigchld =
           parent->proc->signal->action[SIGCHLD]
               .__sigaction_handler._sa_handler == SIG_IGN;
@@ -1301,10 +1300,10 @@ static int64_t sys_mmap_file_backed(xtask *proc, uint64_t *pml4, uint64_t addr,
     return sys_mmap_tmpfs_shared(proc, pml4, addr, size, prot, (uint32_t)flags,
                                  fd, offset, mmap_flags, hint, f);
 
-  /* tmpfs data lives in inode->shm, not in the FAT32 page cache.  A private
-   * mapping must fault-copy from those same pages; wlroots relies on this when
-   * it writes a dma-buf format table through one fd and sends a read-only fd
-   * which Mesa maps MAP_PRIVATE. */
+  // tmpfs data lives in inode->shm, not in the FAT32 page cache.  A private
+  // mapping must fault-copy from those same pages; wlroots relies on this when
+  // it writes a dma-buf format table through one fd and sends a read-only fd
+  // which Mesa maps MAP_PRIVATE.
   if ((flags & MAP_PRIVATE) && f->f_op == &tmpfs_file_fops) {
     if ((offset & (PAGE_SIZE - 1)) || (offset >= ip->size && ip->size != 0)) {
       file_put(f);
@@ -1443,7 +1442,7 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   int fd = (int)arg5;
   uint64_t offset = arg6;
 
-  /* Linux rejects a zero-length mapping regardless of backing type. */
+  // Linux rejects a zero-length mapping regardless of backing type.
   if (size == 0)
     return -EINVAL;
   // Reject genuinely-unknown flag bits; recognized-but-unsupported bits
@@ -1456,7 +1455,7 @@ int64_t sys_mmap(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
     return -ENOMEM;
   size = ALIGN_UP(size, PAGE_SIZE);
 
-  /* File offsets are always page-aligned; this also covers device mappings. */
+  // File offsets are always page-aligned; this also covers device mappings.
   if (fd >= 0 && !(flags & MAP_ANONYMOUS) && (offset & (PAGE_SIZE - 1)))
     return -EINVAL;
 
@@ -2553,8 +2552,9 @@ int64_t sys_prlimit64(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   return 0;
 }
 
-// pipe wq 回调：__wake_up(p->wq) → 唤醒挂在 p->wq 的阻塞 reader/writer。
-// 不查 wait_event（队列身份制：在 p->wq 上即唤醒）。类比 ring.c ring_wake_cb。
+// pipe wq callback: __wake_up(p->wq) wakes blocked readers/writers hung on
+// p->wq. Does not check wait_event (queue-identity semantics: anything on
+// p->wq is woken). Analogous to ring_wake_cb in ring.c.
 static void pipe_wake_cb(wait_queue_t *wq, unsigned long flags) {
   xtask *target = (xtask *)wq->data;
   (void)flags;
@@ -2591,8 +2591,9 @@ static bool pipe_prepare_wait(xtask *proc, struct pipe *p, bool writing,
 }
 
 // ===================== BSD syscall: pipe =====================
-// 公共实现：flags 仅接受 O_CLOEXEC（per-fd bitmap）| O_NONBLOCK（f->flags）。
-// sys_pipe → do_pipe(fd_ptr, 0)；sys_pipe2 传入用户 flags。
+// Common implementation: flags accepts only O_CLOEXEC (per-fd bitmap) |
+// O_NONBLOCK (f->flags). sys_pipe -> do_pipe(fd_ptr, 0); sys_pipe2 passes the
+// user flags.
 static int64_t do_pipe(int __user *fd_ptr, int flags) {
   if (flags & ~(O_CLOEXEC | O_NONBLOCK))
     return (int64_t)-EINVAL;
@@ -2685,7 +2686,8 @@ static int64_t do_pipe(int __user *fd_ptr, int flags) {
   fw->pipe = p;
   fd_install(proc->proc->files, write_fd, fw);
 
-  // pipe2 flags：仍在 fd_lock 内设置，对 execve 的 cloexec 扫描原子。
+  // pipe2 flags: still set under fd_lock so it is atomic with execve's
+  // cloexec scan.
   if (flags & O_NONBLOCK) {
     fr->flags |= O_NONBLOCK;
     fw->flags |= O_NONBLOCK;
@@ -3093,9 +3095,9 @@ int64_t sys_write(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
         ret = -EAGAIN;
         goto out;
       }
-      /* 阻塞写：挂 p->wq + prepare_to_wait 顺序（先挂 wq 标 BLOCKED → 重查空间
-       * → signal_pending → schedule）。SPSC 无锁 ring，模式1，不引入 pipe 锁。
-       */
+      // Blocking write: hang p->wq + prepare_to_wait sequence (hang wq first,
+      // mark BLOCKED -> recheck space -> signal_pending -> schedule). SPSC
+      // lock-free ring, mode 1, no pipe lock introduced.
       wait_queue_head *wq = p->wq;
       wait_queue_t wait;
       wait.func = pipe_wake_cb;
@@ -3104,13 +3106,12 @@ int64_t sys_write(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
       list_init(&wait.node);
       add_wait_queue(wq, &wait);
       for (;;) {
-        /* Borrow the process alarm deadline (if armed) as the wake deadline so
-         * a pending SIGALRM can interrupt this indefinite blocking write —
-         * mirrors sys_pause / epoll_wait. Re-read each iteration: a prior block
-         * may have returned on alarm and the process may re-arm a new alarm. No
-         * user timeout exists for write(); with no alarm we block indefinitely
-         * (wait_deadline=0, not inserted) until space frees or readers close.
-         */
+        // Borrow the process alarm deadline (if armed) as the wake deadline so
+        // a pending SIGALRM can interrupt this indefinite blocking write —
+        // mirrors sys_pause / epoll_wait. Re-read each iteration: a prior block
+        // may have returned on alarm and the process may re-arm a new alarm. No
+        // user timeout exists for write(); with no alarm we block indefinitely
+        // (wait_deadline=0, not inserted) until space frees or readers close.
         uint64_t alarm_dl = 0;
         if (proc->proc && proc->proc->signal) {
           uint64_t sflags;
@@ -3122,8 +3123,8 @@ int64_t sys_write(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
           break;
         schedule();
         {
-          /* Merge shared_pending so kill()-delivered signals interrupt a
-           * blocking pipe write (see pipe read). */
+          // Merge shared_pending so kill()-delivered signals interrupt a
+          // blocking pipe write (see pipe read).
           if (signal_pending(proc)) {
             sched_cancel_spurious_wake(proc);
             remove_wait_queue(wq, &wait);
@@ -3136,7 +3137,7 @@ int64_t sys_write(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
       }
       sched_cancel_spurious_wake(proc);
       remove_wait_queue(wq, &wait);
-      continue; // 回外层 while 重查（含 p_count<=1 的 EPIPE）
+      continue; // back to the outer while to recheck (incl. p_count<=1 EPIPE)
     }
     p->buf[p->head] = ((const char __force *)buf)[written];
     p->head = (p->head + 1) % p->size;
@@ -3174,7 +3175,7 @@ int64_t sys_read(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
 
   int64_t ret;
 
-  // file_operations 分发: f_op 非 NULL 时优先走 f_op
+  // file_operations dispatch: a non-NULL f_op takes precedence
   if (f->f_op) {
     if (f->f_op->read)
       ret = f->f_op->read(proc, f, buf, len);
@@ -3478,9 +3479,9 @@ int64_t sys_read(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
       ret = -EAGAIN;
       goto out;
     }
-    /* 阻塞读：挂 p->wq + prepare_to_wait 顺序（先挂 wq 标 BLOCKED → 重查
-     * head!=tail → signal_pending → schedule）。SPSC 无锁 ring，模式1，不引入
-     * pipe 锁。 */
+    // Blocking read: hang p->wq + prepare_to_wait sequence (hang wq first,
+    // mark BLOCKED -> recheck head!=tail -> signal_pending -> schedule). SPSC
+    // lock-free ring, mode 1, no pipe lock introduced.
     wait_queue_head *wq = p->wq;
     wait_queue_t wait;
     wait.func = pipe_wake_cb;
@@ -3489,13 +3490,13 @@ int64_t sys_read(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
     list_init(&wait.node);
     add_wait_queue(wq, &wait);
     for (;;) {
-      /* Borrow the process alarm deadline (if armed) as the wake deadline so a
-       * pending SIGALRM can interrupt this indefinite blocking read — mirrors
-       * sys_pause / epoll_wait. No user timeout exists for read(); a deadline
-       * is armed only when a process alarm is set, so the timer queue wakes us
-       * on alarm expiry and the EINTR check below returns -EINTR. With no
-       * alarm we block indefinitely (wait_deadline=0, not inserted) until data
-       * arrives or the pipe closes. */
+      // Borrow the process alarm deadline (if armed) as the wake deadline so a
+      // pending SIGALRM can interrupt this indefinite blocking read — mirrors
+      // sys_pause / epoll_wait. No user timeout exists for read(); a deadline
+      // is armed only when a process alarm is set, so the timer queue wakes us
+      // on alarm expiry and the EINTR check below returns -EINTR. With no
+      // alarm we block indefinitely (wait_deadline=0, not inserted) until data
+      // arrives or the pipe closes.
       uint64_t alarm_dl = 0;
       if (proc->proc && proc->proc->signal) {
         uint64_t sflags;
@@ -3507,9 +3508,9 @@ int64_t sys_read(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
         break;
       schedule();
       {
-        /* Merge shared_pending so kill()-delivered signals interrupt a
-         * blocking pipe read (signal_pending merges sig_pending +
-         * shared_pending under sig_lock). */
+        // Merge shared_pending so kill()-delivered signals interrupt a
+        // blocking pipe read (signal_pending merges sig_pending +
+        // shared_pending under sig_lock).
         if (signal_pending(proc)) {
           sched_cancel_spurious_wake(proc);
           remove_wait_queue(wq, &wait);
@@ -3794,7 +3795,7 @@ int64_t sys_fcntl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
       ret = -EINVAL;
       goto out;
     }
-    /* Refuse to shrink below the data currently in the ring (Linux -EBUSY). */
+    // Refuse to shrink below the data currently in the ring (Linux -EBUSY).
     uint32_t used = (p->head + p->size - p->tail) % p->size;
     if (new_size <= used) {
       ret = -EBUSY;
@@ -3807,17 +3808,17 @@ int64_t sys_fcntl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
     }
     p->buf = new_buf;
     p->size = new_size;
-    /* head/tail are unchanged: ring math uses the new modulus, and since
-     * new_size > used the existing [tail, head) data still fits. Wake any
-     * blocked writer — a larger pipe may now have room. */
+    // head/tail are unchanged: ring math uses the new modulus, and since
+    // new_size > used the existing [tail, head) data still fits. Wake any
+    // blocked writer — a larger pipe may now have room.
     __wake_up(p->wq, POLLOUT);
     ret = (int64_t)new_size;
     goto out;
   }
   case F_SETOWN: {
-    /* Store the SIGIO recipient pid. This OS has no async-I/O completion path,
-     * so no SIGIO is ever delivered — the value is recorded for F_GETOWN only.
-     * Only positive pids are accepted (no process-group -pgid yet). */
+    // Store the SIGIO recipient pid. This OS has no async-I/O completion path,
+    // so no SIGIO is ever delivered — the value is recorded for F_GETOWN only.
+    // Only positive pids are accepted (no process-group -pgid yet).
     if (arg <= 0) {
       ret = -EINVAL;
       goto out;
@@ -3831,11 +3832,11 @@ int64_t sys_fcntl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
     ret = (int64_t)f->f_owner;
     goto out;
   case F_SETOWN_EX: {
-    /* F_SETOWN_EX extends F_SETOWN with a recipient class (TID/PID/PGRP).
-     * Stored only (no SIGIO delivery path, same as F_SETOWN/F_SETSIG) so
-     * F_GETOWN_EX round-trips it. F_OWNER_PGRP stores a negative pgid in
-     * f_owner (matching legacy F_SETOWN's -pgid convention); read back as
-     * positive via F_GETOWN_EX. */
+    // F_SETOWN_EX extends F_SETOWN with a recipient class (TID/PID/PGRP).
+    // Stored only (no SIGIO delivery path, same as F_SETOWN/F_SETSIG) so
+    // F_GETOWN_EX round-trips it. F_OWNER_PGRP stores a negative pgid in
+    // f_owner (matching legacy F_SETOWN's -pgid convention); read back as
+    // positive via F_GETOWN_EX.
     struct f_owner_ex ex;
     if (copy_from_user(&ex, (void __user *)(uintptr_t)arg3, sizeof(ex))) {
       ret = -EFAULT;
@@ -3862,7 +3863,7 @@ int64_t sys_fcntl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
     goto out;
   }
   case F_SETSIG: {
-    /* 0 restores the default SIGIO; otherwise [1, NSIG). Stored only. */
+    // 0 restores the default SIGIO; otherwise [1, NSIG). Stored only.
     if (arg < 0 || arg >= NSIG) {
       ret = -EINVAL;
       goto out;
@@ -3877,8 +3878,8 @@ int64_t sys_fcntl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
   case F_OFD_GETLK:
   case F_OFD_SETLK:
   case F_OFD_SETLKW: {
-    /* OFD locks are owned by the open file description, not the process.
-     * Only regular files carry byte-range locks. */
+    // OFD locks are owned by the open file description, not the process.
+    // Only regular files carry byte-range locks.
     if (f->type != FD_REGULAR || !f->inode) {
       ret = -ENOLCK;
       goto out;
@@ -3900,7 +3901,7 @@ int64_t sys_fcntl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
   case F_SETLK:
   case F_SETLKW: {
     if (f->type != FD_REGULAR || !f->inode) {
-      /* pipe/socket/dev/shm/dir cannot carry POSIX file locks. */
+      // pipe/socket/dev/shm/dir cannot carry POSIX file locks.
       ret = -ENOLCK;
       goto out;
     }
@@ -3930,9 +3931,10 @@ int64_t sys_sendfile(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
                      int64_t a6) {
   return -ENOSYS;
 }
-/* §3.3 do_symlinkat:symlinkat 的共同实现(内核串)。ktarget/klink 已 copy_
- * from_user。解析 linkpath 的父目录 + 末段名,调 dir->i_op->symlink;FAT32
- * (symlink==NULL) → -ENOSYS。目标已存在 → -EEXIST。 */
+// §3.3 do_symlinkat: common implementation of symlinkat (kernel string).
+// ktarget/klink already copy_from_user'd. Resolve linkpath's parent dir +
+// final name, call dir->i_op->symlink; FAT32 (symlink==NULL) -> -ENOSYS.
+// Target already exists -> -EEXIST.
 static int do_symlinkat(const char *ktarget, int newdirfd, const char *klink) {
   struct inode *dir;
   char lname[256];
@@ -3962,38 +3964,43 @@ static int do_symlinkat(const char *ktarget, int newdirfd, const char *klink) {
   }
   if (!dir->i_op || !dir->i_op->symlink) {
     inode_put(dir);
-    return -ENOSYS; /* FAT32 物理不支持 symlink */
+    return -ENOSYS; // FAT32 physically does not support symlinks
   }
-  /* 目标已存在 → EEXIST。lookup 返 +1 引用,须 put 平衡。 */
+  // Target already exists -> EEXIST. lookup returns a +1 reference; must put
+  // it to balance.
   struct inode *exist = dir->i_op->lookup(dir, lname);
   if (exist) {
     inode_put(exist);
     inode_put(dir);
     return -EEXIST;
   }
-  struct inode *ip = dir->i_op->symlink(dir, lname, ktarget); /* i_count=2 */
+  struct inode *ip = dir->i_op->symlink(dir, lname, ktarget); // i_count=2
   inode_put(dir);
   if (IS_ERR(ip))
     return (int)PTR_ERR(ip);
-  inode_put(ip); /* 平衡 symlink 出口的 +1 返回引用,目录项留 1 */
+  inode_put(ip); // balance symlink's +1 return ref; the dir entry keeps 1
   return 0;
 }
 
-/* §3.3 do_readlinkat:readlinkat 的共同实现(内核串)。kpath 已 copy_from_user。
- * 不跟随末段 symlink(readlink 语义:取 link inode 本身)。INODE_LNK 校验 +
- * readlink 钩子;拷出 target 到内核 kbuf 再 copy_to_user 截断 bufsiz(Linux
- * 语义:返 min(实际长度, bufsiz),不 NUL 终止)。 */
+// §3.3 do_readlinkat: common implementation of readlinkat (kernel string).
+// kpath already copy_from_user'd. Does not follow a terminal symlink
+// (readlink semantics: take the link inode itself). INODE_LNK validation +
+// readlink hook; copy the target into a kernel kbuf then copy_to_user truncated
+// to bufsiz (Linux semantics: return min(actual length, bufsiz), no NUL
+// termination).
 static int do_readlinkat(int dirfd, const char *kpath, char __user *ubuf,
                          size_t bufsiz) {
   if (bufsiz == 0)
-    return -EINVAL; /* Linux:bufsiz==0 → EINVAL(非 POSIX,但 glibc 依赖) */
+    return -EINVAL; // Linux: bufsiz==0 -> EINVAL (non-POSIX, but glibc depends
+                    // on it)
   struct inode *ip;
   if (kpath[0] == '/') {
     char relpath[256];
     struct mount_entry *m = vfs_resolve(kpath, relpath, sizeof(relpath));
     if (!m)
       return -ENOENT;
-    ip = path_walk(m, relpath); /* +1;path_walk 跟随中间段,末段 LNK 原样返回 */
+    ip = path_walk(m, relpath); // +1; path_walk follows intermediate, returns
+                                // the terminal LNK as-is
   } else {
     struct inode *start = resolve_dirfd_start(dirfd);
     if (IS_ERR(start))
@@ -4003,46 +4010,52 @@ static int do_readlinkat(int dirfd, const char *kpath, char __user *ubuf,
       inode_put(start);
       return -ENAMETOOLONG;
     }
-    ip = path_walk_from(start, relpath); /* +1 */
+    ip = path_walk_from(start, relpath); // +1
     inode_put(start);
   }
   if (!ip)
     return -ENOENT;
   if (ip->type != INODE_LNK || !ip->i_op || !ip->i_op->readlink) {
     inode_put(ip);
-    return -EINVAL; /* 非软链 → EINVAL(Linux readlink 语义) */
+    return -EINVAL; // not a symlink -> EINVAL (Linux readlink semantics)
   }
   char kbuf[256];
   int n = ip->i_op->readlink(ip, kbuf, sizeof(kbuf));
   inode_put(ip);
   if (n < 0)
     return n;
-  int wn = (n < (int)bufsiz) ? n : (int)bufsiz; /* 截断返 bufsiz(Linux 语义) */
+  int wn = (n < (int)bufsiz)
+               ? n
+               : (int)bufsiz; // truncate to bufsiz (Linux semantics)
   if (copy_to_user(ubuf, kbuf, wn))
     return -EFAULT;
   return wn;
 }
 
-/* §3.4 do_linkat:linkat 的共同实现(内核串)。kold/knew 已 copy_from_user。
- * 解析 old 的目标 inode(follow 语义见下)+ new 的父目录 + 末段名,调
- * newdir->i_op->link;FAT32(link==NULL) → -EPERM。目标已存在 → EEXIST。
- *
- * Linux linkat flags:默认 0 = 跟随 old 的 symlink(若 old 是软链,链其目标);
- * AT_SYMLINK_FOLLOW(0x400) 显式跟随(与默认同);无 NOFOLLOW 位(linkat 不
- * 支持 AT_SYMLINK_NOFOLLOW,故 old 恒跟随)。本 OS 用 vfs_resolve 的 follow
- * 行为(path_walk 跟随中间段、末段由调用方定)——此处 old 取跟随末段的结果
- * (stat 语义),对齐 Linux link(默认跟随)。 */
+// §3.4 do_linkat: common implementation of linkat (kernel string). kold/knew
+// already copy_from_user'd. Resolve old's target inode (follow semantics
+// below) + new's parent dir + final name, call newdir->i_op->link; FAT32
+// (link==NULL) -> -EPERM. Target already exists -> EEXIST.
+//
+// Linux linkat flags: default 0 = follow old's symlink (if old is a symlink,
+// link its target); AT_SYMLINK_FOLLOW (0x400) explicitly follows (same as
+// default); there is no NOFOLLOW bit (linkat does not support
+// AT_SYMLINK_NOFOLLOW, so old is always followed). This OS uses vfs_resolve's
+// follow behavior (path_walk follows intermediate segments; the terminal one
+// is decided by the caller) — here old takes the followed terminal result
+// (stat semantics), aligning with Linux link (default follow).
 static int do_linkat(int olddirfd, const char *kold, int newdirfd,
                      const char *knew, int flags) {
   if (flags & ~AT_SYMLINK_FOLLOW)
     return -EINVAL;
-  /* 解析 old 目标 inode(+1,调用者 put)。绝对路径走 mount 表;相对走 dirfd。
-   * follow=true:跟随末段 symlink(stat 语义,Linux link 默认)。
-   * m_old:target 解析归属的 mount(绝对路径=vfs_resolve 的 m;相对路径=dirfd
-   * 的 start 所在 mount,见下)。用于 VFS 层跨 fs EXDEV 判定(对齐 Linux
-   * vfs_link:target->i_sb != newdir->i_sb → EXDEV),不依赖惰性 inode.mount
-   * 字段(inode_create 初始化 NULL、仅 sys_open/stat 路径设值,fs 层比较误判)。
-   */
+  // Resolve old's target inode (+1, caller puts). Absolute path via mount
+  // table; relative via dirfd. follow=true: follow a terminal symlink (stat
+  // semantics, Linux link default). m_old: mount the target resolves under
+  // (absolute = vfs_resolve's m; relative = dirfd start's mount, below). Used
+  // for the VFS-layer cross-fs EXDEV check (aligning Linux vfs_link:
+  // target->i_sb != newdir->i_sb -> EXDEV), not relying on the lazy
+  // inode.mount field (inode_create inits it NULL, only sys_open/stat paths
+  // set it, so fs-layer comparison misjudges).
   struct inode *target;
   struct mount_entry *m_old = NULL;
   if (kold[0] == '/') {
@@ -4050,31 +4063,34 @@ static int do_linkat(int olddirfd, const char *kold, int newdirfd,
     m_old = vfs_resolve(kold, relpath, sizeof(relpath));
     if (!m_old)
       return -ENOENT;
-    target = path_walk(m_old, relpath); /* +1 */
+    target = path_walk(m_old, relpath); // +1
   } else {
     struct inode *start = resolve_dirfd_start(olddirfd);
     if (IS_ERR(start))
       return (int)PTR_ERR(start);
-    /* 相对路径 target 与 olddirfd 同 mount:dirfd 指向的目录 inode 归属的
-     * mount 即 target 的 mount。优先用 inode.mount(若 dirfd 经 sys_open
-     * 解析过已设);否则 fallback root mount("/"),与 mount_of_inode 语义一致。 */
+    // The relative target is on the same mount as olddirfd: the mount the
+    // dirfd's directory inode belongs to is the target's mount. Prefer
+    // inode.mount (set if dirfd was resolved via sys_open); else fall back to
+    // the root mount ("/"), consistent with mount_of_inode semantics.
     m_old = mount_of_inode(start);
     char relpath[256];
     if (normalize_path(kold, relpath, sizeof(relpath)) < 0) {
       inode_put(start);
       return -ENAMETOOLONG;
     }
-    target = path_walk_from(start, relpath); /* +1 */
+    target = path_walk_from(start, relpath); // +1
     inode_put(start);
   }
   if (!target) {
     return -ENOENT;
   }
 
-  /* 解析 new 的父目录 + 末段名(不建末段,link 在父目录下加新名)。
-   * m_new:new 归属 mount,与 m_old 同源取(绝对路径=vfs_resolve 的 m;相对路径
-   * =dirfd start 所属 mount)。不依赖惰性 inode.mount(tmpfs 经 path_walk_parent
-   * 取出的 newdir.mount 仍为 NULL,fallback 会误判为 root mount)。 */
+  // Resolve new's parent dir + final name (do not create the terminal name;
+  // link adds a new name under the parent). m_new: the mount new belongs to,
+  // taken from the same source as m_old (absolute = vfs_resolve's m; relative
+  // = dirfd start's mount). Does not rely on the lazy inode.mount (tmpfs's
+  // newdir.mount stays NULL when taken via path_walk_parent; the fallback
+  // would misjudge it as the root mount).
   struct inode *newdir;
   char newname[256];
   struct mount_entry *m_new = NULL;
@@ -4110,9 +4126,10 @@ static int do_linkat(int olddirfd, const char *kold, int newdirfd,
     inode_put(target);
     return err;
   }
-  /* 跨 fs EXDEV 先于 EPERM 判定(对齐 Linux vfs_link:target->i_sb != dir->i_sb
-   * → EXDEV 优先于 dir->i_op->link NULL 检查)。m_old/m_new 同源取自 mount 解析,
-   * 不依赖惰性 inode.mount。 */
+  // Cross-fs EXDEV is judged before EPERM (aligning Linux vfs_link:
+  // target->i_sb != dir->i_sb -> EXDEV takes precedence over the
+  // dir->i_op->link NULL check). m_old/m_new are taken from the same mount
+  // resolution source, not relying on the lazy inode.mount.
   if (m_old != m_new) {
     inode_put(newdir);
     inode_put(target);
@@ -4121,7 +4138,8 @@ static int do_linkat(int olddirfd, const char *kold, int newdirfd,
   if (!newdir->i_op || !newdir->i_op->link) {
     inode_put(newdir);
     inode_put(target);
-    return -EPERM; /* FAT32 无硬链接 → EPERM(Linux fat 对 link 返 EPERM) */
+    return -EPERM; // FAT32 has no hard links -> EPERM (Linux fat returns EPERM
+                   // for link)
   }
   err = newdir->i_op->link(newdir, target, newname);
   inode_put(newdir);
@@ -4135,7 +4153,7 @@ int64_t sys_link(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
   (void)a4;
   (void)a5;
   (void)a6;
-  /* link(old, new) = linkat(AT_FDCWD, old, AT_FDCWD, new, 0)。 */
+  // link(old, new) = linkat(AT_FDCWD, old, AT_FDCWD, new, 0).
   const char __user *uold = (const char __user *__force)a1;
   const char __user *unew = (const char __user *__force)a2;
   if (!uold || !unew)
@@ -4153,7 +4171,7 @@ int64_t sys_symlink(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
   (void)a4;
   (void)a5;
   (void)a6;
-  /* symlink(target, linkpath) = symlinkat(target, AT_FDCWD, linkpath)。 */
+  // symlink(target, linkpath) = symlinkat(target, AT_FDCWD, linkpath).
   const char __user *utarget = (const char __user *__force)a1;
   const char __user *ulink = (const char __user *__force)a2;
   if (!utarget || !ulink)
@@ -4171,7 +4189,7 @@ int64_t sys_readlink(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
   (void)a4;
   (void)a5;
   (void)a6;
-  /* readlink(path, buf, bufsiz) = readlinkat(AT_FDCWD, path, buf, bufsiz)。 */
+  // readlink(path, buf, bufsiz) = readlinkat(AT_FDCWD, path, buf, bufsiz).
   const char __user *upath = (const char __user *__force)a1;
   char __user *ubuf = (char __user *__force)a2;
   size_t bufsiz = (size_t)a3;
@@ -4182,17 +4200,20 @@ int64_t sys_readlink(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
     return -EFAULT;
   return do_readlinkat(AT_FDCWD, kpath, ubuf, bufsiz);
 }
-/* ===================== chmod/fchmod/fchmodat =====================
- * do_utimensat/do_faccessat 模式:kpath 内核串(调用方已 strncpy_from_user),
- * flags 严格校验。落盘仅内存(与 utimensat Q5 一致:FAT32 不写 mode 到磁盘目录项,
- * inode 内存态 mode/uid/gid/ctime)。setuid 位清除规则是安全基石(apply_chmod)。
- */
+// ===================== chmod/fchmod/fchmodat =====================
+// do_utimensat/do_faccessat pattern: kpath is a kernel string (caller already
+// strncpy_from_user'd), flags strictly validated. On-disk only in memory
+// (with utimensat Q5: FAT32 does not write mode to the on-disk directory
+// entry; inode's in-memory mode/uid/gid/ctime). The setuid-bit clearing rule
+// is a security cornerstone (apply_chmod).
 
-/* resolve_path_or_fd:chmod/chown 共用路径解析。返 +1 inode(调用方 inode_put)
- * 或 ERR_PTR(-errno)/NULL。flags 含 AT_EMPTY_PATH 且 kpath 空 → fd 路径(照
- * vfs_fstat_fd vfs.c:725:rcu_read_lock→fd_lookup→file_get→rcu_read_unlock→
- * inode_get(f->inode)→file_put);否则 path_walk 解析,末段 symlink 默认跟随
- * (AT_SYMLINK_NOFOLLOW 时取 link 本身,照 vfs_statx vfs.c:785)。 */
+// resolve_path_or_fd: shared path resolution for chmod/chown. Returns a +1
+// inode (caller inode_put) or ERR_PTR(-errno)/NULL. With AT_EMPTY_PATH and an
+// empty kpath -> the fd path (per vfs_fstat_fd vfs.c:725:
+// rcu_read_lock->fd_lookup->file_get->rcu_read_unlock->inode_get(f->inode)->
+// file_put); otherwise path_walk resolves and follows a terminal symlink by
+// default (at AT_SYMLINK_NOFOLLOW take the link itself, per vfs_statx
+// vfs.c:785).
 static struct inode *resolve_path_or_fd(int dirfd, const char *kpath,
                                         int flags) {
   if ((flags & AT_EMPTY_PATH) && kpath[0] == '\0') {
@@ -4207,8 +4228,7 @@ static struct inode *resolve_path_or_fd(int dirfd, const char *kpath,
     }
     file_get(f);
     rcu_read_unlock();
-    struct inode *ip =
-        f->inode ? inode_get(f->inode) : ERR_PTR(-EBADF); /* +1 */
+    struct inode *ip = f->inode ? inode_get(f->inode) : ERR_PTR(-EBADF); // +1
     file_put(f);
     return ip;
   }
@@ -4219,29 +4239,31 @@ static struct inode *resolve_path_or_fd(int dirfd, const char *kpath,
     struct mount_entry *m = vfs_resolve(kpath, relpath, sizeof(relpath));
     if (!m)
       return ERR_PTR(-ENOENT);
-    ip = path_walk(m, relpath); /* +1 */
+    ip = path_walk(m, relpath); // +1
   } else {
     struct inode *start = resolve_dirfd_start(dirfd);
     if (IS_ERR(start))
       return start;
-    ip = path_walk_from(start, kpath); /* +1 */
+    ip = path_walk_from(start, kpath); // +1
     inode_put(start);
   }
   if (!ip)
     return ERR_PTR(-ENOENT);
-  /* 末段 symlink 跟随:未设 AT_SYMLINK_NOFOLLOW 时跟随(chmod 默认作用于目标,
-   * 非 link 本身)。中间段已由 path_walk 跟随。 */
+  // Follow a terminal symlink unless AT_SYMLINK_NOFOLLOW is set (chmod acts on
+  // the target by default, not the link itself). Intermediate segments are
+  // already followed by path_walk.
   if (ip->type == INODE_LNK && !(flags & AT_SYMLINK_NOFOLLOW)) {
     int sym_depth = 0;
     struct inode *resolved = follow_symlink(ip, &sym_depth);
     inode_put(ip);
-    return resolved; /* +1 或 ERR_PTR */
+    return resolved; // +1 or ERR_PTR
   }
-  return ip; /* +1 */
+  return ip; // +1
 }
 
-/* update_ctime:写 inode ctime(改 mode/uid/gid 后)。dispatch i_op->update_time
- * 或 generic 回退(照 do_utimensat:3408)。仅 CTIME_BIT。 */
+// update_ctime: write inode ctime (after a mode/uid/gid change). Dispatches
+// i_op->update_time or the generic fallback (per do_utimensat:3408). Only
+// CTIME_BIT.
 static int update_ctime(struct inode *ip) {
   uint64_t now =
       __atomic_load_n(&wall_clock_boot_ns, __ATOMIC_RELAXED) + sched_clock();
@@ -4253,28 +4275,32 @@ static int update_ctime(struct inode *ip) {
   return generic_update_time(ip, zero, zero, ts, CTIME_BIT);
 }
 
-/* apply_chmod:持 i_lock 改 mode(保留 S_IFMT 文件类型位),非特权 chmod 清
- * setuid/setgid 位(对齐 Linux chmod_common)。锁序:仅持 i_lock(leaf lock,
- * 照 fat32 i_lock→fat_lock 序,i_lock 在内层),不碰 fat_lock/page_cache_lock。 */
+// apply_chmod: hold i_lock to change mode (preserving the S_IFMT file-type
+// bits); an unprivileged chmod clears setuid/setgid (aligning Linux
+// chmod_common). Lock order: only i_lock (a leaf lock, per fat32
+// i_lock->fat_lock order, with i_lock innermost); does not touch
+// fat_lock/page_cache_lock.
 static void apply_chmod(struct inode *ip, unsigned int new_mode) {
   mutex_lock(&ip->i_lock);
-  ip->mode = (ip->mode & S_IFMT) | (new_mode & 07777); /* 保留文件类型位 */
+  ip->mode =
+      (ip->mode & S_IFMT) | (new_mode & 07777); // preserve file-type bits
   if (!capable(CAP_FSETID) && S_ISREG(ip->mode))
-    ip->mode &= ~(S_ISUID | S_ISGID); /* 非特权 chmod 必清 setuid 位 */
+    ip->mode &= ~(S_ISUID | S_ISGID); // unprivileged chmod must clear setuid
   if (!capable(CAP_FSETID) && S_ISDIR(ip->mode))
     ip->mode &= ~S_ISVTX;
   mutex_unlock(&ip->i_lock);
 }
 
-/* do_fchmodat:chmod/fchmod/fchmodat 共同实现。flags 校验照 do_utimensat(接受
- * AT_SYMLINK_NOFOLLOW + AT_EMPTY_PATH)。权限:CAP_FOWNER 放行,否则 euid 须匹配
- * owner(对齐 Linux chmod_common + inode_owner_or_capable)。 */
+// do_fchmodat: common implementation of chmod/fchmod/fchmodat. flags checked
+// as in do_utimensat (accepts AT_SYMLINK_NOFOLLOW + AT_EMPTY_PATH).
+// Permission: CAP_FOWNER passes, otherwise euid must match the owner (aligning
+// Linux chmod_common + inode_owner_or_capable).
 static int do_fchmodat(int dirfd, const char *kpath, unsigned int mode,
                        int flags) {
   if (flags & ~(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH))
     return -EINVAL;
   unsigned int new_mode =
-      mode & 07777; /* 剥文件类型位,保留 S_ISUID/S_ISGID/S_ISVTX */
+      mode & 07777; // strip file-type bits, keep S_ISUID/S_ISGID/S_ISVTX
 
   struct inode *ip = resolve_path_or_fd(dirfd, kpath, flags);
   if (IS_ERR(ip))
@@ -4300,7 +4326,7 @@ int64_t sys_chmod(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
   (void)a4;
   (void)a5;
   (void)a6;
-  /* chmod(path, mode) = fchmodat(AT_FDCWD, path, mode, 0)。 */
+  // chmod(path, mode) = fchmodat(AT_FDCWD, path, mode, 0).
   const char __user *upath = (const char __user *__force)a1;
   unsigned int mode = (unsigned int)a2;
   if (!upath)
@@ -4316,20 +4342,21 @@ int64_t sys_fchmod(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
   (void)a4;
   (void)a5;
   (void)a6;
-  /* fchmod(fd, mode) = fchmodat(fd, "", mode, AT_EMPTY_PATH)。 */
+  // fchmod(fd, mode) = fchmodat(fd, "", mode, AT_EMPTY_PATH).
   int fd = (int)a1;
   unsigned int mode = (unsigned int)a2;
   return do_fchmodat(fd, "", mode, AT_EMPTY_PATH);
 }
-/* ===================== chown/fchown/fchownat =====================
- * do_fchmodat 同模式:复用 resolve_path_or_fd/update_ctime。落盘仅内存(与
- * chmod/utimensat 一致)。权限简化为 CAP_CHOWN(root-only);Linux 复杂规则
- * (属主改 group 到自己所在 group)留 todo(单用户 root-default 不破坏现有测试)。
- */
+// ===================== chown/fchown/fchownat =====================
+// Same pattern as do_fchmodat: reuse resolve_path_or_fd/update_ctime.
+// On-disk only in memory (consistent with chmod/utimensat). Permission is
+// simplified to CAP_CHOWN (root-only); Linux's more complex rules (an owner
+// changing group to a group they belong to) are left to todo (the single-user
+// root-default does not break existing tests).
 
-/* apply_chown:持 i_lock 改 uid/gid((uid_t)-1/(gid_t)-1 = 不变),非特权 chown
- * 清 setuid/setgid 位(对齐 Linux chown_common)。锁序同 apply_chmod:仅 i_lock。
- */
+// apply_chown: hold i_lock to change uid/gid ((uid_t)-1/(gid_t)-1 = unchanged);
+// an unprivileged chown clears setuid/setgid (aligning Linux chown_common).
+// Lock order same as apply_chmod: only i_lock.
 static void apply_chown(struct inode *ip, unsigned int uid, unsigned int gid) {
   mutex_lock(&ip->i_lock);
   if (uid != (unsigned int)-1)
@@ -4337,13 +4364,15 @@ static void apply_chown(struct inode *ip, unsigned int uid, unsigned int gid) {
   if (gid != (unsigned int)-1)
     ip->gid = gid;
   if (!capable(CAP_FSETID) && S_ISREG(ip->mode))
-    ip->mode &= ~(S_ISUID | S_ISGID); /* chown 改 owner 后非特权清 setuid 位 */
+    ip->mode &=
+        ~(S_ISUID |
+          S_ISGID); // unprivileged chown after owner change clears setuid
   mutex_unlock(&ip->i_lock);
 }
 
-/* do_fchownat:chown/fchown/fchownat 共同实现。flags 校验同 chmod(接受
- * AT_SYMLINK_NOFOLLOW + AT_EMPTY_PATH)。(uid_t)-1/(gid_t)-1 =
- * 该字段不变(POSIX)。 */
+// do_fchownat: common implementation of chown/fchown/fchownat. flags checked
+// same as chmod (accepts AT_SYMLINK_NOFOLLOW + AT_EMPTY_PATH). (uid_t)-1/
+// (gid_t)-1 = leave that field unchanged (POSIX).
 static int do_fchownat(int dirfd, const char *kpath, unsigned int owner,
                        unsigned int group, int flags) {
   if (flags & ~(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH))
@@ -4358,7 +4387,7 @@ static int do_fchownat(int dirfd, const char *kpath, unsigned int owner,
 
   int err = 0;
   if (!capable(CAP_CHOWN)) {
-    err = -EPERM; /* 简化为 root-only(对齐 plan 决策) */
+    err = -EPERM; // simplified to root-only (per the plan decision)
   } else {
     apply_chown(ip, owner, group);
     err = update_ctime(ip);
@@ -4372,7 +4401,7 @@ int64_t sys_chown(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
   (void)a4;
   (void)a5;
   (void)a6;
-  /* chown(path, owner, group) = fchownat(AT_FDCWD, path, owner, group, 0)。 */
+  // chown(path, owner, group) = fchownat(AT_FDCWD, path, owner, group, 0).
   const char __user *upath = (const char __user *__force)a1;
   unsigned int owner = (unsigned int)a2;
   unsigned int group = (unsigned int)a3;
@@ -4388,8 +4417,7 @@ int64_t sys_fchown(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
   (void)a4;
   (void)a5;
   (void)a6;
-  /* fchown(fd, owner, group) = fchownat(fd, "", owner, group, AT_EMPTY_PATH)。
-   */
+  // fchown(fd, owner, group) = fchownat(fd, "", owner, group, AT_EMPTY_PATH).
   int fd = (int)a1;
   unsigned int owner = (unsigned int)a2;
   unsigned int group = (unsigned int)a3;
@@ -4399,7 +4427,7 @@ int64_t sys_linkat(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
                    int64_t a6) {
   (void)a5;
   (void)a6;
-  /* linkat(olddirfd, old, newdirfd, new, flags)。 */
+  // linkat(olddirfd, old, newdirfd, new, flags).
   int olddirfd = (int)a1;
   const char __user *uold = (const char __user *__force)a2;
   int newdirfd = (int)a3;
@@ -4419,7 +4447,7 @@ int64_t sys_symlinkat(int64_t a1, int64_t a2, int64_t a3, int64_t a4,
   (void)a4;
   (void)a5;
   (void)a6;
-  /* symlinkat(target, newdirfd, linkpath)。 */
+  // symlinkat(target, newdirfd, linkpath).
   const char __user *utarget = (const char __user *__force)a1;
   int newdirfd = (int)a2;
   const char __user *ulink = (const char __user *__force)a3;
@@ -4436,7 +4464,7 @@ int64_t sys_readlinkat(int64_t a1, int64_t a2, int64_t a3, int64_t a4,
                        int64_t a5, int64_t a6) {
   (void)a5;
   (void)a6;
-  /* readlinkat(dirfd, path, buf, bufsiz)。 */
+  // readlinkat(dirfd, path, buf, bufsiz).
   int dirfd = (int)a1;
   const char __user *upath = (const char __user *__force)a2;
   char __user *ubuf = (char __user *__force)a3;
@@ -4452,7 +4480,7 @@ int64_t sys_fchmodat(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
                      int64_t a6) {
   (void)a5;
   (void)a6;
-  /* fchmodat(dirfd, path, mode, flags)。 */
+  // fchmodat(dirfd, path, mode, flags).
   int dirfd = (int)a1;
   const char __user *upath = (const char __user *__force)a2;
   unsigned int mode = (unsigned int)a3;
@@ -4467,7 +4495,7 @@ int64_t sys_fchmodat(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
 int64_t sys_fchownat(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5,
                      int64_t a6) {
   (void)a6;
-  /* fchownat(dirfd, path, owner, group, flags)。 */
+  // fchownat(dirfd, path, owner, group, flags).
   int dirfd = (int)a1;
   const char __user *upath = (const char __user *__force)a2;
   unsigned int owner = (unsigned int)a3;
@@ -4537,7 +4565,8 @@ int64_t sys_setitimer(int64_t a1, int64_t a2, int64_t a3, int64_t a4,
   (void)a5;
   (void)a6;
   int which = (int)a1;
-  if (which != 0 /* ITIMER_REAL */)
+  // ITIMER_REAL
+  if (which != 0)
     return (int64_t)-ENOSYS;
 
   const struct k_itimerval __user *newv =
@@ -4577,26 +4606,30 @@ int64_t sys_setitimer(int64_t a1, int64_t a2, int64_t a3, int64_t a4,
 
 // ===================== trivial-return stubs (C2 group) =====================
 
-/* ===================== path-based inode 元数据/链接 syscall
- * ===================== 9
- * 个:access(21)/faccessat(269)/readlink(89)/readlinkat(267)/link(86)/
- * linkat(265)/symlink(88)/symlinkat(266)/utimensat(280)。服务「在本 OS 上编译
- * llvm libc」目标,语义对齐 glibc/Linux(Q6 严格 flags)。
- *
- * 解析模型:绝对路径 → mount 表最长前缀匹配(vfs_resolve)+ path_walk;
- * 相对路径(dirfd)→ resolve_dirfd_start + path_walk_from。AT_FDCWD 解析到
- * bp->cwd 的 inode(resolve_dirfd_start,musl *at wrapper 直送 AT_FDCWD;
- * bp->cwd 由 sys_chdir 维护,是 cwd 唯一真相)。
- * 权限(Q4):inode_permission 按 euid 判定,非"无脑 root 放行"(本 OS 有完整
- * permission ladder,proc.h uid/euid/...,test_setuid_saved 证 ladder 真在跑)。
- * 时间戳(Q5):inode 内存态 atime/mtime/ctime,getattr 读;不落盘 FAT32
- * (llvm libc utimensat test 不跨重启)。UTIME_NOW/OMIT 见 uapi fcntl.h。
- * symlink/link(Q2/Q3):tmpfs/devtmpfs 真实现(阶段2/3);FAT32 物理不支持 →
- * symlink/link 返 -EPERM/-ENOSYS(readlink 同)。详见 tmp1.md。
- */
+// ===================== path-based inode metadata/link syscalls
+// ===================== 9 of them: access(21)/faccessat(269)/readlink(89)/
+// readlinkat(267)/link(86)/linkat(265)/symlink(88)/symlinkat(266)/utimensat
+// (280). Serve the "compile llvm libc on this OS" goal; semantics align with
+// glibc/Linux (Q6 strict flags).
+//
+// Resolution model: absolute path -> longest-prefix mount-table match
+// (vfs_resolve) + path_walk; relative path (dirfd) -> resolve_dirfd_start +
+// path_walk_from. AT_FDCWD resolves to bp->cwd's inode (resolve_dirfd_start;
+// musl's *at wrappers pass AT_FDCWD directly; bp->cwd, maintained by
+// sys_chdir, is the sole source of truth for cwd).
+// Permissions (Q4): inode_permission decides on euid, not a blanket root
+// pass (this OS has a full permission ladder; proc.h uid/euid/..., and
+// test_setuid_saved proves the ladder really runs).
+// Timestamps (Q5): inode's in-memory atime/mtime/ctime, read via getattr; not
+// persisted to FAT32 (llvm libc's utimensat test does not survive reboot).
+// UTIME_NOW/OMIT see uapi fcntl.h.
+// symlink/link (Q2/Q3): real implementations on tmpfs/devtmpfs (phases 2/3);
+// FAT32 does not support them -> symlink/link return -EPERM/-ENOSYS
+// (readlink likewise). See tmp1.md for details.
 
-/* do_faccessat:access(path,mode)=faccessat(AT_FDCWD,path,mode,0) 的共同实现。
- * kpath 为内核字符串(调用方已 copy_from_user)。flags 严格校验(Q6)。 */
+// do_faccessat: common implementation of access(path,mode)=faccessat(
+// AT_FDCWD,path,mode,0). kpath is a kernel string (caller already
+// copy_from_user). flags strictly validated (Q6).
 static int do_faccessat(int dirfd, const char *kpath, int mode, int flags) {
   if (mode & ~(R_OK | W_OK | X_OK | F_OK))
     return -EINVAL;
@@ -4605,7 +4638,7 @@ static int do_faccessat(int dirfd, const char *kpath, int mode, int flags) {
 
   struct inode *ip;
   if ((flags & AT_EMPTY_PATH) && kpath[0] == '\0') {
-    /* stat fd 本身:复用 vfs_statx 的 fd 路径。 */
+    // Stat the fd itself: reuse vfs_statx's fd path.
     if (dirfd < 0)
       return -EBADF;
     xtask *proc = current_task;
@@ -4617,7 +4650,8 @@ static int do_faccessat(int dirfd, const char *kpath, int mode, int flags) {
     }
     file_get(f);
     rcu_read_unlock();
-    /* fd 路径同样按 AT_EACCESS 选 real/effective uid(对齐 Linux)。 */
+    // The fd path likewise selects real/effective uid by AT_EACCESS
+    // (aligning Linux).
     uint32_t cu = (flags & AT_EACCESS) ? current_proc->euid : current_proc->uid;
     uint32_t cg = (flags & AT_EACCESS) ? current_proc->egid : current_proc->gid;
     int r = f->inode ? inode_permission(f->inode, mode, cu, cg) : -EBADF;
@@ -4630,18 +4664,19 @@ static int do_faccessat(int dirfd, const char *kpath, int mode, int flags) {
     struct mount_entry *m = vfs_resolve(kpath, relpath, sizeof(relpath));
     if (!m)
       return -ENOENT;
-    ip = path_walk(m, relpath); /* +1 */
+    ip = path_walk(m, relpath); // +1
   } else {
     struct inode *start = resolve_dirfd_start(dirfd);
     if (IS_ERR(start))
       return (int)PTR_ERR(start);
-    ip = path_walk_from(start, kpath); /* +1 */
+    ip = path_walk_from(start, kpath); // +1
     inode_put(start);
   }
   if (!ip)
     return -ENOENT;
-  /* AT_EACCESS(对齐 Linux eaccess/faccessat):用 EFFECTIVE uid 判;不带则用 REAL
-   * uid(access(2) 语义)。capable(CAP_DAC_OVERRIDE) 的 root 放行仍按 euid。 */
+  // AT_EACCESS (aligning Linux eaccess/faccessat): use the EFFECTIVE uid;
+  // without it use the REAL uid (access(2) semantics). A root pass via
+  // capable(CAP_DAC_OVERRIDE) still follows euid.
   uint32_t cu = (flags & AT_EACCESS) ? current_proc->euid : current_proc->uid;
   uint32_t cg = (flags & AT_EACCESS) ? current_proc->egid : current_proc->gid;
   int r = inode_permission(ip, mode, cu, cg);
@@ -4665,16 +4700,16 @@ int64_t sys_access(int64_t a1, int64_t a2, int64_t unused1, int64_t unused2,
   return do_faccessat(AT_FDCWD, kpath, mode, 0);
 }
 
-/* sys_faccessat(dirfd, path, mode) — SYS_faccessat (269). The legacy entry has
- * NO flags argument on Linux: musl calls it as syscall(SYS_faccessat, fd, file,
- * mode) — a 3-arg __syscall3 that leaves r10 (arg4/a4) holding whatever the
- * caller last put there (garbage, often a leftover AT_EACCESS from a prior
- * __syscall4). Reading a4 as flags was non-deterministic: a stray AT_EACCESS
- * bit flipped the real→effective uid selection and made access(2)/faccessat(,0)
- * spuriously EACCES under split credentials (test_eaccess). Honour the Linux
- * ABI: ignore a4 here, force flags=0;
- * AT_EACCESS/AT_SYMLINK_NOFOLLOW/AT_EMPTY_PATH all reach do_faccessat through
- * sys_faccessat2 (439), which musl only invokes when flag is nonzero. */
+// sys_faccessat(dirfd, path, mode) — SYS_faccessat (269). The legacy entry has
+// NO flags argument on Linux: musl calls it as syscall(SYS_faccessat, fd, file,
+// mode) — a 3-arg __syscall3 that leaves r10 (arg4/a4) holding whatever the
+// caller last put there (garbage, often a leftover AT_EACCESS from a prior
+// __syscall4). Reading a4 as flags was non-deterministic: a stray AT_EACCESS
+// bit flipped the real→effective uid selection and made access(2)/faccessat(,0)
+// spuriously EACCES under split credentials (test_eaccess). Honour the Linux
+// ABI: ignore a4 here, force flags=0;
+// AT_EACCESS/AT_SYMLINK_NOFOLLOW/AT_EMPTY_PATH all reach do_faccessat through
+// sys_faccessat2 (439), which musl only invokes when flag is nonzero.
 int64_t sys_faccessat(int64_t a1, int64_t a2, int64_t a3, int64_t a4,
                       int64_t unused5, int64_t unused6) {
   (void)a4;
@@ -4691,11 +4726,11 @@ int64_t sys_faccessat(int64_t a1, int64_t a2, int64_t a3, int64_t a4,
   return do_faccessat(dirfd, kpath, mode, 0);
 }
 
-/* sys_faccessat2(dirfd, path, mode, flags) — SYS_faccessat2 (439).  LLVM libc
- * hard-#errors without SYS_faccessat2 (faccessat.cpp).  This is the only entry
- * that honours flags: AT_EACCESS/AT_SYMLINK_NOFOLLOW/AT_EMPTY_PATH reach
- * do_faccessat here (musl routes nonzero flag to faccessat2; the legacy
- * SYS_faccessat entry ignores flags — see sys_faccessat). */
+// sys_faccessat2(dirfd, path, mode, flags) — SYS_faccessat2 (439).  LLVM libc
+// hard-#errors without SYS_faccessat2 (faccessat.cpp).  This is the only entry
+// that honours flags: AT_EACCESS/AT_SYMLINK_NOFOLLOW/AT_EMPTY_PATH reach
+// do_faccessat here (musl routes nonzero flag to faccessat2; the legacy
+// SYS_faccessat entry ignores flags — see sys_faccessat).
 int64_t sys_faccessat2(int64_t a1, int64_t a2, int64_t a3, int64_t a4,
                        int64_t unused5, int64_t unused6) {
   (void)unused5;
@@ -4712,13 +4747,13 @@ int64_t sys_faccessat2(int64_t a1, int64_t a2, int64_t a3, int64_t a4,
   return do_faccessat(dirfd, kpath, mode, flags);
 }
 
-/* fill_statfs: populate struct statfs for a mount.  Per the decision in
- * doc/design/todo.md, capacity fields (f_blocks/f_bfree/f_bavail/f_files/
- * f_ffree) stay 0 — FAT32 keeps no free-cluster counter and llvm-libc's
- * pathconf() only reads f_type/f_bsize/f_frsize/f_namelen.  f_type is chosen
- * by fstype name so FAT32 honestly reports MSDOS_SUPER_MAGIC (FAT has no
- * symlink support, matching _PC_2_SYMLINKS=0).  Returns the magic, or 0 if
- * the fstype is unknown (f_type 0 + the caller still copies out). */
+// fill_statfs: populate struct statfs for a mount.  Per the decision in
+// doc/design/todo.md, capacity fields (f_blocks/f_bfree/f_bavail/f_files/
+// f_ffree) stay 0 — FAT32 keeps no free-cluster counter and llvm-libc's
+// pathconf() only reads f_type/f_bsize/f_frsize/f_namelen.  f_type is chosen
+// by fstype name so FAT32 honestly reports MSDOS_SUPER_MAGIC (FAT has no
+// symlink support, matching _PC_2_SYMLINKS=0).  Returns the magic, or 0 if
+// the fstype is unknown (f_type 0 + the caller still copies out).
 static long statfs_magic_for(const struct mount_entry *m) {
   if (!m || !m->fs)
     return 0;
@@ -4740,12 +4775,12 @@ static void fill_statfs(struct statfs *ks, const struct mount_entry *m) {
                                             : (long)PAGE_SIZE;
   ks->f_bsize = bsize;
   ks->f_frsize = bsize;
-  ks->f_namelen = 255; /* FAT32 LFN / tmpfs / sysfs all cap at 255 */
+  ks->f_namelen = 255; // FAT32 LFN / tmpfs / sysfs all cap at 255
 }
 
-/* sys_statfs(path, buf) — SYS_STATFS (137).  Resolves path to its mount via
- * vfs_resolve (longest-prefix mount-table match), same entry path as
- * sys_access.  fd-less; AT_FDCWD not applicable. */
+// sys_statfs(path, buf) — SYS_STATFS (137).  Resolves path to its mount via
+// vfs_resolve (longest-prefix mount-table match), same entry path as
+// sys_access.  fd-less; AT_FDCWD not applicable.
 int64_t sys_statfs(int64_t a1, int64_t a2, int64_t unused3, int64_t unused4,
                    int64_t unused5, int64_t unused6) {
   (void)unused3;
@@ -4770,8 +4805,8 @@ int64_t sys_statfs(int64_t a1, int64_t a2, int64_t unused3, int64_t unused4,
   return 0;
 }
 
-/* sys_fstatfs(fd, buf) — SYS_FSTATFS (138).  Resolves fd → file → inode →
- * mount (mount_of_inode), mirroring do_faccessat's AT_EMPTY_PATH fd path. */
+// sys_fstatfs(fd, buf) — SYS_FSTATFS (138).  Resolves fd → file → inode →
+// mount (mount_of_inode), mirroring do_faccessat's AT_EMPTY_PATH fd path.
 int64_t sys_fstatfs(int64_t a1, int64_t a2, int64_t unused3, int64_t unused4,
                     int64_t unused5, int64_t unused6) {
   (void)unused3;
@@ -4802,9 +4837,11 @@ int64_t sys_fstatfs(int64_t a1, int64_t a2, int64_t unused3, int64_t unused4,
   return 0;
 }
 
-/* do_utimensat:utimensat 的共同实现。kpath 内核串;times 为 NULL 时 atime=
- * mtime=now(需写权限)。UTIME_NOW/OMIT 见 uapi。flags 仅 AT_SYMLINK_NOFOLLOW
- * 合法(本 OS 无 symlink,接受但语义同 follow;Q6 严格校验未知位)。 */
+// do_utimensat: common implementation of utimensat. kpath is a kernel string;
+// when times is NULL, atime=mtime=now (needs write permission). UTIME_NOW/OMIT
+// see uapi. Only AT_SYMLINK_NOFOLLOW is legal in flags (this OS has no
+// symlink; it accepts but treats as follow; Q6 strictly validates unknown
+// bits).
 static int do_utimensat(int dirfd, const char *kpath, struct timespec *ktimes,
                         int flags) {
   if (flags & ~AT_SYMLINK_NOFOLLOW)
@@ -4813,8 +4850,9 @@ static int do_utimensat(int dirfd, const char *kpath, struct timespec *ktimes,
   struct vfs_timespec64 na = {0}, nm = {0};
   bool omit_atime = false, omit_mtime = false;
   if (ktimes) {
-    /* 校验 tv_nsec:合法值 ∈ [0,1e9) ∪ {UTIME_NOW,UTIME_OMIT}(Q6 严格)。
-     * 不改写 ktimes——NOW/OMIT 的判定在下方 na/nm 计算时仍需原值。 */
+    // Validate tv_nsec: legal values ∈ [0,1e9) ∪ {UTIME_NOW,UTIME_OMIT}
+    // (Q6 strict). Do not rewrite ktimes — NOW/OMIT determination below still
+    // needs the original values when computing na/nm.
     for (int i = 0; i < 2; i++) {
       if (ktimes[i].tv_nsec == UTIME_NOW || ktimes[i].tv_nsec == UTIME_OMIT)
         continue;
@@ -4836,7 +4874,7 @@ static int do_utimensat(int dirfd, const char *kpath, struct timespec *ktimes,
              : (struct vfs_timespec64){.tv_sec = (int64_t)ktimes[1].tv_sec,
                                        .tv_nsec = (uint32_t)ktimes[1].tv_nsec};
   } else {
-    /* times=NULL:atime=mtime=now,需写权限(对齐 Linux)。 */
+    // times=NULL: atime=mtime=now, needs write permission (aligning Linux).
     uint64_t now =
         __atomic_load_n(&wall_clock_boot_ns, __ATOMIC_RELAXED) + sched_clock();
     na = nm =
@@ -4845,18 +4883,18 @@ static int do_utimensat(int dirfd, const char *kpath, struct timespec *ktimes,
   }
 
   struct inode *ip;
-  int need_write_perm = !ktimes; /* times=NULL 需写权限 */
+  int need_write_perm = !ktimes; // times=NULL needs write permission
   if (kpath[0] == '/') {
     char relpath[256];
     struct mount_entry *m = vfs_resolve(kpath, relpath, sizeof(relpath));
     if (!m)
       return -ENOENT;
-    ip = path_walk(m, relpath); /* +1 */
+    ip = path_walk(m, relpath); // +1
   } else {
     struct inode *start = resolve_dirfd_start(dirfd);
     if (IS_ERR(start))
       return (int)PTR_ERR(start);
-    ip = path_walk_from(start, kpath); /* +1 */
+    ip = path_walk_from(start, kpath); // +1
     inode_put(start);
   }
   if (!ip)
@@ -4898,7 +4936,7 @@ int64_t sys_utimensat(int64_t a1, int64_t a2, int64_t a3, int64_t a4,
     if (strncpy_from_user(kpath, upath, sizeof(kpath)) < 0)
       return -EFAULT;
   } else {
-    /* path=NULL:作用于 dirfd 本身(对齐 Linux utimensat(2))。 */
+    // path=NULL: operate on dirfd itself (aligning Linux utimensat(2)).
     kpath[0] = '\0';
     flags |= AT_EMPTY_PATH;
   }
@@ -4963,9 +5001,9 @@ int64_t sys_mkdirat(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
     inode_put(start);
     return (int64_t)rc;
   }
-  /* S08: 取回新建目录设 owner + umask 权限位(对齐 sys_mkdir)。start 仍持 +1,
-   * 供 path_walk_from 解析。 */
-  struct inode *nip = path_walk_from(start, relpath); /* +1 */
+  // S08: fetch the new dir back to set owner + umask permission bits (aligning
+  // sys_mkdir). start still holds +1, for use by path_walk_from.
+  struct inode *nip = path_walk_from(start, relpath); // +1
   inode_put(start);
   if (nip) {
     nip->mode = (nip->mode & ~0777) | (uint32_t)eff_mode;
@@ -5058,8 +5096,8 @@ int64_t sys_renameat(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   if (strncpy_from_user(new_k, unew, sizeof(new_k)) < 0)
     return (int64_t)-EFAULT;
 
-  /* Both absolute → existing sys_rename (mount-table match + same-mount check).
-   */
+  // Both absolute -> existing sys_rename (mount-table match + same-mount
+  // check).
   if (old_k[0] == '/' && new_k[0] == '/')
     return sys_rename(arg2, arg4, 0, 0, 0, 0);
 
@@ -5560,13 +5598,14 @@ int64_t sys_ioctl(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
     }
     struct dev_ops *ops = (struct dev_ops *)ip->i_priv;
 
-    /* RINGBUF_WAKE / RINGBUF_INJECT handlers removed (evdev broker replaces the
-     * SHM ring; see kernel/bsd/evdev_broker.c). */
+    // RINGBUF_WAKE / RINGBUF_INJECT handlers removed (evdev broker replaces the
+    // SHM ring; see kernel/bsd/evdev_broker.c).
 
     if (ops->driver_pid == 0) {
-      /* 控制节点 /dev/input/control 的 INPUT_REGISTER：走内核 direct path
-       * 返回 owner write-fd（能 alloc_fd/fd_install，转发路径不能装 fd）。
-       * arg 为用户指针，evdev_control_ioctl 内部 copy_from_user。 */
+      // Control node /dev/input/control's INPUT_REGISTER: takes the kernel
+      // direct path and returns the owner write-fd (can alloc_fd/fd_install;
+      // the proxy path cannot install an fd). arg is a user pointer;
+      // evdev_control_ioctl copies from user internally.
       if (cmd == INPUT_REGISTER) {
         long r = evdev_control_ioctl(cmd, arg);
         ret = (int64_t)r;
@@ -6004,8 +6043,9 @@ int64_t sys_ftruncate(int64_t arg1, int64_t arg2, int64_t unused1,
     return (int64_t)-EBADF;
   }
 
-  /* Regular files: dispatch size change to i_op->setattr (锁由 setattr
-   * 内部持,对齐 §6.6;消除硬编码 fat32_ftruncate)。 */
+  // Regular files: dispatch size change to i_op->setattr (lock taken
+  // internally by setattr, per §6.6; removes the hardcoded
+  // fat32_ftruncate).
   if (f->type == FD_REGULAR) {
     struct inode *ip = f->inode;
     rcu_read_unlock();
@@ -6139,10 +6179,12 @@ int64_t sys_ftruncate(int64_t arg1, int64_t arg2, int64_t unused1,
 
 // ===================== BSD syscall: fallocate =====================
 // sys_fallocate(fd, mode, offset, len). x86-64 ABI: rdi=fd rsi=mode
-// rdx=offset r10=len. 仅支持 mode=0(posix_fallocate 默认)：普通文件经
-// i_op->setattr grow+zero(fat32/tmpfs setattr 内部分配并清零、drop stale
-// page cache)；memfd(SHM) 委派 sys_ftruncate 的 grow 分支(遵 F_SEAL_GROW)。
-// 其它 mode(KEEP_SIZE/PUNCH_HOLE/...)一律 -EOPNOTSUPP(FAT32 连续无洞)。
+// rdx=offset r10=len. Only mode=0 is supported (posix_fallocate default):
+// plain files grow+zero via i_op->setattr (fat32/tmpfs setattr internally
+// allocates and zeroes, dropping stale page cache); memfd (SHM) delegates to
+// sys_ftruncate's grow branch (honoring F_SEAL_GROW). Other modes
+// (KEEP_SIZE/PUNCH_HOLE/...) always return -EOPNOTSUPP (FAT32 is contiguous,
+// no holes).
 int64_t sys_fallocate(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
                       int64_t unused1, int64_t unused2) {
   int fd = (int)arg1;
@@ -6155,7 +6197,7 @@ int64_t sys_fallocate(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   if (off < 0 || len <= 0)
     return (int64_t)-EINVAL;
   uint64_t total = (uint64_t)off + (uint64_t)len;
-  if (total < (uint64_t)off) /* overflow */
+  if (total < (uint64_t)off) // overflow
     return (int64_t)-EINVAL;
   if (mode != 0)
     return (int64_t)-EOPNOTSUPP;
@@ -6181,7 +6223,7 @@ int64_t sys_fallocate(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
       ret = -EBADF;
       goto out;
     }
-    if (total <= ip->size) { /* FAT32 连续无洞,已分配 */
+    if (total <= ip->size) { // FAT32 contiguous, no holes, already allocated
       ret = 0;
       goto out;
     }
@@ -6189,7 +6231,7 @@ int64_t sys_fallocate(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
       ret = -EOPNOTSUPP;
       goto out;
     }
-    ret = (int64_t)ip->i_op->setattr(ip, total); /* grow + zero-fill */
+    ret = (int64_t)ip->i_op->setattr(ip, total); // grow + zero-fill
   } else if (f->type == FD_SHM) {
     struct shm *shm = f->shm;
     if (!shm) {
@@ -6202,12 +6244,13 @@ int64_t sys_fallocate(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
       ret = 0;
       goto out;
     }
-    /* target>cur → sys_ftruncate 只走 grow 分支(遵 F_SEAL_GROW)。
-     * 释放本函数的引用后委派,避免双引用。 */
+    // target>cur -> sys_ftruncate only takes the grow branch (honoring
+    // F_SEAL_GROW). Delegate after releasing this function's reference, to
+    // avoid a double reference.
     file_put(f);
     return sys_ftruncate((int64_t)fd, (int64_t)total, 0, 0, 0, 0);
   } else {
-    ret = -EINVAL; /* pipe/socket/dev/dir */
+    ret = -EINVAL; // pipe/socket/dev/dir
   }
 out:
   file_put(f);
@@ -6216,9 +6259,10 @@ out:
 
 // ===================== BSD syscall: fadvise64 =====================
 // sys_fadvise64(fd, offset, len, advice). x86-64 ABI: rdi=fd rsi=offset
-// rdx=len r10=advice. 全部 POSIX_FADV_* advice 为 advisory no-op(无 readahead
-// 基建,无逐 range 安全丢页 API):仅校验 fd + advice 范围后返 0。DONTNEED 不
-// 真丢页(技术债见 doc/design/todo.md)。
+// rdx=len r10=advice. All POSIX_FADV_* advice are advisory no-ops (no
+// readahead infrastructure, no per-range safe page-drop API): only validate
+// fd + advice range, then return 0. DONTNEED does not actually drop pages
+// (tech debt, see doc/design/todo.md).
 int64_t sys_fadvise64(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
                       int64_t unused1, int64_t unused2) {
   int fd = (int)arg1;
@@ -6226,7 +6270,7 @@ int64_t sys_fadvise64(int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4,
   (void)arg2;
   (void)arg3;
 
-  if (advice < 0 || advice > 5) /* POSIX_FADV_NORMAL..NOREUSE */
+  if (advice < 0 || advice > 5) // POSIX_FADV_NORMAL..NOREUSE
     return (int64_t)-EINVAL;
   if (fd < 0 || fd >= MAX_FD)
     return (int64_t)-EBADF;
@@ -6982,17 +7026,17 @@ int64_t sys_membarrier(int64_t arg1, int64_t arg2, int64_t unused1,
     return (int64_t)-EINVAL;
 
   switch (cmd) {
-  case 0: /* MEMBARRIER_CMD_QUERY */
+  case 0: // MEMBARRIER_CMD_QUERY
     // GLOBAL(1) | GLOBAL_EXPEDITED(2) | REGISTER_GLOBAL_EXPEDITED(4) |
     // PRIVATE_EXPEDITED(8) | REGISTER_PRIVATE_EXPEDITED(16).
     return (int64_t)(1 | 2 | 4 | 8 | 16);
-  case 1: /* MEMBARRIER_CMD_GLOBAL */
-  case 2: /* MEMBARRIER_CMD_GLOBAL_EXPEDITED */
-  case 8: /* MEMBARRIER_CMD_PRIVATE_EXPEDITED */
+  case 1: // MEMBARRIER_CMD_GLOBAL
+  case 2: // MEMBARRIER_CMD_GLOBAL_EXPEDITED
+  case 8: // MEMBARRIER_CMD_PRIVATE_EXPEDITED
     __asm__ volatile("mfence" ::: "memory");
     return 0;
-  case 4:  /* MEMBARRIER_CMD_REGISTER_GLOBAL_EXPEDITED */
-  case 16: /* MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED */
+  case 4:  // MEMBARRIER_CMD_REGISTER_GLOBAL_EXPEDITED
+  case 16: // MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED
     // Registration accepted but not enforced (see rationale above).
     return 0;
   default:

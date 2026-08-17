@@ -18,4 +18,4 @@
 #define NETLINK_USERSOCK 2 // User-mode socket (future)
 #define NETLINK_FIREWALL 3 // Firewall (future)
 
-#endif /* _LINUX_NETLINK_H */
+#endif // _LINUX_NETLINK_H

@@ -131,14 +131,13 @@ static int unix_bind_register_hash(const char *sun_path, struct unix_sock *sock,
   return 0;
 }
 
-/* ===== VFS socket inode helpers（/run tmpfs 上 mknod socket）=====
- * Path walking may submit block I/O and schedule. It must run without
- * socket_lock; only the final inode->i_priv/hash-table transaction is locked.
- */
+// ===== VFS socket inode helpers (mknod socket on /run tmpfs) =====
+// Path walking may submit block I/O and schedule. It must run without
+// socket_lock; only the final inode->i_priv/hash-table transaction is locked.
 
-/* VFS 路径：path_walk 父目录 + i_op->create(S_IFSOCK) 建 socket inode。
- * 返 ERR_PTR(-errno) 失败；成功返 +1 引用 inode（i_priv 初始 NULL，待挂
- * sock）。 */
+// VFS path: path_walk into the parent dir + i_op->create(S_IFSOCK) to build the
+// socket inode. Returns ERR_PTR(-errno) on failure, or a +1-referenced inode on
+// success (i_priv initially NULL, awaiting the sock).
 static struct inode *vfs_mknod_socket(const char *sun_path) {
   char relpath[256], lastname[256];
   struct mount_entry *m = vfs_resolve(sun_path, relpath, sizeof(relpath));
@@ -155,7 +154,7 @@ static struct inode *vfs_mknod_socket(const char *sun_path) {
     inode_put(parent);
     return ERR_PTR(-EOPNOTSUPP);
   }
-  /* S08: 权限位应用 umask,设 owner=创建进程。 */
+  // S08: apply umask to the permission bits, set owner = creating process.
   int eff_mode = S_IFSOCK | (0777 & ~(int)current_proc->umask);
   struct inode *ip = parent->i_op->create(parent, lastname, eff_mode);
   inode_put(parent);
@@ -163,23 +162,24 @@ static struct inode *vfs_mknod_socket(const char *sun_path) {
     return ip;
   ip->uid = current_proc->uid;
   ip->gid = current_proc->gid;
-  return ip; /* +1 引用，挂 sock 用 */
+  return ip; // +1 reference, for attaching the sock
 }
 
-/* VFS 路径：path_walk 取 socket inode（+1 引用）。 */
+// VFS path: path_walk to fetch the socket inode (+1 reference).
 static struct inode *vfs_lookup_socket(const char *sun_path) {
   char relpath[256];
   struct mount_entry *m = vfs_resolve(sun_path, relpath, sizeof(relpath));
   if (!m)
     return ERR_PTR(-ENOENT);
-  struct inode *ip = path_walk(m, relpath); /* +1 */
+  struct inode *ip = path_walk(m, relpath); // +1
   if (!ip)
     return ERR_PTR(-ENOENT);
   return ip;
 }
 
-/* 新 register：先走 VFS（建 socket inode + 挂 sock），失败降级哈希表占名。
- * 对齐 Linux bind 语义：路径已存在（无论是否已 bind）→ EADDRINUSE。 */
+// New register: walk VFS first (build socket inode + attach sock), fall back to
+// hash-table name reservation on failure. Matches Linux bind semantics: a path
+// that already exists (bound or not) → EADDRINUSE.
 int unix_bind_register(const char *sun_path, struct unix_sock *sock,
                        pid_t owner_pid) {
   spin_lock(&socket_lock);
@@ -208,7 +208,7 @@ int unix_bind_register(const char *sun_path, struct unix_sock *sock,
     sock->bind_inode = ip;
     sock->owner_pid = owner_pid;
   } else if (!ret) {
-    /* Non-/run paths fall back to the in-memory namespace. */
+    // Non-/run paths fall back to the in-memory namespace.
     ret = unix_bind_register_hash(sun_path, sock, owner_pid);
   }
 
@@ -225,15 +225,15 @@ int unix_bind_register(const char *sun_path, struct unix_sock *sock,
   sock->bind_in_progress = 0;
   spin_unlock(&socket_lock);
 
-  /* A committed VFS bind owns ip until unregister; all other paths drop it. */
+  // A committed VFS bind owns ip until unregister; all other paths drop it.
   if (use_vfs && ret)
     inode_put(ip);
   return ret;
 }
 
-/* 新 lookup：先走 VFS，失败降级哈希表。
- * 对齐 Linux connect 语义：路径存在但未 LISTEN → -ECONNREFUSED（非 -ENOENT）。
- */
+// New lookup: walk VFS first, fall back to the hash table on failure.
+// Matches Linux connect semantics: path exists but not LISTEN →
+// -ECONNREFUSED (not -ENOENT).
 int unix_bind_lookup(const char *sun_path, struct unix_sock **out,
                      pid_t *owner_pid) {
   struct inode *ip = vfs_lookup_socket(sun_path);
@@ -270,8 +270,8 @@ int unix_bind_lookup(const char *sun_path, struct unix_sock **out,
   return ret;
 }
 
-/* DGRAM lookup returns a referenced target so VFS work and queue updates can
- * happen in separate, non-sleeping socket_lock critical sections. */
+// DGRAM lookup returns a referenced target so VFS work and queue updates can
+// happen in separate, non-sleeping socket_lock critical sections.
 int unix_bind_lookup_dgram(const char *sun_path, struct unix_sock **out) {
   struct inode *ip = vfs_lookup_socket(sun_path);
   int ret = 0;
@@ -316,8 +316,8 @@ int unix_bind_lookup_dgram(const char *sun_path, struct unix_sock **out) {
 }
 
 void unix_bind_unregister(struct unix_sock *sock) {
-  /* VFS 路径清理：清 inode->i_priv + 释放 bind 期间持有的 inode 引用。
-   * bind_inode 为 NULL 时 no-op（哈希表路径）。 */
+  // VFS path cleanup: clear inode->i_priv + release the inode reference held
+  // during bind. No-op when bind_inode is NULL (hash-table path).
   struct inode *ip = NULL;
   spin_lock(&socket_lock);
   if (sock->bind_inode) {
@@ -444,8 +444,8 @@ struct unix_sock *unix_sock_alloc(void) {
   sock->bind_inode = NULL;
   sock->owner_pid = -1;
   sock->bind_in_progress = 0;
-  /* eager 分配 wq：阻塞 reader 改 add_wait_queue 后 wq 必须在创建时非
-   * NULL（§7.1）。 */
+  // Eagerly allocate wq: once a blocking reader calls add_wait_queue, the wq
+  // must be non-NULL from creation time (§7.1).
   sock->wq = (wait_queue_head *)kmalloc(sizeof(wait_queue_head));
   if (!sock->wq) {
     kfree(sock);
@@ -750,8 +750,8 @@ int64_t unix_dgram_recvmsg(struct unix_sock *sock, const struct iovec *iov,
         return -ETIMEDOUT;
       }
       {
-        /* Merge shared_pending so kill()-delivered signals interrupt the
-         * recv wait (signal_pending merges sig_pending + shared_pending). */
+        // Merge shared_pending so kill()-delivered signals interrupt the
+        // recv wait (signal_pending merges sig_pending + shared_pending).
         if (signal_pending(proc)) {
           proc->state = RUNNING;
           remove_wait_queue(sock->wq, &wait);
@@ -901,11 +901,13 @@ static int unix_scm_resolve(struct sk_buff *skb, const void *control,
 int64_t unix_sock_sendmsg(struct unix_sock *sock, const struct iovec *iov,
                           size_t iovlen, const void *control, size_t controllen,
                           int flags) {
-  // DGRAM 已连接（connect() 缓存了目标 path）：无 addr 的 send/sendmsg/write
-  // 按 dgram_dst_path 动态查找目标，走 unix_dgram_sendto（它对 target 取
-  // 临时 u_count 引用，wake-after-unlock 安全）。DGRAM 不持有持久 peer_sock
-  // 指针，避免对端 close 后本端 peer_sock 悬空 UAF。带 addr 的 DGRAM 发送
-  // 在 sys_sendmsg/sys_sendto 入口已直接走 unix_dgram_sendto，不会到此。
+  // DGRAM connected (connect() cached the target path): a send/sendmsg/write
+  // with no addr dynamically resolves the target by dgram_dst_path, routing to
+  // unix_dgram_sendto (it takes a temporary u_count ref on the target, making
+  // wake-after-unlock safe). DGRAM holds no persistent peer_sock pointer, so a
+  // peer close cannot leave this side with a dangling peer_sock UAF. A DGRAM
+  // send carrying an explicit addr is routed directly to unix_dgram_sendto at
+  // the sys_sendmsg/sys_sendto entry and never reaches here.
   if (sock->type == SOCK_DGRAM && sock->dgram_dst_path[0] != '\0') {
     struct sockaddr_un dest;
     __memset(&dest, 0, sizeof(dest));
@@ -1073,8 +1075,9 @@ int64_t unix_sock_recvmsg(struct unix_sock *sock, const struct iovec *iov,
         return -EAGAIN;
       }
 
-      // Block reader: 持 socket_lock 挂 wq（模式2，条件检查与挂 wq
-      // 同一临界区防丢唤醒）。
+      // Block reader: hang the wq while holding socket_lock (pattern 2 —
+      // the condition check and add_wait_queue are in one critical section
+      // to avoid a lost wakeup).
       xtask *proc = current_task;
       wait_queue_t wait;
       wait.func = poll_wait_cb;
@@ -1118,7 +1121,7 @@ int64_t unix_sock_recvmsg(struct unix_sock *sock, const struct iovec *iov,
       }
       proc->state = RUNNING;
       remove_wait_queue(sock->wq, &wait);
-      continue; // 醒后回顶重新 lock → 重查 recv_queue
+      continue; // awake: loop back to re-lock and re-check recv_queue
     }
 
     // We have data. Calculate how much to read into the remaining iov space.
@@ -1283,7 +1286,8 @@ void unix_sock_close(struct unix_sock *sock) {
 
   skb_free_list(recv_to_free);
 
-  // 唤醒本端与对端阻塞 reader/writer（各自挂自己 wq）+ epoll 等待者（POLLHUP）
+  // Wake blocked local and peer readers/writers (each waits on its own wq) plus
+  // any epoll waiters (POLLHUP)
   __wake_up(sock->wq, POLLHUP | POLLIN | POLLOUT);
   if (peer_s) {
     __wake_up(peer_s->wq, POLLHUP | POLLIN | POLLOUT);
@@ -1613,7 +1617,8 @@ static int64_t do_accept(int64_t arg1, int64_t arg2, int64_t arg3,
         ret = -EAGAIN;
         goto out;
       }
-      // Blocking: block — 持 socket_lock 挂 wq（模式2）
+      // Blocking: block while holding socket_lock and hang on the wq (pattern
+      // 2)
       wait_queue_t wait;
       wait.func = poll_wait_cb;
       wait.data = proc;
@@ -1859,11 +1864,13 @@ int64_t sys_connect(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
       file_put(cf);
       return (int64_t)-ECONNREFUSED;
     }
-    // DGRAM connect: 只缓存目标 path，不持 peer_sock 指针。对端 dgram
-    // socket 仅靠自身 fd 存活且无反向引用，缓存指针会在对端 close 后悬空
-    // （close 本端时读到已释放内存 → UAF）。发送时按 path 动态查找
-    // （unix_dgram_sendto 对 target 取临时 u_count 引用，wake-after-unlock
-    // 安全）。Linux DGRAM connect 同样不持久绑定 peer 对象。
+    // DGRAM connect: only cache the target path; never hold a peer_sock
+    // pointer. A peer DGRAM socket lives only via its own fd and has no
+    // back-reference, so a cached pointer would dangle after the peer closes
+    // (reading freed memory when this side closes → UAF). Sends resolve the
+    // path dynamically (unix_dgram_sendto takes a temporary u_count ref on the
+    // target, making wake-after-unlock safe). Linux DGRAM connect likewise
+    // binds no persistent peer object.
     __memcpy(client_sock->dgram_dst_path, sun_path,
              sizeof(client_sock->dgram_dst_path));
     client_sock->dgram_dst_path[sizeof(client_sock->dgram_dst_path) - 1] = '\0';
@@ -1945,7 +1952,7 @@ int64_t sys_connect(int64_t arg1, int64_t arg2, int64_t arg3, int64_t unused1,
   }
   listener->backlog_len++;
 
-  // Wake listener's blocked accept (挂 listener->wq)
+  // Wake the listener's blocked accept (waiting on listener->wq)
   spin_unlock(&socket_lock);
 
   __wake_up(listener->wq, POLLIN);
@@ -2457,7 +2464,7 @@ int64_t sys_shutdown(int64_t arg1, int64_t arg2, int64_t unused1,
 
   skb_free_list(recv_to_free);
 
-  // 唤醒本端与对端阻塞 reader/writer（各自挂自己 wq）
+  // Wake blocked local and peer readers/writers (each waits on its own wq)
   __wake_up(sock->wq, POLLHUP | POLLIN | POLLOUT);
   if (peer_s) {
     __wake_up(peer_s->wq, POLLHUP | POLLIN | POLLOUT);
@@ -2710,12 +2717,13 @@ static int64_t do_sys_poll(struct pollfd __user *fds, nfds_t nfds,
   }
 
 poll_out:
-  // prepare_to_wait: 循环顶部标过 BLOCKED，若 re-poll 期间某 fd 的 poll_wait_cb
-  // 命中 wake_wq_target 把 run_node push 进了 run_queue（state=READY），goto
-  // poll_out 不走 schedule() 会留下悬空 run_node（下次 block+wake 撞
-  // run_queue_push 单租户 ASSERT， 或被 steal 偷到 state≠READY 撞
-  // sched.c:382）。cancel 掉虚假唤醒：摘 run_node + state=RUNNING。所有 goto
-  // poll_out 路径统一在此处理。
+  // prepare_to_wait: BLOCKED is marked at the loop top; if during re-poll some
+  // fd's poll_wait_cb hit wake_wq_target and pushed run_node onto the run_queue
+  // (state=READY), going to poll_out without schedule() leaves a dangling
+  // run_node (the next block+wake trips run_queue_push's single-tenant ASSERT,
+  // or a steal picks it up while state!=READY tripping sched.c:382). Cancel the
+  // spurious wake: detach run_node + state=RUNNING. Every goto poll_out path is
+  // handled uniformly here.
   // Tear down every wait registration still held. Single cleanup point so no
   // return path can leave a pwq[i] on a wq (leaked heap node + dangling wq
   // links that wedge a later __wake_up traversal).

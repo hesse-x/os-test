@@ -3,22 +3,20 @@
  *
  * SPDX-License-Identifier: MIT
  */
-
-/* test_epoll — epoll I/O multiplexing Unity tests.
- * Covers design epoll_design.md §8.2 cases EP-001~605.
- *
- * Implementation notes (verified against kernel):
- * - LT: epoll_wait re-enqueues still-ready items via file_poll recheck.
- * - ET: only ep_poll_callback (new __wake_up) re-enqueues; one shot per edge.
- * - maxevents>EP_MAX_ITEMS(128) returns EINVAL (no truncation).
- * - ep_poll_callback uses revents = mask & events; EPOLLHUP only reported if
- *   requested OR POLLIN accompanies the HUP wake mask.
- * - signalfd intercepts signals before handler delivery, leaving them pending.
- * - SIGUSR1 default action terminates; EINTR tests install no-op handlers and
- *   use alarm()/SIGALRM for reliable async interruption.
- * - MAX_FD is 128 per process, so EP-603 (128 items) is infeasible; we test the
- *   practical fd-exhaustion boundary instead.
- */
+// test_epoll — epoll I/O multiplexing Unity tests.
+// Covers design epoll_design.md §8.2 cases EP-001~605.
+//
+// Implementation notes (verified against kernel):
+// - LT: epoll_wait re-enqueues still-ready items via file_poll recheck.
+// - ET: only ep_poll_callback (new __wake_up) re-enqueues; one shot per edge.
+// - maxevents>EP_MAX_ITEMS(128) returns EINVAL (no truncation).
+// - ep_poll_callback uses revents = mask & events; EPOLLHUP only reported if
+//   requested OR POLLIN accompanies the HUP wake mask.
+// - signalfd intercepts signals before handler delivery, leaving them pending.
+// - SIGUSR1 default action terminates; EINTR tests install no-op handlers and
+//   use alarm()/SIGALRM for reliable async interruption.
+// - MAX_FD is 128 per process, so EP-603 (128 items) is infeasible; we test the
+//   practical fd-exhaustion boundary instead.
 
 #include <errno.h>
 #include <fcntl.h>
@@ -43,8 +41,8 @@
 void setUp(void) {}
 void tearDown(void) {}
 
-/* No-op signal handler used to avoid default termination while still letting
- * the signal become pending (so EINTR / signalfd paths observe it). */
+// No-op signal handler used to avoid default termination while still letting
+// the signal become pending (so EINTR / signalfd paths observe it).
 static void noop_handler(int sig) { (void)sig; }
 
 static void install_noop(int sig) {
@@ -83,9 +81,9 @@ static ssize_t sock_recv(int fd, void *buf, size_t len) {
   return recvmsg(fd, &msg, 0);
 }
 
-/* ===================== 8.2.1 Basic create & control ===================== */
+// ===================== 8.2.1 Basic create & control =====================
 
-/* EP-001 */
+// EP-001
 void test_epoll_create1_basic(void) {
   int ep = epoll_create1(0);
   TEST_ASSERT_TRUE(ep >= 0);
@@ -96,7 +94,7 @@ void test_epoll_create1_basic(void) {
   close(ep2);
 }
 
-/* EP-002 */
+// EP-002
 void test_epoll_create1_cloexec(void) {
   int ep = epoll_create1(EPOLL_CLOEXEC);
   TEST_ASSERT_TRUE(ep >= 0);
@@ -105,14 +103,14 @@ void test_epoll_create1_cloexec(void) {
   close(ep);
 }
 
-/* EP-003 */
+// EP-003
 void test_epoll_create1_invalid_flags(void) {
   int ep = epoll_create1(0xdeadbeef);
   TEST_ASSERT_EQUAL_INT(-1, ep);
   TEST_ASSERT_EQUAL_INT(EINVAL, errno);
 }
 
-/* EP-004 */
+// EP-004
 void test_epoll_ctl_add_pipe(void) {
   int fd[2];
   pipe(fd);
@@ -120,7 +118,7 @@ void test_epoll_ctl_add_pipe(void) {
   struct epoll_event ev = {.events = EPOLLIN, .data.fd = fd[0]};
   int r = epoll_ctl(ep, EPOLL_CTL_ADD, fd[0], &ev);
   TEST_ASSERT_EQUAL_INT(0, r);
-  /* No data yet → wait with timeout=0 returns 0. */
+  // No data yet → wait with timeout=0 returns 0.
   struct epoll_event out[4];
   TEST_ASSERT_EQUAL_INT(0, epoll_wait(ep, out, 4, 0));
   close(fd[0]);
@@ -128,7 +126,7 @@ void test_epoll_ctl_add_pipe(void) {
   close(ep);
 }
 
-/* EP-005 */
+// EP-005
 void test_epoll_ctl_add_dup_eexist(void) {
   int fd[2];
   pipe(fd);
@@ -146,17 +144,17 @@ void test_epoll_ctl_add_dup_eexist(void) {
   close(ep);
 }
 
-/* EP-006 */
+// EP-006
 void test_epoll_ctl_mod_events(void) {
   int fd[2];
   pipe(fd);
   int ep = epoll_create1(0);
-  /* Monitor write end for EPOLLIN (empty pipe → not ready). */
+  // Monitor write end for EPOLLIN (empty pipe → not ready).
   struct epoll_event ev = {.events = EPOLLIN, .data.fd = fd[1]};
   epoll_ctl(ep, EPOLL_CTL_ADD, fd[1], &ev);
   struct epoll_event out[4];
   TEST_ASSERT_EQUAL_INT(0, epoll_wait(ep, out, 4, 0));
-  /* MOD to EPOLLOUT: write end is always writable → ready. */
+  // MOD to EPOLLOUT: write end is always writable → ready.
   ev.events = EPOLLOUT;
   TEST_ASSERT_EQUAL_INT(0, epoll_ctl(ep, EPOLL_CTL_MOD, fd[1], &ev));
   int n = epoll_wait(ep, out, 4, 100);
@@ -167,7 +165,7 @@ void test_epoll_ctl_mod_events(void) {
   close(ep);
 }
 
-/* EP-007 */
+// EP-007
 void test_epoll_ctl_del(void) {
   int fd[2];
   pipe(fd);
@@ -183,7 +181,7 @@ void test_epoll_ctl_del(void) {
   close(ep);
 }
 
-/* EP-008 */
+// EP-008
 void test_epoll_ctl_noent(void) {
   int fd[2];
   pipe(fd);
@@ -200,7 +198,7 @@ void test_epoll_ctl_noent(void) {
   close(ep);
 }
 
-/* EP-009 */
+// EP-009
 void test_epoll_ctl_self(void) {
   int ep = epoll_create1(0);
   struct epoll_event ev = {.events = EPOLLIN};
@@ -210,9 +208,9 @@ void test_epoll_ctl_self(void) {
   close(ep);
 }
 
-/* ===================== 8.2.2 Level-Triggered behavior ===================== */
+// ===================== 8.2.2 Level-Triggered behavior =====================
 
-/* EP-101 */
+// EP-101
 void test_epoll_lt_pipe_readable(void) {
   int fd[2];
   pipe(fd);
@@ -229,7 +227,7 @@ void test_epoll_lt_pipe_readable(void) {
   close(ep);
 }
 
-/* EP-102 */
+// EP-102
 void test_epoll_lt_pipe_persistent(void) {
   int fd[2];
   pipe(fd);
@@ -240,7 +238,7 @@ void test_epoll_lt_pipe_persistent(void) {
   struct epoll_event out[4];
   int n1 = epoll_wait(ep, out, 4, 100);
   TEST_ASSERT_TRUE(n1 >= 1);
-  /* Do not read; LT must report again. */
+  // Do not read; LT must report again.
   int n2 = epoll_wait(ep, out, 4, 100);
   TEST_ASSERT_TRUE(n2 >= 1);
   TEST_ASSERT_TRUE(out[0].events & EPOLLIN);
@@ -249,14 +247,14 @@ void test_epoll_lt_pipe_persistent(void) {
   close(ep);
 }
 
-/* EP-103 */
+// EP-103
 void test_epoll_lt_pipe_consumed(void) {
   int fd[2];
   pipe(fd);
-  fcntl(fd[0], F_SETFL, O_NONBLOCK); /* non-blocking so the drain loop exits
-                                        with -EAGAIN once the pipe empties,
-                                        not by blocking (write end is still
-                                        open, so a blocking read would hang) */
+  fcntl(fd[0], F_SETFL, O_NONBLOCK); // non-blocking so the drain loop exits
+                                     // with -EAGAIN once the pipe empties,
+                                     // not by blocking (write end is still
+                                     // open, so a blocking read would hang)
   int ep = epoll_create1(0);
   struct epoll_event ev = {.events = EPOLLIN, .data.fd = fd[0]};
   epoll_ctl(ep, EPOLL_CTL_ADD, fd[0], &ev);
@@ -272,7 +270,7 @@ void test_epoll_lt_pipe_consumed(void) {
   close(ep);
 }
 
-/* EP-104: listen socket readiness via fork (connect child). */
+// EP-104: listen socket readiness via fork (connect child).
 void test_epoll_lt_socket_accept(void) {
   int lst = socket(AF_UNIX, SOCK_STREAM, 0);
   if (lst < 0) {
@@ -319,7 +317,7 @@ void test_epoll_lt_socket_accept(void) {
   unlink(addr.sun_path);
 }
 
-/* EP-105 */
+// EP-105
 void test_epoll_lt_socket_data(void) {
   int sv[2];
   if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) {
@@ -341,7 +339,7 @@ void test_epoll_lt_socket_data(void) {
   close(ep);
 }
 
-/* EP-106 */
+// EP-106
 void test_epoll_lt_socket_close(void) {
   int sv[2];
   if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) {
@@ -355,13 +353,13 @@ void test_epoll_lt_socket_close(void) {
   struct epoll_event out[4];
   int n = epoll_wait(ep, out, 4, 500);
   TEST_ASSERT_TRUE(n >= 1);
-  /* Peer close → POLLIN (EOF) and/or EPOLLHUP. */
+  // Peer close → POLLIN (EOF) and/or EPOLLHUP.
   TEST_ASSERT_TRUE(out[0].events & (EPOLLIN | EPOLLHUP));
   close(sv[0]);
   close(ep);
 }
 
-/* EP-107 */
+// EP-107
 void test_epoll_lt_multi_fd(void) {
   int p1[2], p2[2], p3[2];
   pipe(p1);
@@ -390,7 +388,7 @@ void test_epoll_lt_multi_fd(void) {
   close(ep);
 }
 
-/* EP-108 */
+// EP-108
 void test_epoll_lt_add_ready(void) {
   int fd[2];
   pipe(fd);
@@ -407,9 +405,9 @@ void test_epoll_lt_add_ready(void) {
   close(ep);
 }
 
-/* ===================== 8.2.3 Edge-Triggered behavior ===================== */
+// ===================== 8.2.3 Edge-Triggered behavior =====================
 
-/* EP-201 */
+// EP-201
 void test_epoll_et_oneshot_notify(void) {
   int fd[2];
   pipe(fd);
@@ -420,14 +418,14 @@ void test_epoll_et_oneshot_notify(void) {
   struct epoll_event out[4];
   int n = epoll_wait(ep, out, 4, 100);
   TEST_ASSERT_EQUAL_INT(1, n);
-  /* Do not read; ET must NOT re-report. */
+  // Do not read; ET must NOT re-report.
   TEST_ASSERT_EQUAL_INT(0, epoll_wait(ep, out, 4, 0));
   close(fd[0]);
   close(fd[1]);
   close(ep);
 }
 
-/* EP-202 */
+// EP-202
 void test_epoll_et_read_all(void) {
   int fd[2];
   pipe(fd);
@@ -441,9 +439,9 @@ void test_epoll_et_read_all(void) {
   char buf[16];
   while (read(fd[0], buf, sizeof(buf)) > 0) {
   }
-  /* No new data → no re-trigger. */
+  // No new data → no re-trigger.
   TEST_ASSERT_EQUAL_INT(0, epoll_wait(ep, out, 4, 0));
-  /* New data → re-trigger. */
+  // New data → re-trigger.
   write(fd[1], "y", 1);
   TEST_ASSERT_EQUAL_INT(1, epoll_wait(ep, out, 4, 100));
   close(fd[0]);
@@ -451,7 +449,7 @@ void test_epoll_et_read_all(void) {
   close(ep);
 }
 
-/* EP-203 */
+// EP-203
 void test_epoll_et_add_ready(void) {
   int fd[2];
   pipe(fd);
@@ -468,7 +466,7 @@ void test_epoll_et_add_ready(void) {
   close(ep);
 }
 
-/* EP-204 */
+// EP-204
 void test_epoll_et_no_dupe(void) {
   int fd[2];
   pipe(fd);
@@ -478,7 +476,7 @@ void test_epoll_et_no_dupe(void) {
   write(fd[1], "x", 1);
   write(fd[1], "y", 1);
   struct epoll_event out[4];
-  /* Two writes but only one ET notification (edge already happened). */
+  // Two writes but only one ET notification (edge already happened).
   int n = epoll_wait(ep, out, 4, 100);
   TEST_ASSERT_EQUAL_INT(1, n);
   close(fd[0]);
@@ -486,17 +484,17 @@ void test_epoll_et_no_dupe(void) {
   close(ep);
 }
 
-/* EP-205 */
+// EP-205
 void test_epoll_et_mod_retrigger(void) {
   int fd[2];
   pipe(fd);
   int ep = epoll_create1(0);
-  /* Monitor write end for EPOLLIN (not ready) with ET. */
+  // Monitor write end for EPOLLIN (not ready) with ET.
   struct epoll_event ev = {.events = EPOLLIN | EPOLLET, .data.fd = fd[1]};
   epoll_ctl(ep, EPOLL_CTL_ADD, fd[1], &ev);
   struct epoll_event out[4];
   TEST_ASSERT_EQUAL_INT(0, epoll_wait(ep, out, 4, 0));
-  /* MOD to EPOLLOUT: write end is ready → re-enqueue. */
+  // MOD to EPOLLOUT: write end is ready → re-enqueue.
   ev.events = EPOLLOUT | EPOLLET;
   epoll_ctl(ep, EPOLL_CTL_MOD, fd[1], &ev);
   int n = epoll_wait(ep, out, 4, 100);
@@ -507,9 +505,9 @@ void test_epoll_et_mod_retrigger(void) {
   close(ep);
 }
 
-/* ===================== 8.2.4 Timeout & signals ===================== */
+// ===================== 8.2.4 Timeout & signals =====================
 
-/* EP-301 */
+// EP-301
 void test_epoll_wait_timeout_zero(void) {
   int fd[2];
   pipe(fd);
@@ -523,7 +521,7 @@ void test_epoll_wait_timeout_zero(void) {
   close(ep);
 }
 
-/* EP-302 */
+// EP-302
 void test_epoll_wait_timeout_100ms(void) {
   int fd[2];
   pipe(fd);
@@ -541,7 +539,7 @@ void test_epoll_wait_timeout_100ms(void) {
   close(ep);
 }
 
-/* EP-303 */
+// EP-303
 void test_epoll_wait_timeout_minus1(void) {
   int fd[2];
   pipe(fd);
@@ -561,7 +559,7 @@ void test_epoll_wait_timeout_minus1(void) {
   close(ep);
 }
 
-/* EP-304 */
+// EP-304
 void test_epoll_wait_eintr(void) {
   int fd[2];
   pipe(fd);
@@ -581,7 +579,7 @@ void test_epoll_wait_eintr(void) {
   close(ep);
 }
 
-/* EP-305 */
+// EP-305
 void test_epoll_pwait_mask(void) {
   int fd[2];
   pipe(fd);
@@ -589,13 +587,13 @@ void test_epoll_pwait_mask(void) {
   struct epoll_event ev = {.events = EPOLLIN, .data.fd = fd[0]};
   epoll_ctl(ep, EPOLL_CTL_ADD, fd[0], &ev);
   install_noop(SIGUSR1);
-  /* Block SIGUSR1 and raise it so it stays pending. */
+  // Block SIGUSR1 and raise it so it stays pending.
   sigset_t mask;
   sigemptyset(&mask);
   sigaddset(&mask, SIGUSR1);
   sigprocmask(SIG_BLOCK, &mask, NULL);
   raise(SIGUSR1);
-  /* pwait also masks SIGUSR1 → must NOT be interrupted; times out at 100ms. */
+  // pwait also masks SIGUSR1 → must NOT be interrupted; times out at 100ms.
   sigset_t pwmask;
   sigemptyset(&pwmask);
   sigaddset(&pwmask, SIGUSR1);
@@ -605,7 +603,7 @@ void test_epoll_pwait_mask(void) {
   uint64_t dt = now_ms() - t0;
   TEST_ASSERT_EQUAL_INT(0, n);
   TEST_ASSERT_TRUE(dt >= 80);
-  /* Clear the pending signal. */
+  // Clear the pending signal.
   sigprocmask(SIG_UNBLOCK, &mask, NULL);
   restore_default(SIGUSR1);
   close(fd[0]);
@@ -613,7 +611,7 @@ void test_epoll_pwait_mask(void) {
   close(ep);
 }
 
-/* EP-306 */
+// EP-306
 void test_epoll_pwait_unblock(void) {
   int fd[2];
   pipe(fd);
@@ -621,7 +619,7 @@ void test_epoll_pwait_unblock(void) {
   struct epoll_event ev = {.events = EPOLLIN, .data.fd = fd[0]};
   epoll_ctl(ep, EPOLL_CTL_ADD, fd[0], &ev);
   install_noop(SIGALRM);
-  /* pwait masks only SIGUSR1; SIGALRM is unmasked → interrupts. */
+  // pwait masks only SIGUSR1; SIGALRM is unmasked → interrupts.
   sigset_t pwmask;
   sigemptyset(&pwmask);
   sigaddset(&pwmask, SIGUSR1);
@@ -637,9 +635,9 @@ void test_epoll_pwait_unblock(void) {
   close(ep);
 }
 
-/* ===================== 8.2.5 Multi-waiter ===================== */
+// ===================== 8.2.5 Multi-waiter =====================
 
-/* EP-401 */
+// EP-401
 void test_epoll_multi_waiter_same_fd(void) {
   int fd[2];
   pipe(fd);
@@ -658,7 +656,7 @@ void test_epoll_multi_waiter_same_fd(void) {
   close(ep2);
 }
 
-/* EP-402 */
+// EP-402
 void test_epoll_multi_waiter_et_both(void) {
   int fd[2];
   pipe(fd);
@@ -677,7 +675,7 @@ void test_epoll_multi_waiter_et_both(void) {
   close(ep2);
 }
 
-/* EP-403 */
+// EP-403
 void test_epoll_multi_epoll_one_fd(void) {
   int fd[2];
   pipe(fd);
@@ -698,9 +696,9 @@ void test_epoll_multi_epoll_one_fd(void) {
     close(ep[i]);
 }
 
-/* ===================== 8.2.6 Companion fd interplay ===================== */
+// ===================== 8.2.6 Companion fd interplay =====================
 
-/* EP-501 */
+// EP-501
 void test_epoll_eventfd_trigger(void) {
   int efd = eventfd(0, 0);
   TEST_ASSERT_TRUE(efd >= 0);
@@ -717,7 +715,7 @@ void test_epoll_eventfd_trigger(void) {
   close(ep);
 }
 
-/* EP-502 */
+// EP-502
 void test_epoll_timerfd_fire(void) {
   int tfd = timerfd_create(CLOCK_MONOTONIC, 0);
   TEST_ASSERT_TRUE(tfd >= 0);
@@ -726,7 +724,7 @@ void test_epoll_timerfd_fire(void) {
   epoll_ctl(ep, EPOLL_CTL_ADD, tfd, &ev);
   struct itimerspec its;
   memset(&its, 0, sizeof(its));
-  its.it_value.tv_nsec = 50 * 1000000L; /* 50ms */
+  its.it_value.tv_nsec = 50 * 1000000L; // 50ms
   timerfd_settime(tfd, 0, &its, NULL);
   struct epoll_event out[4];
   int n = epoll_wait(ep, out, 4, 1000);
@@ -736,7 +734,7 @@ void test_epoll_timerfd_fire(void) {
   close(ep);
 }
 
-/* EP-503 */
+// EP-503
 void test_epoll_signalfd_deliver(void) {
   sigset_t mask;
   sigemptyset(&mask);
@@ -746,7 +744,7 @@ void test_epoll_signalfd_deliver(void) {
   int ep = epoll_create1(0);
   struct epoll_event ev = {.events = EPOLLIN, .data.fd = sfd};
   epoll_ctl(ep, EPOLL_CTL_ADD, sfd, &ev);
-  /* signalfd intercepts SIGUSR1 before default action, leaving it pending. */
+  // signalfd intercepts SIGUSR1 before default action, leaving it pending.
   raise(SIGUSR1);
   struct epoll_event out[4];
   int n = epoll_wait(ep, out, 4, 500);
@@ -759,7 +757,7 @@ void test_epoll_signalfd_deliver(void) {
   close(ep);
 }
 
-/* EP-504 */
+// EP-504
 void test_epoll_mixed_fds(void) {
   int pfd[2];
   pipe(pfd);
@@ -780,7 +778,7 @@ void test_epoll_mixed_fds(void) {
   ev.data.fd = sv[0];
   epoll_ctl(ep, EPOLL_CTL_ADD, sv[0], &ev);
 
-  /* Trigger each. */
+  // Trigger each.
   write(pfd[1], "p", 1);
   uint64_t v = 1;
   write(efd, &v, 8);
@@ -809,9 +807,9 @@ void test_epoll_mixed_fds(void) {
   close(ep);
 }
 
-/* ===================== 8.2.7 Fault tolerance & bounds ===================== */
+// ===================== 8.2.7 Fault tolerance & bounds =====================
 
-/* EP-601 */
+// EP-601
 void test_epoll_bad_epfd(void) {
   struct epoll_event out[4];
   int r = epoll_wait(-1, out, 4, 0);
@@ -820,7 +818,7 @@ void test_epoll_bad_epfd(void) {
 
   int fd[2];
   pipe(fd);
-  /* Pass a non-epoll fd as epfd. */
+  // Pass a non-epoll fd as epfd.
   r = epoll_wait(fd[0], out, 4, 0);
   TEST_ASSERT_EQUAL_INT(-1, r);
   TEST_ASSERT_EQUAL_INT(EBADF, errno);
@@ -828,7 +826,7 @@ void test_epoll_bad_epfd(void) {
   close(fd[1]);
 }
 
-/* EP-602 */
+// EP-602
 void test_epoll_closed_fd_auto(void) {
   int fd[2];
   pipe(fd);
@@ -838,8 +836,8 @@ void test_epoll_closed_fd_auto(void) {
   epoll_ctl(ep, EPOLL_CTL_ADD, fd[0], &ev);
   close(fd[0]);
 
-  /* Reuse the numeric fd and make the new file readable. The old open-file
-   * description must already have been removed from epoll. */
+  // Reuse the numeric fd and make the new file readable. The old open-file
+  // description must already have been removed from epoll.
   int reused[2];
   pipe(reused);
   write(reused[1], "x", 1);
@@ -854,8 +852,8 @@ void test_epoll_closed_fd_auto(void) {
   close(ep);
 }
 
-/* Closing one dup must retain the interest until the final descriptor for the
- * same open-file description is closed. */
+// Closing one dup must retain the interest until the final descriptor for the
+// same open-file description is closed.
 void test_epoll_close_dup_lifetime(void) {
   int fd[2];
   pipe(fd);
@@ -876,9 +874,9 @@ void test_epoll_close_dup_lifetime(void) {
   close(ep);
 }
 
-/* A descriptor received through SCM_RIGHTS has an alias in another process.
- * If the receiver closes its local fd before DEL, the registration must still
- * be removable by that now-closed fd number instead of leaking stale data. */
+// A descriptor received through SCM_RIGHTS has an alias in another process.
+// If the receiver closes its local fd before DEL, the registration must still
+// be removable by that now-closed fd number instead of leaking stale data.
 void test_epoll_del_closed_fd_with_fork_alias(void) {
   int fd[2];
   pipe(fd);
@@ -906,8 +904,8 @@ void test_epoll_del_closed_fd_with_fork_alias(void) {
   close(ep);
 }
 
-/* EP-603: interest list boundary. MAX_FD=128 per process makes 128 items
- * infeasible; instead verify many ADDs succeed up to fd-table capacity. */
+// EP-603: interest list boundary. MAX_FD=128 per process makes 128 items
+// infeasible; instead verify many ADDs succeed up to fd-table capacity.
 void test_epoll_maxitems(void) {
   int ep = epoll_create1(0);
   TEST_ASSERT_TRUE(ep >= 0);
@@ -930,7 +928,7 @@ void test_epoll_maxitems(void) {
   close(ep);
 }
 
-/* EP-604 */
+// EP-604
 void test_epoll_maxevents_limit(void) {
   int ep = epoll_create1(0);
   struct epoll_event out[4];
@@ -943,7 +941,7 @@ void test_epoll_maxevents_limit(void) {
   close(ep);
 }
 
-/* EP-605 */
+// EP-605
 void test_epoll_user_ptr_fault(void) {
   int fd[2];
   pipe(fd);
@@ -961,7 +959,7 @@ int main(int argc, char **argv, char **envp) {
   (void)argv;
   (void)envp;
   UNITY_BEGIN();
-  /* 8.2.1 */
+  // 8.2.1
   RUN_TEST(test_epoll_create1_basic);
   RUN_TEST(test_epoll_create1_cloexec);
   RUN_TEST(test_epoll_create1_invalid_flags);
@@ -971,7 +969,7 @@ int main(int argc, char **argv, char **envp) {
   RUN_TEST(test_epoll_ctl_del);
   RUN_TEST(test_epoll_ctl_noent);
   RUN_TEST(test_epoll_ctl_self);
-  /* 8.2.2 */
+  // 8.2.2
   RUN_TEST(test_epoll_lt_pipe_readable);
   RUN_TEST(test_epoll_lt_pipe_persistent);
   RUN_TEST(test_epoll_lt_pipe_consumed);
@@ -980,29 +978,29 @@ int main(int argc, char **argv, char **envp) {
   RUN_TEST(test_epoll_lt_socket_close);
   RUN_TEST(test_epoll_lt_multi_fd);
   RUN_TEST(test_epoll_lt_add_ready);
-  /* 8.2.3 */
+  // 8.2.3
   RUN_TEST(test_epoll_et_oneshot_notify);
   RUN_TEST(test_epoll_et_read_all);
   RUN_TEST(test_epoll_et_add_ready);
   RUN_TEST(test_epoll_et_no_dupe);
   RUN_TEST(test_epoll_et_mod_retrigger);
-  /* 8.2.4 */
+  // 8.2.4
   RUN_TEST(test_epoll_wait_timeout_zero);
   RUN_TEST(test_epoll_wait_timeout_100ms);
   RUN_TEST(test_epoll_wait_timeout_minus1);
   RUN_TEST(test_epoll_wait_eintr);
   RUN_TEST(test_epoll_pwait_mask);
   RUN_TEST(test_epoll_pwait_unblock);
-  /* 8.2.5 */
+  // 8.2.5
   RUN_TEST(test_epoll_multi_waiter_same_fd);
   RUN_TEST(test_epoll_multi_waiter_et_both);
   RUN_TEST(test_epoll_multi_epoll_one_fd);
-  /* 8.2.6 */
+  // 8.2.6
   RUN_TEST(test_epoll_eventfd_trigger);
   RUN_TEST(test_epoll_timerfd_fire);
   RUN_TEST(test_epoll_signalfd_deliver);
   RUN_TEST(test_epoll_mixed_fds);
-  /* 8.2.7 */
+  // 8.2.7
   RUN_TEST(test_epoll_bad_epfd);
   RUN_TEST(test_epoll_closed_fd_auto);
   RUN_TEST(test_epoll_close_dup_lifetime);

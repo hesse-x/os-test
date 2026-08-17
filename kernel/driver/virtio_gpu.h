@@ -15,7 +15,7 @@
 #include "kernel/driver/virtio_ring.h"
 #include "kernel/xcore/spinlock.h"
 
-/* ===== virtio-gpu PCI config (device-specific config space) ===== */
+// ===== virtio-gpu PCI config (device-specific config space) =====
 struct virtio_gpu_config {
   uint32_t events_read;
   uint32_t events_clear;
@@ -23,7 +23,7 @@ struct virtio_gpu_config {
   uint32_t num_capsets;
 };
 
-/* ===== virtio-gpu command types (ctrlq) ===== */
+// ===== virtio-gpu command types (ctrlq) =====
 #define VIRTIO_GPU_F_VIRGL 0
 #define VIRTIO_GPU_F_EDID 1
 #define VIRTIO_GPU_F_RESOURCE_UUID 2
@@ -56,7 +56,7 @@ struct virtio_gpu_config {
 #define VIRTIO_GPU_CMD_UPDATE_CURSOR 0x0300
 #define VIRTIO_GPU_CMD_MOVE_CURSOR 0x0301
 
-/* ===== virtio-gpu response types ===== */
+// ===== virtio-gpu response types =====
 #define VIRTIO_GPU_RESP_OK_NODATA 0x1100
 #define VIRTIO_GPU_RESP_OK_DISPLAY_INFO 0x1101
 #define VIRTIO_GPU_RESP_OK_CAPSET_INFO 0x1102
@@ -69,7 +69,7 @@ struct virtio_gpu_config {
 #define VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER 0x1205
 #define VIRTIO_GPU_RESP_OK_MAP_INFO 0x1104
 
-/* ===== virtio-gpu formats ===== */
+// ===== virtio-gpu formats =====
 #define VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM 1
 #define VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM 2
 #define VIRTIO_GPU_FORMAT_A8R8G8B8_UNORM 3
@@ -79,13 +79,13 @@ struct virtio_gpu_config {
 #define VIRTIO_GPU_FORMAT_A8B8G8R8_UNORM 121
 #define VIRTIO_GPU_FORMAT_R8G8B8X8_UNORM 134
 
-/* ===== virtio-gpu command/response headers ===== */
+// ===== virtio-gpu command/response headers =====
 struct virtio_gpu_ctrl_hdr {
   uint32_t type;
   uint32_t flags;
   uint64_t fence_id;
   uint32_t ctx_id;
-  uint8_t ring_idx; /* per-ring fence (VIRTIO_GPU_FLAG_INFO_RING_IDX) */
+  uint8_t ring_idx; // per-ring fence (VIRTIO_GPU_FLAG_INFO_RING_IDX)
   uint8_t padding[3];
 };
 
@@ -97,7 +97,7 @@ struct virtio_gpu_ctrl_hdr {
 struct virtio_gpu_ctx_create {
   struct virtio_gpu_ctrl_hdr hdr;
   uint32_t nlen;
-  uint32_t context_init; /* capset_id in low byte */
+  uint32_t context_init; // capset_id in low byte
   char debug_name[64];
 };
 
@@ -106,7 +106,7 @@ struct virtio_gpu_resource_create_blob {
   uint32_t resource_id;
   uint32_t blob_mem;
   uint32_t blob_flags;
-  uint32_t nr_entries; /* 0 for HOST3D (no guest backing) */
+  uint32_t nr_entries; // 0 for HOST3D (no guest backing)
   uint64_t blob_id;
   uint64_t size;
 };
@@ -117,22 +117,22 @@ struct virtio_gpu_resource_map_blob {
   uint32_t padding;
 };
 
-/* SUBMIT_3D: header carries fence_id/ring_idx/ctx_id; followed by inline cmd
- * stream. */
+// SUBMIT_3D: header carries fence_id/ring_idx/ctx_id; followed by inline cmd
+// stream.
 struct virtio_gpu_cmd_submit {
   struct virtio_gpu_ctrl_hdr hdr;
-  uint32_t size; /* size of following command stream in bytes */
+  uint32_t size; // size of following command stream in bytes
 };
 
-/* MAP_BLOB response: map_info + host-visible offset. */
+// MAP_BLOB response: map_info + host-visible offset.
 struct virtio_gpu_resp_map_info {
   struct virtio_gpu_ctrl_hdr hdr;
-  uint32_t map_info; /* VIRTIO_GPU_MAP_INFO_* */
+  uint32_t map_info; // VIRTIO_GPU_MAP_INFO_*
   uint32_t padding;
-  uint64_t offset; /* host-visible offset */
+  uint64_t offset; // host-visible offset
 };
 
-/* RESOURCE_CREATE_2D command */
+// RESOURCE_CREATE_2D command
 struct virtio_gpu_resource_create_2d {
   struct virtio_gpu_ctrl_hdr hdr;
   uint32_t resource_id;
@@ -141,15 +141,15 @@ struct virtio_gpu_resource_create_2d {
   uint32_t height;
 };
 
-/* 3D box (used by TRANSFER_TO/FROM_HOST_3D) */
+// 3D box (used by TRANSFER_TO/FROM_HOST_3D)
 struct virtio_gpu_box {
   uint32_t x, y, z;
   uint32_t w, h, d;
 };
 
-/* RESOURCE_CREATE_3D command (virgl legacy path). Field layout matches the
- * upstream virtio-gpu spec; the kernel maps drm_virtgpu_resource_create
- * (UAPI) into this before sending to the host. */
+// RESOURCE_CREATE_3D command (virgl legacy path). Field layout matches the
+// upstream virtio-gpu spec; the kernel maps drm_virtgpu_resource_create
+// (UAPI) into this before sending to the host.
 #define VIRTIO_GPU_RESOURCE_FLAG_Y_0_TOP (1 << 0)
 struct virtio_gpu_resource_create_3d {
   struct virtio_gpu_ctrl_hdr hdr;
@@ -167,7 +167,7 @@ struct virtio_gpu_resource_create_3d {
   uint32_t padding;
 };
 
-/* TRANSFER_TO_HOST_3D / TRANSFER_FROM_HOST_3D command (virgl legacy path). */
+// TRANSFER_TO_HOST_3D / TRANSFER_FROM_HOST_3D command (virgl legacy path).
 struct virtio_gpu_transfer_host_3d {
   struct virtio_gpu_ctrl_hdr hdr;
   struct virtio_gpu_box box;
@@ -178,25 +178,25 @@ struct virtio_gpu_transfer_host_3d {
   uint32_t layer_stride;
 };
 
-/* CTX_ATTACH_RESOURCE / CTX_DETACH_RESOURCE command. Not on the virgl basic
- * render path (Mesa winsys does not issue these) — kept for future use. */
+// CTX_ATTACH_RESOURCE / CTX_DETACH_RESOURCE command. Not on the virgl basic
+// render path (Mesa winsys does not issue these) — kept for future use.
 struct virtio_gpu_ctx_resource {
   struct virtio_gpu_ctrl_hdr hdr;
   uint32_t resource_id;
   uint32_t padding;
 };
 
-/* RESOURCE_UNREF command */
+// RESOURCE_UNREF command
 struct virtio_gpu_resource_unref {
   struct virtio_gpu_ctrl_hdr hdr;
   uint32_t resource_id;
   uint32_t padding;
 };
 
-/* ATTACH_BACKING command */
+// ATTACH_BACKING command
 struct virtio_gpu_mem_entry {
-  uint64_t addr;   /* guest physical address */
-  uint32_t length; /* length in bytes */
+  uint64_t addr;   // guest physical address
+  uint32_t length; // length in bytes
   uint32_t padding;
 };
 
@@ -204,10 +204,10 @@ struct virtio_gpu_resource_attach_backing {
   struct virtio_gpu_ctrl_hdr hdr;
   uint32_t resource_id;
   uint32_t nr_entries;
-  /* followed by nr_entries * sizeof(virtio_gpu_mem_entry) bytes */
+  // followed by nr_entries * sizeof(virtio_gpu_mem_entry) bytes
 };
 
-/* SET_SCANOUT command */
+// SET_SCANOUT command
 struct virtio_gpu_set_scanout {
   struct virtio_gpu_ctrl_hdr hdr;
   struct virtio_gpu_rect {
@@ -220,7 +220,7 @@ struct virtio_gpu_set_scanout {
   uint32_t resource_id;
 };
 
-/* TRANSFER_TO_HOST_2D command */
+// TRANSFER_TO_HOST_2D command
 struct virtio_gpu_transfer_to_host_2d {
   struct virtio_gpu_ctrl_hdr hdr;
   struct virtio_gpu_rect r;
@@ -229,7 +229,7 @@ struct virtio_gpu_transfer_to_host_2d {
   uint32_t padding;
 };
 
-/* RESOURCE_FLUSH command */
+// RESOURCE_FLUSH command
 struct virtio_gpu_resource_flush {
   struct virtio_gpu_ctrl_hdr hdr;
   struct virtio_gpu_rect r;
@@ -237,7 +237,7 @@ struct virtio_gpu_resource_flush {
   uint32_t padding;
 };
 
-/* GET_DISPLAY_INFO response */
+// GET_DISPLAY_INFO response
 struct virtio_gpu_resp_display_info {
   struct virtio_gpu_ctrl_hdr hdr;
   struct virtio_gpu_display_one {
@@ -247,12 +247,12 @@ struct virtio_gpu_resp_display_info {
   } pmodes[16];
 };
 
-/* Generic response (for commands that only return a header) */
+// Generic response (for commands that only return a header)
 struct virtio_gpu_ctrl_hdr_response {
   struct virtio_gpu_ctrl_hdr hdr;
 };
 
-/* GET_CAPSET_INFO / GET_CAPSET responses */
+// GET_CAPSET_INFO / GET_CAPSET responses
 struct virtio_gpu_resp_capset_info {
   struct virtio_gpu_ctrl_hdr hdr;
   uint32_t capset_id;
@@ -273,32 +273,32 @@ struct virtio_gpu_resp_capset {
   uint8_t capset_data[];
 };
 
-/* ===== virtio-gpu device state ===== */
+// ===== virtio-gpu device state =====
 #define VIRTIO_GPU_CTRLQ_INDEX 0
 
-/* ctx tag shared by both completion contexts so the single vring callback can
- * distinguish a stack cmd_ctx (sync path) from a heap pending (async path). */
+// ctx tag shared by both completion contexts so the single vring callback can
+// distinguish a stack cmd_ctx (sync path) from a heap pending (async path).
 enum virtgpu_cmd_ctx_tag { VIRTGPU_CTX_SYNC = 0, VIRTGPU_CTX_ASYNC = 1 };
 
-/* Sync-path per-cmd context (mirrors the existing virtio_gpu_cmd_ctx but with
- * a tag header). Replaces virtio_gpu_cmd_ctx — see 2B-2. */
+// Sync-path per-cmd context (mirrors the existing virtio_gpu_cmd_ctx but with
+// a tag header). Replaces virtio_gpu_cmd_ctx — see 2B-2.
 struct virtgpu_sync_ctx {
-  enum virtgpu_cmd_ctx_tag tag; /* VIRTGPU_CTX_SYNC */
+  enum virtgpu_cmd_ctx_tag tag; // VIRTGPU_CTX_SYNC
   volatile bool completed;
-  struct xtask *waiter; /* exact submitter; NULL during early boot polling */
+  struct xtask *waiter; // exact submitter; NULL during early boot polling
 };
 
-/* Async-path pending node: owns heap cmd/resp, lives until ISR completes it. */
+// Async-path pending node: owns heap cmd/resp, lives until ISR completes it.
 struct virtgpu_cmd_pending {
-  enum virtgpu_cmd_ctx_tag tag; /* VIRTGPU_CTX_ASYNC */
+  enum virtgpu_cmd_ctx_tag tag; // VIRTGPU_CTX_ASYNC
   volatile bool response_ready;
   struct virtio_gpu_ctrl_hdr
-      hdr;       /* copy of submitted header (fence_id/ring/ctx) */
-  void *cmd_buf; /* heap, owned by node */
+      hdr;       // copy of submitted header (fence_id/ring/ctx)
+  void *cmd_buf; // heap, owned by node
   uint32_t cmd_len;
-  void *resp_buf; /* heap, owned by node */
+  void *resp_buf; // heap, owned by node
   uint32_t resp_len;
-  struct xtask *waiter; /* NULL: fire-and-forget (EXECBUFFER does not block) */
+  struct xtask *waiter; // NULL: fire-and-forget (EXECBUFFER does not block)
   struct virtgpu_cmd_pending *next;
 };
 
@@ -307,24 +307,24 @@ struct virtio_gpu_device {
   struct virtqueue ctrlq;
   struct virtio_gpu_config config;
 
-  /* cmd_lock serializes vring submission and synchronous completion arming. */
+  // cmd_lock serializes vring submission and synchronous completion arming.
   spinlock cmd_lock;
 
-  /* per-command async completion (plan2). pending_list holds in-flight
-   * EXECBUFFER submissions whose cmd/resp buffers are heap-allocated and
-   * owned by the node. */
+  // per-command async completion (plan2). pending_list holds in-flight
+  // EXECBUFFER submissions whose cmd/resp buffers are heap-allocated and
+  // owned by the node.
   struct virtgpu_cmd_pending *pending_list;
   spinlock pending_lock;
 };
 
-/* ===== API ===== */
-/* Register the PCI probe/remove driver. */
+// ===== API =====
+// Register the PCI probe/remove driver.
 int virtio_gpu_register_driver(void);
 
-/* Periodic driver tick used to deliver paced DRM page-flip events. */
+// Periodic driver tick used to deliver paced DRM page-flip events.
 void virtio_gpu_poll(void);
 
-/* High-level command wrappers (all synchronous): */
+// High-level command wrappers (all synchronous):
 int virtio_gpu_create_2d(uint32_t resource_id, uint32_t width, uint32_t height,
                          uint32_t format);
 int virtio_gpu_attach_backing(uint32_t resource_id, uint64_t guest_phys,
@@ -337,9 +337,9 @@ int virtio_gpu_flush(uint32_t resource_id, uint32_t x, uint32_t y, uint32_t w,
                      uint32_t h);
 int virtio_gpu_resource_unref(uint32_t resource_id);
 
-/* 3D command senders (plan1/plan2). send_cmd_3d wraps send_cmd with a
- * ctrl_hdr-bearing command + generic hdr response. */
+// 3D command senders (plan1/plan2). send_cmd_3d wraps send_cmd with a
+// ctrl_hdr-bearing command + generic hdr response.
 int virtio_gpu_send_cmd_3d(struct virtio_gpu_device *vgpu, void *cmd_buf,
                            size_t cmd_len, void *resp_buf, size_t resp_len);
 
-#endif /* KERNEL_DRIVER_VIRTIO_GPU_H */
+#endif // KERNEL_DRIVER_VIRTIO_GPU_H

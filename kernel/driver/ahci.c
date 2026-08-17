@@ -1088,9 +1088,9 @@ int ahci_submit_sync(uint32_t lba, uint32_t count, void *buf, uint8_t dir) {
   }
   spin_unlock_irqrestore(&ahci_queue_lock, flags);
 
-  /* Before kernel_main installs the BSP idle task, filesystem discovery can
-   * still issue requests. It uses the same MSI completion path; there is no
-   * PxCI polling fallback. HLT merely waits for the completion interrupt. */
+  // Before kernel_main installs the BSP idle task, filesystem discovery can
+  // still issue requests. It uses the same MSI completion path; there is no
+  // PxCI polling fallback. HLT merely waits for the completion interrupt.
   if (!current_task) {
     while (!__atomic_load_n(&wait.done, __ATOMIC_ACQUIRE))
       __asm__ volatile("sti; hlt; cli" ::: "memory");

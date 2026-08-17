@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 
-/* Minimal local syslog daemon. */
+// Minimal local syslog daemon.
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -15,12 +15,12 @@
 #include <time.h>
 #include <unistd.h>
 
-/* Strip the syslog <PRI> prefix (e.g. "<13>") so /var/log/messages holds
- * standard "Mon DD HH:MM:SS ident[pid]: msg" lines, not raw "<pri>...".
- * musl's _vsyslog emits "<%d>%s ..." (third_party/musl src/misc/syslog.c),
- * so skip a leading '<', digits, then the closing '>'. Unknown framing is
- * left untouched. Returns the offset into buf where the message proper
- * begins. */
+// Strip the syslog <PRI> prefix (e.g. "<13>") so /var/log/messages holds
+// standard "Mon DD HH:MM:SS ident[pid]: msg" lines, not raw "<pri>...".
+// musl's _vsyslog emits "<%d>%s ..." (third_party/musl src/misc/syslog.c),
+// so skip a leading '<', digits, then the closing '>'. Unknown framing is
+// left untouched. Returns the offset into buf where the message proper
+// begins.
 static size_t strip_pri(const char *buf, size_t n) {
   if (n < 3 || buf[0] != '<')
     return 0;
@@ -50,9 +50,9 @@ static int bind_log_socket(void) {
 
 int main(void) {
   char buf[1024];
-  /* Ensure /var/log exists; tolerate EEXIST (already created on a prior boot
-   * since run.sh writes disk changes back). mkdir returning any other error
-   * (e.g. EACCES) means we can't log, so bail. */
+  // Ensure /var/log exists; tolerate EEXIST (already created on a prior boot
+  // since run.sh writes disk changes back). mkdir returning any other error
+  // (e.g. EACCES) means we can't log, so bail.
   if ((mkdir("/var", 0755) < 0 && errno != EEXIST) ||
       (mkdir("/var/log", 0755) < 0 && errno != EEXIST))
     return 1;
@@ -72,13 +72,13 @@ int main(void) {
       write(out, buf + off, (size_t)n - off);
       continue;
     }
-    /* recv <= 0: EINTR retries immediately; transient errors back off with a
-     * short sleep to avoid a busy-spin burning CPU if the socket errors. A
-     * persistent failure (e.g. socket closed) keeps looping with backoff
-     * rather than spinning — logging is best-effort, we never exit. */
+    // recv <= 0: EINTR retries immediately; transient errors back off with a
+    // short sleep to avoid a busy-spin burning CPU if the socket errors. A
+    // persistent failure (e.g. socket closed) keeps looping with backoff
+    // rather than spinning — logging is best-effort, we never exit.
     if (errno == EINTR)
       continue;
-    struct timespec ts = {0, 10 * 1000 * 1000}; /* 10ms */
+    struct timespec ts = {0, 10 * 1000 * 1000}; // 10ms
     nanosleep(&ts, NULL);
   }
 }

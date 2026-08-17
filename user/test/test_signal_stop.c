@@ -14,13 +14,13 @@
 void setUp(void) {}
 void tearDown(void) {}
 
-/* S01: raise(SIGSTOP) stops self; waitpid(WUNTRACED) reports WIFSTOPPED with
- * WSTOPSIG==SIGSTOP. Then SIGCONT resumes the child, which exits 7, and a
- * plain waitpid reports WIFEXITED / WEXITSTATUS==7. */
+// S01: raise(SIGSTOP) stops self; waitpid(WUNTRACED) reports WIFSTOPPED with
+// WSTOPSIG==SIGSTOP. Then SIGCONT resumes the child, which exits 7, and a
+// plain waitpid reports WIFEXITED / WEXITSTATUS==7.
 void test_stop_continue_wait(void) {
   pid_t child = fork();
   if (child == 0) {
-    raise(SIGSTOP); /* stop self */
+    raise(SIGSTOP); // stop self
     _exit(7);
   }
   TEST_ASSERT_TRUE(child > 0);
@@ -31,10 +31,10 @@ void test_stop_continue_wait(void) {
   TEST_ASSERT_TRUE(WIFSTOPPED(status));
   TEST_ASSERT_EQUAL_INT(SIGSTOP, WSTOPSIG(status));
 
-  /* Resume the child. */
+  // Resume the child.
   TEST_ASSERT_EQUAL_INT(0, kill(child, SIGCONT));
 
-  /* Now reap the exit. */
+  // Now reap the exit.
   status = 0;
   ret = waitpid(child, &status, 0);
   TEST_ASSERT_EQUAL_INT(child, ret);
@@ -42,12 +42,11 @@ void test_stop_continue_wait(void) {
   TEST_ASSERT_EQUAL_INT(7, WEXITSTATUS(status));
 }
 
-/* S01: default-action classification. SIGURG/SIGWINCH default to ignore (the
- * process must NOT die); SIGTSTP defaults to stop (WIFSTOPPED), not terminate.
- * Guards against the old bug where unlisted signals fell through to terminate.
- */
+// S01: default-action classification. SIGURG/SIGWINCH default to ignore (the
+// process must NOT die); SIGTSTP defaults to stop (WIFSTOPPED), not terminate.
+// Guards against the old bug where unlisted signals fell through to terminate.
 void test_default_action_ignore_and_stop(void) {
-  /* SIGURG/SIGWINCH: default ignore → child survives, exits 3. */
+  // SIGURG/SIGWINCH: default ignore → child survives, exits 3.
   pid_t child = fork();
   if (child == 0) {
     raise(SIGURG);
@@ -60,7 +59,7 @@ void test_default_action_ignore_and_stop(void) {
   TEST_ASSERT_TRUE(WIFEXITED(status));
   TEST_ASSERT_EQUAL_INT(3, WEXITSTATUS(status));
 
-  /* SIGTSTP: default stop → reported via WUNTRACED, then SIGCONT + reap. */
+  // SIGTSTP: default stop → reported via WUNTRACED, then SIGCONT + reap.
   child = fork();
   if (child == 0) {
     raise(SIGTSTP);
@@ -79,13 +78,13 @@ void test_default_action_ignore_and_stop(void) {
   TEST_ASSERT_EQUAL_INT(4, WEXITSTATUS(status));
 }
 
-/* S01: SIGKILL to a stopped child kills it (DA_TERM), reported as
- * WIFSIGNALED / WTERMSIG==SIGKILL. Guards the wake-to-exit path. */
+// S01: SIGKILL to a stopped child kills it (DA_TERM), reported as
+// WIFSIGNALED / WTERMSIG==SIGKILL. Guards the wake-to-exit path.
 void test_kill_stopped_child(void) {
   pid_t child = fork();
   if (child == 0) {
     raise(SIGSTOP);
-    _exit(99); /* unreachable */
+    _exit(99); // unreachable
   }
   int status = 0;
   pid_t ret = waitpid(child, &status, WUNTRACED);

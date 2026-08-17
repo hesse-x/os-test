@@ -4,13 +4,13 @@
  * SPDX-License-Identifier: MIT
  */
 
-/* getpwnam/getpwuid/getgrnam/getgrgid + _r variants — musl src/passwd
- * (musl_passwd_objs, passwd_worklist). The kernel does not pre-create /etc
- * (vfs.c only makes /dev /sys /proc /run), and ships no /etc/passwd or
- * /etc/group, so the suite writes them itself before lookup — mirroring the
- * tmp-dir-not-precreated pattern in test_tmpfile. Until the files exist every
- * lookup returns NULL + errno=ENOENT (correct "not found"); with them present
- * musl parses the colon fields and fills struct passwd/group. */
+// getpwnam/getpwuid/getgrnam/getgrgid + _r variants — musl src/passwd
+// (musl_passwd_objs, passwd_worklist). The kernel does not pre-create /etc
+// (vfs.c only makes /dev /sys /proc /run), and ships no /etc/passwd or
+// /etc/group, so the suite writes them itself before lookup — mirroring the
+// tmp-dir-not-precreated pattern in test_tmpfile. Until the files exist every
+// lookup returns NULL + errno=ENOENT (correct "not found"); with them present
+// musl parses the colon fields and fills struct passwd/group.
 
 #include <errno.h>
 #include <grp.h>
@@ -26,15 +26,15 @@
 void setUp(void) {}
 void tearDown(void) {}
 
-/* mkdir /etc if missing (ignore EEXIST), then write minimal passwd + group.
- * Idempotent: re-created each run so stale content never leaks across runs. */
+// mkdir /etc if missing (ignore EEXIST), then write minimal passwd + group.
+// Idempotent: re-created each run so stale content never leaks across runs.
 static void ensure_passwd_files(void) {
   if (mkdir("/etc", 0755) != 0 && errno != EEXIST)
     TEST_FAIL_MESSAGE("mkdir(/etc) failed");
 
   FILE *f = fopen("/etc/passwd", "w");
   TEST_ASSERT_NOT_NULL(f);
-  /* name:passwd:uid:gid:gecos:dir:shell */
+  // name:passwd:uid:gid:gecos:dir:shell
   TEST_ASSERT_TRUE(fputs("root:x:0:0:root:/root:/bin/sh\n", f) != EOF);
   TEST_ASSERT_TRUE(
       fputs("alice:x:1000:1000:Alice User:/home/alice:/bin/sh\n", f) != EOF);
@@ -42,13 +42,13 @@ static void ensure_passwd_files(void) {
 
   f = fopen("/etc/group", "w");
   TEST_ASSERT_NOT_NULL(f);
-  /* name:passwd:gid:members */
+  // name:passwd:gid:members
   TEST_ASSERT_TRUE(fputs("root:x:0:\n", f) != EOF);
   TEST_ASSERT_TRUE(fputs("users:x:1000:alice\n", f) != EOF);
   fclose(f);
 }
 
-/* 1. getpwnam("root"): classic non-reentrant lookup, fields parsed. */
+// 1. getpwnam("root"): classic non-reentrant lookup, fields parsed.
 void test_getpwnam_root(void) {
   ensure_passwd_files();
   errno = 0;
@@ -62,7 +62,7 @@ void test_getpwnam_root(void) {
   TEST_ASSERT_EQUAL_STRING("/bin/sh", pw->pw_shell);
 }
 
-/* 2. getpwuid(1000): lookup by uid. */
+// 2. getpwuid(1000): lookup by uid.
 void test_getpwuid_alice(void) {
   ensure_passwd_files();
   struct passwd *pw = getpwuid(1000);
@@ -72,8 +72,8 @@ void test_getpwuid_alice(void) {
   TEST_ASSERT_EQUAL_STRING("Alice User", pw->pw_gecos);
 }
 
-/* 3. getpwnam on a missing user: NULL + errno == 0 (musl semantics: not-found
- *    is not an error). */
+// 3. getpwnam on a missing user: NULL + errno == 0 (musl semantics: not-found
+//    is not an error).
 void test_getpwnam_missing(void) {
   ensure_passwd_files();
   errno = 0;
@@ -82,7 +82,7 @@ void test_getpwnam_missing(void) {
   TEST_ASSERT_EQUAL_INT(0, errno);
 }
 
-/* 4. getpwnam_r: reentrant variant, success path. */
+// 4. getpwnam_r: reentrant variant, success path.
 void test_getpwnam_r_ok(void) {
   ensure_passwd_files();
   struct passwd pw;
@@ -95,18 +95,18 @@ void test_getpwnam_r_ok(void) {
   TEST_ASSERT_EQUAL_INT(0, res->pw_uid);
 }
 
-/* 5. getpwnam_r with a too-small buffer: ERANGE + res NULL. */
+// 5. getpwnam_r with a too-small buffer: ERANGE + res NULL.
 void test_getpwnam_r_erange(void) {
   ensure_passwd_files();
   struct passwd pw;
   struct passwd *res;
-  char buf[1]; /* deliberately tiny */
+  char buf[1]; // deliberately tiny
   int rv = getpwnam_r("alice", &pw, buf, sizeof(buf), &res);
   TEST_ASSERT_EQUAL_INT(ERANGE, rv);
   TEST_ASSERT_NULL(res);
 }
 
-/* 6. getgrnam("users"): group lookup with a member list. */
+// 6. getgrnam("users"): group lookup with a member list.
 void test_getgrnam_users(void) {
   ensure_passwd_files();
   struct group *gr = getgrnam("users");
@@ -118,7 +118,7 @@ void test_getgrnam_users(void) {
   TEST_ASSERT_NULL(gr->gr_mem[1]);
 }
 
-/* 7. getgrgid(0): root group, empty member list. */
+// 7. getgrgid(0): root group, empty member list.
 void test_getgrgid_root(void) {
   ensure_passwd_files();
   struct group *gr = getgrgid(0);
@@ -129,7 +129,7 @@ void test_getgrgid_root(void) {
   TEST_ASSERT_NULL(gr->gr_mem[0]);
 }
 
-/* 8. getpwent: sequential enumeration over /etc/passwd, reset by setpwent. */
+// 8. getpwent: sequential enumeration over /etc/passwd, reset by setpwent.
 void test_getpwent_iteration(void) {
   ensure_passwd_files();
   setpwent();
@@ -140,7 +140,7 @@ void test_getpwent_iteration(void) {
   TEST_ASSERT_NOT_NULL(pw);
   TEST_ASSERT_EQUAL_STRING("alice", pw->pw_name);
   pw = getpwent();
-  TEST_ASSERT_NULL(pw); /* end of file */
+  TEST_ASSERT_NULL(pw); // end of file
   endpwent();
 }
 

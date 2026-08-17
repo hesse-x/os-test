@@ -3,7 +3,7 @@
  *
  * SPDX-License-Identifier: MIT
  */
-/* USB HID boot-mouse report parser tests. */
+// USB HID boot-mouse report parser tests.
 
 #include <errno.h>
 #include <linux/input.h>

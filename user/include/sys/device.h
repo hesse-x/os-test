@@ -34,4 +34,4 @@ LIBC_EXPORT int device_set_meta(const char *name, const char *subsystem,
 }
 #endif
 
-#endif /* _SYS_DEVICE_H */
+#endif // _SYS_DEVICE_H

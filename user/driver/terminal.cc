@@ -4,12 +4,14 @@
  * SPDX-License-Identifier: MIT
  */
 
-// Vulkan WSI 渲染的真终端（Wayland 客户端）。
-//   · forkpty() 起 $SHELL：键盘输入写进 PTY，shell 输出读回来解析
-//   · 内置最小 VT 模拟器：UTF-8、CSI（光标/清屏/滚动/插入删除）、
-//     SGR 16/256/真彩色、备用屏幕（less/htop 可用）、OSC 标题
-//   · 文字用 freetype 光栅化成字形图集，Vulkan 直接绘制
-//   · 窗口装饰由 compositor 统一使用 SSD 绘制
+// Real terminal rendered with Vulkan WSI (Wayland client).
+//   · forkpty() spawns $SHELL: keyboard input is written to the PTY, shell
+//     output is read back and parsed
+//   · Built-in minimal VT emulator: UTF-8, CSI
+//   (cursor/clear/scroll/insert-delete),
+//     SGR 16/256/truecolor, alternate screen (less/htop work), OSC title
+//   · Text is rasterized by freetype into a glyph atlas and drawn directly by
+//   Vulkan · Window decorations are drawn uniformly by the compositor using SSD
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -52,7 +54,8 @@
 #define MAX_COLS 512
 #define MAX_ROWS 512
 
-// 颜色存 0xRRGGBB；COLOR_DEFAULT 表示"用默认色"（fg 用浅绿白，bg 不填充）
+// Colors are stored as 0xRRGGBB; COLOR_DEFAULT means "use the default color"
+// (fg uses light-green-white, bg is not filled)
 #define COLOR_DEFAULT UINT32_MAX
 
 #define CELL_BOLD (1u << 0)
@@ -68,11 +71,11 @@ enum cursor_shape { CURSOR_BLOCK, CURSOR_UNDERLINE, CURSOR_BAR };
 #define COLOR_INDEX(i) (COLOR_INDEXED | (uint32_t)(i))
 
 // ---------------------------------------------------------------------------
-// 终端模拟器：单元格网格 + ANSI 转义序列解析
+// Terminal emulator: cell grid + ANSI escape sequence parsing
 // ---------------------------------------------------------------------------
 struct cell {
-  uint32_t cp;     // Unicode 码点（0 = 空）
-  uint32_t fg, bg; // 0xRRGGBB、COLOR_INDEX(n) 或 COLOR_DEFAULT
+  uint32_t cp;     // Unicode codepoint (0 = empty)
+  uint32_t fg, bg; // 0xRRGGBB, COLOR_INDEX(n), or COLOR_DEFAULT
   uint8_t flags;   // CELL_*
 };
 
@@ -80,33 +83,35 @@ enum { P_GROUND, P_ESC, P_ESC_SKIP, P_CSI, P_OSC };
 
 struct term {
   int cols, rows;
-  struct cell *grid; // 主屏幕
-  struct cell *alt;  // 备用屏幕（ESC[?1049h，less/htop/vim 用）
+  struct cell *grid; // main screen
+  struct cell *alt;  // alternate screen (ESC[?1049h, used by less/htop/vim)
   bool alt_active;
   int cx, cy;
   int saved_cx, saved_cy;
   int scroll_top, scroll_bottom;
   uint32_t fg, bg;
   bool bold, underline, inverse, strike;
-  bool wrap_pending; // 光标停在最右列，下一个字符先换行
+  bool wrap_pending; // cursor sits at the last column, next char wraps first
   bool cursor_visible;
-  bool origin_mode; // DECOM：行坐标相对滚动区，移动限制在滚动区内
-  bool application_cursor; // DECCKM：方向键发送 SS3 序列
+  bool origin_mode;        // DECOM: row coordinates relative to scroll region,
+                           // movement restricted to it
+  bool application_cursor; // DECCKM: arrow keys send SS3 sequences
   enum cursor_shape cursor_shape;
 
-  // 解析器状态
+  // Parser state
   int pstate;
   int params[16];
   int nparams;
-  char prefix;       // CSI 私有前缀（当前处理 '?'）
-  char intermediate; // CSI 中间字节（如 DECSCUSR 的空格）
+  char prefix;       // CSI private prefix (currently handles '?')
+  char intermediate; // CSI intermediate byte (e.g. the space in DECSCUSR)
   char osc[256];
   int osc_len;
-  uint32_t utf8_cp; // 未收完的 UTF-8 序列
+  uint32_t utf8_cp; // incomplete UTF-8 sequence
   int utf8_need;
 };
 
-// xterm 256 色调色板：0-15 基本色，16-231 是 6×6×6 立方体，232-255 灰阶
+// xterm 256-color palette: 0-15 base colors, 16-231 the 6x6x6 cube, 232-255
+// grayscale
 static uint32_t palette[256];
 
 static void palette_init(void) {
@@ -151,7 +156,8 @@ static struct cell *cell_at(int x, int y) {
 }
 
 static struct cell blank_cell(void) {
-  // 擦除用当前 SGR 背景色填充（xterm 行为，彩色屏保/进度条才正常）
+  // Erase with the current SGR background color (xterm behavior, so colored
+  // screensavers/progress bars render correctly)
   return (struct cell){.cp = 0, .fg = COLOR_DEFAULT, .bg = term.bg, .flags = 0};
 }
 
@@ -211,7 +217,7 @@ static void put_char(uint32_t cp) {
 }
 
 // ---------------------------------------------------------------------------
-// SGR：字形属性和颜色
+// SGR: glyph attributes and colors
 // ---------------------------------------------------------------------------
 static int color_component(int value) {
   if (value < 0)
@@ -284,7 +290,7 @@ static void term_sgr(void) {
 }
 
 // ---------------------------------------------------------------------------
-// CSI 分派。PP(i, def)：第 i 个参数，缺省/为 0 时取 def
+// CSI dispatch. PP(i, def): the i-th parameter, defaults to def when absent/0
 // ---------------------------------------------------------------------------
 #define PP(i, def)                                                             \
   ((i) < term.nparams && term.params[(i)] > 0 ? term.params[(i)] : (def))
@@ -305,19 +311,19 @@ static void cursor_home(void) {
 static void term_csi(uint8_t f) {
   int n;
   switch (f) {
-  case 'A': // 光标上
+  case 'A': // cursor up
     term.cy = CLAMP(term.cy - PP(0, 1), cursor_top(), cursor_bottom());
     break;
   case 'B':
-  case 'e': // 光标下
+  case 'e': // cursor down
     term.cy = CLAMP(term.cy + PP(0, 1), cursor_top(), cursor_bottom());
     break;
   case 'C':
-  case 'a': // 光标右
+  case 'a': // cursor right
     term.cx = CLAMP(term.cx + PP(0, 1), 0, term.cols - 1);
     term.wrap_pending = false;
     break;
-  case 'D': // 光标左
+  case 'D': // cursor left
     term.cx = CLAMP(term.cx - PP(0, 1), 0, term.cols - 1);
     term.wrap_pending = false;
     break;
@@ -332,20 +338,20 @@ static void term_csi(uint8_t f) {
     term.wrap_pending = false;
     break;
   case 'G':
-  case '`': // 移到列
+  case '`': // move to column
     term.cx = CLAMP(PP(0, 1) - 1, 0, term.cols - 1);
     term.wrap_pending = false;
     break;
-  case 'd': // 移到行
+  case 'd': // move to row
     term.cy = CLAMP(cursor_top() + PP(0, 1) - 1, cursor_top(), cursor_bottom());
     break;
   case 'H':
-  case 'f': // 移到 (行,列)
+  case 'f': // move to (row,column)
     term.cy = CLAMP(cursor_top() + PP(0, 1) - 1, cursor_top(), cursor_bottom());
     term.cx = CLAMP(PP(1, 1) - 1, 0, term.cols - 1);
     term.wrap_pending = false;
     break;
-  case 'J': // 清屏
+  case 'J': // clear screen
     n = PP(0, 0);
     if (n == 0) {
       clear_row(term.cy, term.cx, term.cols - 1);
@@ -357,7 +363,7 @@ static void term_csi(uint8_t f) {
       clear_rows(0, term.rows - 1);
     }
     break;
-  case 'K': // 清行
+  case 'K': // clear line
     n = PP(0, 0);
     if (n == 0)
       clear_row(term.cy, term.cx, term.cols - 1);
@@ -366,17 +372,17 @@ static void term_csi(uint8_t f) {
     else
       clear_row(term.cy, 0, term.cols - 1);
     break;
-  case 'L': // 插入行
+  case 'L': // insert lines
     scroll_down(term.cy, term.scroll_bottom, PP(0, 1));
     term.cx = 0;
     term.wrap_pending = false;
     break;
-  case 'M': // 删除行
+  case 'M': // delete lines
     scroll_up(term.cy, term.scroll_bottom, PP(0, 1));
     term.cx = 0;
     term.wrap_pending = false;
     break;
-  case 'P': { // 删除字符
+  case 'P': { // delete characters
     n = PP(0, 1);
     if (n > term.cols - term.cx)
       n = term.cols - term.cx;
@@ -386,7 +392,7 @@ static void term_csi(uint8_t f) {
     clear_row(term.cy, term.cols - n, term.cols - 1);
     break;
   }
-  case '@': { // 插入空白字符
+  case '@': { // insert blank characters
     n = PP(0, 1);
     if (n > term.cols - term.cx)
       n = term.cols - term.cx;
@@ -396,20 +402,20 @@ static void term_csi(uint8_t f) {
     clear_row(term.cy, term.cx, term.cx + n - 1);
     break;
   }
-  case 'X': // 擦除字符（不移动后面的内容）
+  case 'X': // erase characters (without shifting the following content)
     n = CLAMP(PP(0, 1), 0, term.cols - term.cx);
     clear_row(term.cy, term.cx, term.cx + n - 1);
     break;
-  case 'S': // 向上滚
+  case 'S': // scroll up
     scroll_up(term.scroll_top, term.scroll_bottom, PP(0, 1));
     break;
-  case 'T': // 向下滚
+  case 'T': // scroll down
     scroll_down(term.scroll_top, term.scroll_bottom, PP(0, 1));
     break;
   case 'm':
     term_sgr();
     break;
-  case 'r': { // 设置滚动区域
+  case 'r': { // set scroll region
     int top = PP(0, 1) - 1, bottom = PP(1, term.rows) - 1;
     top = CLAMP(top, 0, term.rows - 1);
     bottom = CLAMP(bottom, 0, term.rows - 1);
@@ -420,7 +426,7 @@ static void term_csi(uint8_t f) {
     cursor_home();
     break;
   }
-  case 'n': { // DSR：设备状态、光标位置
+  case 'n': { // DSR: device status, cursor position
     if (term.prefix != '\0' && term.prefix != '?')
       break;
     int p = PP(0, 0);
@@ -438,13 +444,13 @@ static void term_csi(uint8_t f) {
     }
     break;
   }
-  case 'c': // DA：主设备属性与常见的次设备属性查询
+  case 'c': // DA: primary device attributes and common secondary attrs query
     if (term.prefix == '\0' && PP(0, 0) == 0)
       term_reply("\033[?1;2c", 7);
     else if (term.prefix == '>' && PP(0, 0) == 0)
       term_reply("\033[>0;1;0c", 9);
     break;
-  case 'q': { // DECSCUSR：闪烁暂按对应静态形状显示
+  case 'q': { // DECSCUSR: blinking currently shows the matching static shape
     if (term.intermediate != ' ')
       break;
     int shape = PP(0, 0);
@@ -456,17 +462,17 @@ static void term_csi(uint8_t f) {
       term.cursor_shape = CURSOR_BAR;
     break;
   }
-  case 's': // 保存光标
+  case 's': // save cursor
     term.saved_cx = term.cx;
     term.saved_cy = term.cy;
     break;
-  case 'u': // 恢复光标
+  case 'u': // restore cursor
     term.cx = term.saved_cx;
     term.cy = term.saved_cy;
     term.wrap_pending = false;
     break;
   case 'h':
-  case 'l': { // 模式设置/复位（只处理 ? 私有模式）
+  case 'l': { // mode set/reset (only handles private '?' modes)
     if (term.prefix != '?')
       break;
     bool on = (f == 'h');
@@ -490,7 +496,7 @@ static void term_csi(uint8_t f) {
           term.cx = term.saved_cx;
           term.cy = term.saved_cy;
         }
-        /* fall through */
+        // fall through
       case 1047:
       case 47:
         term.alt_active = on;
@@ -507,7 +513,7 @@ static void term_csi(uint8_t f) {
 }
 
 // ---------------------------------------------------------------------------
-// OSC：只认 0/1/2（设置窗口标题），其余丢弃
+// OSC: only recognizes 0/1/2 (set window title), the rest is discarded
 // ---------------------------------------------------------------------------
 #ifdef TERMINAL_SGR_TEST
 static void osc_done(void) { term.osc[term.osc_len] = '\0'; }
@@ -536,15 +542,17 @@ static void term_control(uint8_t b) {
     term.wrap_pending = false;
     break;
   }
-  // BEL 等在 GROUND 状态下直接忽略
+  // BEL etc. are simply ignored in the GROUND state
 }
 
-// 喂给模拟器一段 PTY 输出字节流（可能是不完整的 UTF-8/转义序列，状态自留）
+// Feed a segment of PTY output bytes to the emulator (may be an incomplete
+// UTF-8/escape sequence; parser state persists)
 static void term_feed(const uint8_t *d, size_t n) {
   for (size_t i = 0; i < n; i++) {
     uint8_t b = d[i];
 
-    // 先拼未收完的 UTF-8 序列（C0 控制符 < 0x80，不会冲突）
+    // First complete any pending UTF-8 sequence (C0 control chars < 0x80
+    // cannot collide)
     if (term.utf8_need > 0) {
       if ((b & 0xC0) == 0x80) {
         term.utf8_cp = (term.utf8_cp << 6) | (b & 0x3F);
@@ -552,7 +560,8 @@ static void term_feed(const uint8_t *d, size_t n) {
           put_char(term.utf8_cp);
         continue;
       }
-      term.utf8_need = 0; // 非法序列：丢掉，按普通字节重新处理 b
+      term.utf8_need =
+          0; // invalid sequence: drop it, reprocess b as a normal byte
     }
     if (b >= 0x80 && term.pstate == P_GROUND) {
       if (b >= 0xF0) {
@@ -565,7 +574,7 @@ static void term_feed(const uint8_t *d, size_t n) {
         term.utf8_cp = b & 0x1F;
         term.utf8_need = 1;
       }
-      // 0x80-0xC1 是非法起始字节，丢弃
+      // 0x80-0xC1 is an invalid starting byte, drop it
       continue;
     }
 
@@ -594,14 +603,14 @@ static void term_feed(const uint8_t *d, size_t n) {
         break;
       case '(':
       case ')':
-      case '#': // 字符集/DECALN：吞掉下一个字节
+      case '#': // charset/DECALN: swallow the next byte
         term.pstate = P_ESC_SKIP;
         break;
-      case '7': // 保存光标
+      case '7': // save cursor
         term.saved_cx = term.cx;
         term.saved_cy = term.cy;
         break;
-      case '8': // 恢复光标
+      case '8': // restore cursor
         term.cx = term.saved_cx;
         term.cy = term.saved_cy;
         term.wrap_pending = false;
@@ -609,7 +618,7 @@ static void term_feed(const uint8_t *d, size_t n) {
       case 'D': // IND
         newline();
         break;
-      case 'M': // RI：反向换行
+      case 'M': // RI: reverse index (scroll down)
         if (term.cy == term.scroll_top)
           scroll_down(term.scroll_top, term.scroll_bottom, 1);
         else if (term.cy > 0)
@@ -620,7 +629,7 @@ static void term_feed(const uint8_t *d, size_t n) {
         term.cx = 0;
         newline();
         break;
-      case 'c': { // RIS：全复位
+      case 'c': { // RIS: full reset
         term.cx = term.cy = 0;
         reset_sgr();
         term.scroll_top = 0;
@@ -653,13 +662,14 @@ static void term_feed(const uint8_t *d, size_t n) {
         term_csi(b);
         term.pstate = P_GROUND;
       }
-      // 其他中间字节（空格、! 等）忽略
+      // Other intermediate bytes (space, !, etc.) are ignored
       break;
     case P_OSC:
-      if (b == 0x07) { // BEL 结束
+      if (b == 0x07) { // BEL terminates
         osc_done();
         term.pstate = P_GROUND;
-      } else if (b == 0x1b) { // ESC \ 结束：回到 ESC 态吞掉 '\'
+      } else if (b ==
+                 0x1b) { // ESC \ terminates: return to ESC state, swallow '\'
         osc_done();
         term.pstate = P_ESC;
       } else if (term.osc_len < (int)sizeof(term.osc) - 1) {
@@ -671,7 +681,7 @@ static void term_feed(const uint8_t *d, size_t n) {
 }
 
 // ---------------------------------------------------------------------------
-// 终端尺寸
+// Terminal dimensions
 // ---------------------------------------------------------------------------
 static void term_init(int cols, int rows) {
   term.cols = cols;
@@ -688,7 +698,8 @@ static void term_init(int cols, int rows) {
   clear_rows(0, rows - 1);
 }
 
-// 窗口大小变化时重建网格（尽量保留主屏内容），返回是否变化
+// Rebuild the grid when the window size changes (preserving main-screen
+// content as much as possible), returns whether it changed
 static bool term_resize(int cols, int rows) {
   if (cols == term.cols && rows == term.rows)
     return false;
@@ -816,10 +827,10 @@ extern "C" int main(void) {
 #else
 
 // ---------------------------------------------------------------------------
-// 应用状态
+// Application state
 // ---------------------------------------------------------------------------
 struct app {
-  // wayland 全局对象
+  // wayland global objects
   struct wl_display *display;
   struct wl_compositor *compositor;
   struct xdg_wm_base *wm_base;
@@ -830,24 +841,25 @@ struct app {
   struct wl_pointer *pointer;
   int output_width, output_height, output_scale;
 
-  // 指针状态（surface 局部坐标）
+  // pointer state (surface-local coordinates)
   double ptr_x, ptr_y;
-  bool ptr_hover_buttons; // 悬停在红绿灯区域（显示 ×/−/＋ 图标）
+  bool
+      ptr_hover_buttons; // hovering over the traffic lights (shows x/−/+ icons)
 
-  // 窗口
+  // window
   struct wl_surface *surface;
   struct xdg_surface *xsurface;
   struct xdg_toplevel *toplevel;
   struct zxdg_toplevel_decoration_v1 *decoration;
   int width, height;
   bool closed;
-  bool configured; // 收到首个 configure 后才能提交 buffer
-  char title[256]; // 标题栏文字（OSC 0/2 可改）
+  bool configured; // a buffer may only be committed after the first configure
+  char title[256]; // title bar text (OSC 0/2 may change it)
 
   TerminalVulkanRenderer *renderer;
   int buffer_scale;
 
-  // 字体度量
+  // font metrics
   int cell_w, cell_h;
   double ascent;
 
@@ -856,7 +868,7 @@ struct app {
   pid_t shell_pid;
   bool needs_render;
 
-  // xkb 键盘状态
+  // xkb keyboard state
   struct xkb_context *xkb_ctx;
   struct xkb_keymap *xkb_keymap;
   struct xkb_state *xkb_state;
@@ -881,7 +893,7 @@ static void frame_ready(void *data) {
     render();
 }
 
-// 按窗口尺寸算出网格列/行数
+// Compute the grid column/row count from the window size
 static void grid_dims(int *cols, int *rows) {
   *cols = (int)((app.width - 2 * TERM_PAD) / app.cell_w);
   *rows = (int)((app.height - 2 * TERM_PAD) / app.cell_h);
@@ -890,21 +902,22 @@ static void grid_dims(int *cols, int *rows) {
 }
 
 // ---------------------------------------------------------------------------
-// freetype 字体度量 + 字形图集
+// freetype font metrics + glyph atlas
 // ---------------------------------------------------------------------------
-// 字形图集：把用得到的字符一次性光栅化到一张大纹理上，绘制时按码点查
-// 坐标，用纹理四边形画字。终端字符集稳定，一次构建即可。
+// Glyph atlas: rasterize every needed character once into a single large
+// texture; at draw time look up coordinates by codepoint and draw characters
+// as textured quads. The terminal charset is stable, so one build is enough.
 #define ATLAS_W 1024
 #define ATLAS_H 1024
 #define GLYPH_CACHE_SIZE 4096
 #define ATLAS_PAD 1
 
 struct glyph {
-  uint32_t cp;              // 码点
-  int atlas_x, atlas_y;     // 在图集中的像素位置
-  int w, h;                 // 字形位图尺寸
-  int bearing_x, bearing_y; // 笔画原点到字形左上角的偏移
-  int advance;              // 该字形的水平推进（像素）
+  uint32_t cp;              // codepoint
+  int atlas_x, atlas_y;     // pixel position in the atlas
+  int w, h;                 // glyph bitmap size
+  int bearing_x, bearing_y; // offset from stroke origin to glyph top-left
+  int advance;              // horizontal advance for this glyph (pixels)
 };
 
 static FT_Library ft_lib;
@@ -912,7 +925,8 @@ static FT_Face ft_face;
 static double font_pixel_size = FONT_SIZE;
 static uint8_t *atlas_pixels;
 static uint64_t atlas_generation;
-// 开放寻址哈希表，避免 Unicode 码点受一个很小的直接索引数组限制。
+// Open-addressing hash table, so Unicode codepoints aren't limited to a small
+// direct-index array.
 static struct glyph atlas_glyphs[GLYPH_CACHE_SIZE];
 static int atlas_count;
 static int atlas_cursor_x = ATLAS_PAD;
@@ -949,7 +963,7 @@ static struct glyph *glyph_insert(struct glyph glyph) {
   return NULL;
 }
 
-// 把一个字形渲染进图集，记录其位置和度量
+// Render one glyph into the atlas, recording its position and metrics
 static struct glyph *atlas_add(FT_Face face, uint32_t cp) {
   struct glyph *cached = glyph_lookup(cp);
   if (cached)
@@ -1015,24 +1029,25 @@ static const char *find_font(void) {
 
 static void measure_font(void) {
   if (FT_Init_FreeType(&ft_lib)) {
-    fprintf(stderr, "freetype 初始化失败\n");
+    fprintf(stderr, "freetype initialization failed\n");
     exit(1);
   }
   const char *font = find_font();
   if (!font) {
-    fprintf(stderr, "找不到 monospace 字体（apt-get install fonts-dejavu）\n");
+    fprintf(stderr, "no monospace font found (apt-get install fonts-dejavu)\n");
     exit(1);
   }
   if (FT_New_Face(ft_lib, font, 0, &ft_face)) {
-    fprintf(stderr, "无法加载字体 %s\n", font);
+    fprintf(stderr, "failed to load font %s\n", font);
     exit(1);
   }
   if (FT_Set_Pixel_Sizes(ft_face, 0, (FT_UInt)lround(font_pixel_size))) {
-    fprintf(stderr, "无法设置字体大小 %.1fpx\n", font_pixel_size);
+    fprintf(stderr, "failed to set font size %.1fpx\n", font_pixel_size);
     exit(1);
   }
 
-  // 用 'M' 量单元格宽高（等宽字体所有字符 advance 相同）
+  // Measure cell width/height with 'M' (all chars in a monospace font share
+  // the same advance)
   FT_Load_Char(ft_face, 'M', FT_LOAD_TARGET_LIGHT);
   app.cell_w = (int)(ft_face->glyph->advance.x >> 6);
   FT_Load_Char(ft_face, 'M', FT_LOAD_RENDER | FT_LOAD_TARGET_LIGHT);
@@ -1041,18 +1056,19 @@ static void measure_font(void) {
   app.cell_h = ascent - descent;
   app.ascent = ascent;
 
-  // 字体度量与 Vulkan 资源创建相互独立。
+  // Font metrics are independent of Vulkan resource creation.
 }
 
 static void atlas_init(void) {
   atlas_pixels = static_cast<uint8_t *>(calloc((size_t)ATLAS_W, ATLAS_H));
   if (!atlas_pixels) {
-    fprintf(stderr, "无法分配字形图集\n");
+    fprintf(stderr, "failed to allocate glyph atlas\n");
     exit(1);
   }
   for (uint32_t c = 0x20; c < 0x7f; c++)
     atlas_add(ft_face, c);
-  // 常见非 ASCII：框线/阴影字符（htop、对话框边框用）
+  // Common non-ASCII: box-drawing/shade characters (used by htop, dialog
+  // borders)
   static const uint32_t extra[] = {
       0x2500, 0x2501, 0x2502, 0x2503, 0x250c, 0x250f, 0x2510,
       0x2513, 0x2514, 0x2517, 0x2518, 0x251b, 0x251c, 0x251f,
@@ -1064,13 +1080,14 @@ static void atlas_init(void) {
           atlas_count, (unsigned long long)atlas_generation);
 }
 
-// 取码点对应的字形；不在图集里就按需补一个（终端可能收到任意 Unicode）
+// Look up the glyph for a codepoint; if not in the atlas, add it on demand
+// (the terminal may receive arbitrary Unicode)
 static struct glyph *get_glyph(uint32_t cp) {
   struct glyph *g = glyph_lookup(cp);
   return g ? g : atlas_add(ft_face, cp);
 }
 
-// 把 0xRRGGBB + alpha 转成预乘 RGBA 归一化 float
+// Convert 0xRRGGBB + alpha into premultiplied RGBA normalized floats
 static void color_premul(uint32_t rgb, float alpha, float out[4]) {
   float r = ((rgb >> 16) & 0xFF) / 255.0f;
   float g = ((rgb >> 8) & 0xFF) / 255.0f;
@@ -1152,7 +1169,8 @@ static void render_now(void) {
         bg = (t == COLOR_DEFAULT) ? 0xd9e6d9 : t;
       }
       float px = TERM_PAD + x * app.cell_w;
-      // 背景色块（默认色不画，露出窗口主体）
+      // Background color block (default color isn't drawn, exposing the window
+      // body)
       if (bg != COLOR_DEFAULT) {
         float bgc[4];
         color_premul(bg, 1.0f, bgc);
@@ -1165,7 +1183,7 @@ static void render_now(void) {
         color_premul(0xd9e6d9, 1.0f, fgc);
       else
         color_premul(fg, 1.0f, fgc);
-      // 字符
+      // Glyph
       if (c->cp) {
         if (make_glyph_quad(c->cp, px, baseline, fgc, &glyphs[glyph_count]))
           ++glyph_count;
@@ -1188,7 +1206,7 @@ static void render_now(void) {
     }
   }
 
-  // DECSCUSR 光标形状；闪烁型当前使用对应的静态形状。
+  // DECSCUSR cursor shape; blinking currently uses the matching static shape.
   if (term.cursor_visible) {
     float px = TERM_PAD + term.cx * app.cell_w;
     float py = TERM_PAD + term.cy * app.cell_h;
@@ -1263,7 +1281,7 @@ static void render(void) {
 }
 
 // ---------------------------------------------------------------------------
-// OSC 完成：0/1/2 设置窗口标题
+// OSC completion: 0/1/2 set the window title
 // ---------------------------------------------------------------------------
 static void osc_done(void) {
   term.osc[term.osc_len] = '\0';
@@ -1276,11 +1294,11 @@ static void osc_done(void) {
   snprintf(app.title, sizeof(app.title), "%s", semi + 1);
   if (app.toplevel)
     xdg_toplevel_set_title(app.toplevel, app.title);
-  // 标题变了要重画；调用点之后统一 render()
+  // Title changed, so redraw; the caller renders after the call site.
 }
 
 // ---------------------------------------------------------------------------
-// PTY：起 shell
+// PTY: spawn the shell
 // ---------------------------------------------------------------------------
 static void spawn_shell(void) {
   int cols, rows;
@@ -1295,7 +1313,8 @@ static void spawn_shell(void) {
     exit(1);
   }
   if (pid == 0) {
-    // 子进程：PTY 从端已是 stdin/stdout/stderr 和控制终端
+    // Child process: the PTY slave is already stdin/stdout/stderr and the
+    // controlling terminal
     setenv("TERM", "xterm-256color", 1);
     const char *shell = getenv("SHELL");
     if (!shell || !*shell)
@@ -1309,8 +1328,8 @@ static void spawn_shell(void) {
   int flags = fcntl(app.pty_fd, F_GETFL, 0);
   if (flags >= 0)
     (void)fcntl(app.pty_fd, F_SETFL, flags | O_NONBLOCK);
-  signal(SIGCHLD, SIG_IGN); // 自动回收，避免僵尸进程
-  signal(SIGPIPE, SIG_IGN); // shell 先走时写 PTY 不要被打死
+  signal(SIGCHLD, SIG_IGN); // auto-reap, avoid zombie processes
+  signal(SIGPIPE, SIG_IGN); // don't die on PTY write if the shell exited first
 }
 
 static void pty_write(const char *s, size_t n) {
@@ -1320,7 +1339,7 @@ static void pty_write(const char *s, size_t n) {
 
 static void term_reply(const char *s, size_t n) { pty_write(s, n); }
 
-// 通知 shell 窗口尺寸变了（SIGWINCH 由内核代发）
+// Notify the shell the window size changed (SIGWINCH is sent by the kernel)
 static void pty_resize(void) {
   if (app.pty_fd < 0)
     return;
@@ -1332,7 +1351,7 @@ static void pty_resize(void) {
 }
 
 // ---------------------------------------------------------------------------
-// xdg-shell 回调
+// xdg-shell callbacks
 // ---------------------------------------------------------------------------
 static void wm_base_ping(void *data, struct xdg_wm_base *wm_base,
                          uint32_t serial) {
@@ -1391,7 +1410,7 @@ static const struct xdg_toplevel_listener toplevel_listener = {
 };
 
 // ---------------------------------------------------------------------------
-// 键盘输入：翻译成终端字节流写进 PTY
+// Keyboard input: translate into a terminal byte stream written to the PTY
 // ---------------------------------------------------------------------------
 static void keyboard_keymap(void *data, struct wl_keyboard *kb, uint32_t format,
                             int32_t fd, uint32_t size) {
@@ -1471,14 +1490,15 @@ static void keyboard_key(void *data, struct wl_keyboard *kb, uint32_t serial,
     return;
   }
 
-  // Ctrl+字母 → 控制字符（Ctrl+C=0x03、Ctrl+D=0x04、Ctrl+L=0x0C……）
+  // Ctrl+letter → control character (Ctrl+C=0x03, Ctrl+D=0x04, Ctrl+L=0x0C,
+  // ...)
   if (ctrl) {
     if (sym >= XKB_KEY_a && sym <= XKB_KEY_z) {
       char c = (char)(sym - XKB_KEY_a + 1);
       pty_write(&c, 1);
       return;
     }
-    if (sym >= XKB_KEY_A && sym <= XKB_KEY_Z) { // Ctrl+Shift+字母
+    if (sym >= XKB_KEY_A && sym <= XKB_KEY_Z) { // Ctrl+Shift+letter
       char c = (char)(sym - XKB_KEY_A + 1);
       pty_write(&c, 1);
       return;
@@ -1505,7 +1525,8 @@ static void keyboard_key(void *data, struct wl_keyboard *kb, uint32_t serial,
   int n = xkb_state_key_get_utf8(app.xkb_state, kc, buf, sizeof(buf));
   if (n > 0)
     pty_write(buf, n);
-  // 不做本地回显：shell 经 PTY 打回来的输出才触发 render()
+  // No local echo: only output echoed back by the shell through the PTY
+  // triggers render().
 }
 
 static void keyboard_modifiers(void *data, struct wl_keyboard *kb,
@@ -1545,15 +1566,17 @@ static void seat_capabilities(void *data, struct wl_seat *seat, uint32_t caps) {
 static void seat_name(void *data, struct wl_seat *seat, const char *name) {}
 
 // ---------------------------------------------------------------------------
-// 指针输入：标题栏拖拽移动、红钮关闭、红绿灯 hover
+// Pointer input: drag window via title bar, close via red button, traffic-light
+// hover
 // ---------------------------------------------------------------------------
-// 命中检测：红绿灯圆心在 (20/40/60, TITLEBAR_H/2)，点击半径给宽松一点
+// Hit test: traffic light centers at (20/40/60, TITLEBAR_H/2), generous click
+// radius
 static int hit_traffic_button(double x, double y) {
   static const double btn_x[3] = {20, 40, 60};
   for (int i = 0; i < 3; i++) {
     double dx = x - btn_x[i], dy = y - TITLEBAR_H / 2;
     if (dx * dx + dy * dy <= 9 * 9)
-      return i; // 0=红 1=黄 2=绿
+      return i; // 0=red 1=yellow 2=green
   }
   return -1;
 }
@@ -1577,7 +1600,7 @@ static void pointer_motion(void *data, struct wl_pointer *pointer,
                            uint32_t time, wl_fixed_t sx, wl_fixed_t sy) {
   app.ptr_x = wl_fixed_to_double(sx);
   app.ptr_y = wl_fixed_to_double(sy);
-  // hover 区域：标题栏左侧红绿灯一带
+  // hover region: the traffic lights at the left of the title bar
   bool hover = app.ptr_y < TITLEBAR_H && app.ptr_x < 80;
   if (hover != app.ptr_hover_buttons) {
     app.ptr_hover_buttons = hover;
@@ -1591,16 +1614,16 @@ static void pointer_button(void *data, struct wl_pointer *pointer,
   if (button != BTN_LEFT || state != WL_POINTER_BUTTON_STATE_PRESSED)
     return;
   if (app.ptr_y >= TITLEBAR_H)
-    return; // 点击正文区域：无操作
+    return; // click in the body area: no action
 
   int btn = hit_traffic_button(app.ptr_x, app.ptr_y);
   if (btn == 0) {
-    app.closed = true; // 红钮：关闭窗口
+    app.closed = true; // red button: close the window
   } else if (btn < 0) {
-    // 标题栏空白处：请求合成器开始交互式拖拽移动
+    // empty title bar: ask the compositor to start interactive drag-move
     xdg_toplevel_move(app.toplevel, app.seat, serial);
   }
-  // 黄/绿钮：纯装饰，无操作
+  // yellow/green buttons: purely decorative, no action
 }
 
 static void pointer_axis(void *data, struct wl_pointer *pointer, uint32_t time,
@@ -1717,7 +1740,8 @@ extern "C" int main(void) {
 
   app.display = wl_display_connect(NULL);
   if (!app.display) {
-    fprintf(stderr, "无法连接 Wayland display（需要在 tinywl 里运行）\n");
+    fprintf(stderr,
+            "failed to connect to Wayland display (run inside tinywl)\n");
     return 1;
   }
   app.xkb_ctx = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
@@ -1740,7 +1764,7 @@ extern "C" int main(void) {
   term_init(cols, rows);
 
   if (!app.compositor || !app.wm_base) {
-    fprintf(stderr, "compositor 缺少必要协议\n");
+    fprintf(stderr, "compositor missing required protocols\n");
     return 1;
   }
 
@@ -1759,9 +1783,9 @@ extern "C" int main(void) {
   }
   xdg_toplevel_set_title(app.toplevel, app.title);
   xdg_toplevel_set_app_id(app.toplevel, "vulkan-term");
-  wl_surface_commit(app.surface); // 空 commit 触发首个 configure
+  wl_surface_commit(app.surface); // empty commit triggers the first configure
 
-  // 事件循环：同时等 Wayland 事件和 PTY 输出
+  // Event loop: wait for both Wayland events and PTY output
   int wl_fd = wl_display_get_fd(app.display);
   while (!app.closed) {
     while (wl_display_prepare_read(app.display) != 0)
@@ -1822,7 +1846,8 @@ extern "C" int main(void) {
           continue;
         if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
           break;
-        // shell 退出了（exit / Ctrl+D）或 PTY 发生不可恢复错误：关窗
+        // Shell exited (exit / Ctrl+D) or PTY hit an unrecoverable error: close
+        // the window
         app.closed = true;
         break;
       }
@@ -1831,7 +1856,7 @@ extern "C" int main(void) {
     }
   }
 
-  // 关掉 PTY 主端，shell 会收到 SIGHUP 跟着退出
+  // Close the PTY master; the shell receives SIGHUP and follows
   if (app.pty_fd >= 0)
     close(app.pty_fd);
   if (app.shell_pid > 0)

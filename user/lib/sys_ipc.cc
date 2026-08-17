@@ -2,11 +2,10 @@
  * Copyright (c) 2026 hesse
  *
  * SPDX-License-Identifier: MIT
- *
- * IPC and mount syscall wrappers.
- *
- * Merged from sys_ipc.cc + sys_mount.cc
  */
+// IPC and mount syscall wrappers.
+//
+// Merged from sys_ipc.cc + sys_mount.cc
 
 #include <stdint.h>
 #include <sys/mount.h>

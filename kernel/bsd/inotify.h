@@ -50,8 +50,8 @@
 #define IN_ONESHOT 0x80000000u
 
 // Flags accepted by inotify_init1.
-#define IN_CLOEXEC 02000000 /* == O_CLOEXEC (kfcntl.h) */
-#define IN_NONBLOCK 0x800   /* == O_NONBLOCK */
+#define IN_CLOEXEC 02000000 // == O_CLOEXEC (kfcntl.h)
+#define IN_NONBLOCK 0x800   // == O_NONBLOCK
 
 // Hard limits (style-aligned with EP_MAX_ITEMS=128 in eventpoll.h).
 #define INOTIFY_MAX_WATCHES 128 // per-instance watch cap

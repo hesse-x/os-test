@@ -59,7 +59,7 @@ struct perf_irq_stat {
 };
 
 static struct perf_irq_stat irq_stats[MAX_CPUS][PERF_IRQ_VECTOR_COUNT];
-/* Zero means no traced IRQ; otherwise vector + 1. */
+// Zero means no traced IRQ; otherwise vector + 1.
 static uint16_t active_irq[MAX_CPUS];
 
 uint32_t perf_trace_next_cookie(void) {

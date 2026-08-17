@@ -24,30 +24,30 @@
 void setUp(void) {}
 void tearDown(void) {}
 
-/* ===== Phase 1: dev_ops → file_operations (callback dispatch) ===== */
+// ===== Phase 1: dev_ops → file_operations (callback dispatch) =====
 
-/* 1. (removed in Phase 4: KMS FLIP retired with bochs-display) */
+// 1. (removed in Phase 4: KMS FLIP retired with bochs-display)
 
-/* 2. DRM mmap via callback: mmap MAP_SHARED on /dev/dri/card0 */
+// 2. DRM mmap via callback: mmap MAP_SHARED on /dev/dri/card0
 void test_dev_vfs_kms_mmap(void) {
   int fd = open("/dev/dri/card0", O_RDWR);
   if (fd >= 0) {
-    /* Without CREATE_DUMB, the handler returns 0 (no matching buffer).
-     * With CREATE_DUMB it would map the dumb buffer. Test both paths. */
+    // Without CREATE_DUMB, the handler returns 0 (no matching buffer).
+    // With CREATE_DUMB it would map the dumb buffer. Test both paths.
     void *p =
         mmap(NULL, 800 * 4 * 600, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     if (p && p != MAP_FAILED) {
-      /* If we got a mapping, verify we can write to it */
+      // If we got a mapping, verify we can write to it
       ((volatile char *)p)[0] = 0x42;
       munmap(p, 800 * 4 * 600);
     }
-    /* Either NULL (no dumb buffer yet) or a valid mapping is acceptable */
+    // Either NULL (no dumb buffer yet) or a valid mapping is acceptable
     close(fd);
   }
   TEST_ASSERT_TRUE(1);
 }
 
-/* 3. KMS ioctl with unknown cmd → ENOTTY or EINVAL */
+// 3. KMS ioctl with unknown cmd → ENOTTY or EINVAL
 void test_dev_vfs_kms_ioctl_unknown(void) {
   int fd = open("/dev/dri/card0", O_RDWR);
   if (fd >= 0) {
@@ -59,16 +59,16 @@ void test_dev_vfs_kms_ioctl_unknown(void) {
   }
 }
 
-/* ===== Phase 2: FD type consolidation + serial dev_ops ===== */
+// ===== Phase 2: FD type consolidation + serial dev_ops =====
 
-/* 4. /dev/serial open returns FD_DEV with serial dev_ops */
+// 4. /dev/serial open returns FD_DEV with serial dev_ops
 void test_dev_vfs_serial_open(void) {
   int fd = open("/dev/serial", O_RDWR);
   TEST_ASSERT_TRUE(fd >= 0);
   close(fd);
 }
 
-/* 5. Serial write via dev_ops.write callback */
+// 5. Serial write via dev_ops.write callback
 void test_dev_vfs_serial_write(void) {
   int fd = open("/dev/serial", O_RDWR);
   if (fd >= 0) {
@@ -80,14 +80,14 @@ void test_dev_vfs_serial_write(void) {
   }
 }
 
-/* 6. Serial read is unsupported (serial input removed) → -1/ENOSYS */
+// 6. Serial read is unsupported (serial input removed) → -1/ENOSYS
 void test_dev_vfs_serial_read_nonblock(void) {
   int fd = open("/dev/serial", O_RDWR | O_NONBLOCK);
   if (fd >= 0) {
     char buf[1];
     ssize_t r = read(fd, buf, 1);
-    /* Serial input was removed (RX ring/ISR/read deleted), so dev_ops.read
-     * is NULL and sys_read returns -ENOSYS. */
+    // Serial input was removed (RX ring/ISR/read deleted), so dev_ops.read
+    // is NULL and sys_read returns -ENOSYS.
     TEST_ASSERT_EQUAL_INT(-1, (int)r);
     TEST_ASSERT_EQUAL_INT(ENOSYS, errno);
     close(fd);
@@ -96,7 +96,7 @@ void test_dev_vfs_serial_read_nonblock(void) {
   }
 }
 
-/* 7. Serial poll via dev_ops.poll callback → POLLOUT always ready */
+// 7. Serial poll via dev_ops.poll callback → POLLOUT always ready
 void test_dev_vfs_serial_poll(void) {
   int fd = open("/dev/serial", O_RDWR);
   if (fd >= 0) {
@@ -115,7 +115,7 @@ void test_dev_vfs_serial_poll(void) {
   }
 }
 
-/* 8. Serial ioctl TCGETS → isatty returns 1 */
+// 8. Serial ioctl TCGETS → isatty returns 1
 void test_dev_vfs_serial_isatty(void) {
   int fd = open("/dev/serial", O_RDWR);
   if (fd >= 0) {
@@ -127,7 +127,7 @@ void test_dev_vfs_serial_isatty(void) {
   }
 }
 
-/* 9. Serial close via dev_ops.close callback (IRQ cleanup + reopen) */
+// 9. Serial close via dev_ops.close callback (IRQ cleanup + reopen)
 void test_dev_vfs_serial_close_reopen(void) {
   int fd1 = open("/dev/serial", O_RDWR);
   TEST_ASSERT_TRUE(fd1 >= 0);
@@ -136,13 +136,13 @@ void test_dev_vfs_serial_close_reopen(void) {
   int fd2 = open("/dev/serial", O_RDWR);
   TEST_ASSERT_TRUE(fd2 >= 0);
 
-  /* Verify the reopened fd works: write succeeds */
+  // Verify the reopened fd works: write succeeds
   ssize_t w = write(fd2, "B", 1);
   TEST_ASSERT_EQUAL_INT(1, (int)w);
   close(fd2);
 }
 
-/* 10. Multiple serial fds simultaneously (fd count tracking) */
+// 10. Multiple serial fds simultaneously (fd count tracking)
 void test_dev_vfs_serial_multi_open(void) {
   int fd1 = open("/dev/serial", O_RDWR);
   int fd2 = open("/dev/serial", O_RDWR);
@@ -150,7 +150,7 @@ void test_dev_vfs_serial_multi_open(void) {
   TEST_ASSERT_TRUE(fd2 >= 0);
   TEST_ASSERT_TRUE(fd1 != fd2);
 
-  /* Both should be writable */
+  // Both should be writable
   ssize_t w1 = write(fd1, "1", 1);
   ssize_t w2 = write(fd2, "2", 1);
   TEST_ASSERT_EQUAL_INT(1, (int)w1);
@@ -160,12 +160,12 @@ void test_dev_vfs_serial_multi_open(void) {
   close(fd2);
 }
 
-/* ===== Phase 3: Serial devtmpfs + open("/dev/") unified ===== */
+// ===== Phase 3: Serial devtmpfs + open("/dev/") unified =====
 
-/* 11. open("/dev/serial") goes through devtmpfs (not sys_open_dev) */
+// 11. open("/dev/serial") goes through devtmpfs (not sys_open_dev)
 void test_dev_vfs_serial_devtmpfs_path(void) {
-  /* This implicitly tests that /dev/serial is a devtmpfs node
-   * accessible via the normal sys_open path */
+  // This implicitly tests that /dev/serial is a devtmpfs node
+  // accessible via the normal sys_open path
   int fd = open("/dev/serial", O_RDWR);
   TEST_ASSERT_TRUE(fd >= 0);
 
@@ -178,7 +178,7 @@ void test_dev_vfs_serial_devtmpfs_path(void) {
   close(fd);
 }
 
-/* 12. open("/dev/dri/card0") goes through devtmpfs */
+// 12. open("/dev/dri/card0") goes through devtmpfs
 void test_dev_vfs_kms_devtmpfs_path(void) {
   int fd = open("/dev/dri/card0", O_RDWR);
   if (fd >= 0) {
@@ -192,16 +192,16 @@ void test_dev_vfs_kms_devtmpfs_path(void) {
   }
 }
 
-/* 13. open nonexistent /dev/xxx → ENOENT */
+// 13. open nonexistent /dev/xxx → ENOENT
 void test_dev_vfs_open_nonexistent(void) {
   int fd = open("/dev/nonexistent_device", O_RDWR);
   TEST_ASSERT_TRUE(fd < 0);
   TEST_ASSERT_EQUAL_INT(ENOENT, errno);
 }
 
-/* ===== Phase 4: sys_ioctl + sys_fstat ===== */
+// ===== Phase 4: sys_ioctl + sys_fstat =====
 
-/* 16. fstat on /dev/serial → S_ISCHR, st_ino > 0 */
+// 16. fstat on /dev/serial → S_ISCHR, st_ino > 0
 void test_dev_vfs_fstat_serial(void) {
   int fd = open("/dev/serial", O_RDWR);
   TEST_ASSERT_TRUE(fd >= 0);
@@ -215,7 +215,7 @@ void test_dev_vfs_fstat_serial(void) {
   close(fd);
 }
 
-/* 17. fstat on bad fd → EBADF */
+// 17. fstat on bad fd → EBADF
 void test_dev_vfs_fstat_bad_fd(void) {
   struct stat st;
   int r = fstat(-1, &st);
@@ -223,7 +223,7 @@ void test_dev_vfs_fstat_bad_fd(void) {
   TEST_ASSERT_EQUAL_INT(EBADF, errno);
 }
 
-/* 18. ioctl on /dev/serial with unknown cmd → ENOTTY */
+// 18. ioctl on /dev/serial with unknown cmd → ENOTTY
 void test_dev_vfs_serial_ioctl_unknown(void) {
   int fd = open("/dev/serial", O_RDWR);
   if (fd >= 0) {
@@ -236,7 +236,7 @@ void test_dev_vfs_serial_ioctl_unknown(void) {
   }
 }
 
-/* 19. lseek on /dev/serial → ESPIPE (not seekable) */
+// 19. lseek on /dev/serial → ESPIPE (not seekable)
 void test_dev_vfs_serial_lseek(void) {
   int fd = open("/dev/serial", O_RDWR);
   if (fd >= 0) {
@@ -249,7 +249,7 @@ void test_dev_vfs_serial_lseek(void) {
   }
 }
 
-/* 20. dup2 with /dev/serial fd */
+// 20. dup2 with /dev/serial fd
 void test_dev_vfs_serial_dup2(void) {
   int fd = open("/dev/serial", O_RDWR);
   TEST_ASSERT_TRUE(fd >= 0);
@@ -257,7 +257,7 @@ void test_dev_vfs_serial_dup2(void) {
   int new_fd = dup2(fd, 20);
   TEST_ASSERT_EQUAL_INT(20, new_fd);
 
-  /* Both fds should be writable */
+  // Both fds should be writable
   ssize_t w1 = write(fd, "D", 1);
   ssize_t w2 = write(new_fd, "E", 1);
   TEST_ASSERT_EQUAL_INT(1, (int)w1);
@@ -267,15 +267,15 @@ void test_dev_vfs_serial_dup2(void) {
   close(new_fd);
 }
 
-/* ===== Phase 5: sys_dev_create simplified + sys_open_dev/sys_load_dev removed
- * ===== */
+// ===== Phase 5: sys_dev_create simplified + sys_open_dev/sys_load_dev removed
+// =====
 
-/* 21. sys_dev_create simplified (3-arg, kernel fills driver_pid) */
+// 21. sys_dev_create simplified (3-arg, kernel fills driver_pid)
 void test_dev_vfs_dev_create(void) {
   int r = sys_dev_create("test_dev", -1, 0);
-  /* May succeed (0) or fail if name collision / no permission */
+  // May succeed (0) or fail if name collision / no permission
   if (r == 0) {
-    /* Verify the device node exists */
+    // Verify the device node exists
     int fd = open("/dev/test_dev", O_RDWR);
     if (fd >= 0) {
       struct stat st;
@@ -283,25 +283,24 @@ void test_dev_vfs_dev_create(void) {
       TEST_ASSERT_TRUE(S_ISCHR(st.st_mode));
       close(fd);
     } else {
-      /* Device node may not appear instantly */
+      // Device node may not appear instantly
       TEST_ASSERT_TRUE(1);
     }
   } else {
-    /* Creating devices from user-space may have restrictions */
+    // Creating devices from user-space may have restrictions
     TEST_ASSERT_TRUE(1);
   }
 }
 
-/* ===== Phase 6: dev_table elimination + ISR redesign ===== */
+// ===== Phase 6: dev_table elimination + ISR redesign =====
 
-/* 23. devtmpfs_cleanup_pid: device nodes removed when driver exits (indirect)
- */
+// 23. devtmpfs_cleanup_pid: device nodes removed when driver exits (indirect)
 void test_dev_vfs_cleanup(void) {
-  /* Indirect test: /dev/dri/card0 and /dev/serial are kernel devices
-   * and should persist. Only user-space driver nodes get cleaned. */
+  // Indirect test: /dev/dri/card0 and /dev/serial are kernel devices
+  // and should persist. Only user-space driver nodes get cleaned.
   int fd1 = open("/dev/dri/card0", O_RDWR);
   int fd2 = open("/dev/serial", O_RDWR);
-  /* At minimum serial should exist (kernel device) */
+  // At minimum serial should exist (kernel device)
   TEST_ASSERT_TRUE(fd2 >= 0);
   if (fd1 >= 0)
     close(fd1);
@@ -309,17 +308,17 @@ void test_dev_vfs_cleanup(void) {
     close(fd2);
 }
 
-/* ===== Phase 7: libc fd_table elimination ===== */
+// ===== Phase 7: libc fd_table elimination =====
 
-/* 24. open() returns kernel fd directly (no libc fd_table layer) */
+// 24. open() returns kernel fd directly (no libc fd_table layer)
 void test_dev_vfs_open_kernel_fd(void) {
   int fd = open("/dev/serial", O_RDWR);
   TEST_ASSERT_TRUE(fd >= 0);
 
-  /* fd should be a kernel-assigned fd (≥3 since 0/1/2 are reserved) */
+  // fd should be a kernel-assigned fd (≥3 since 0/1/2 are reserved)
   TEST_ASSERT_TRUE(fd >= 3);
 
-  /* fstat works on this fd (kernel-side validation) */
+  // fstat works on this fd (kernel-side validation)
   struct stat st;
   int r = fstat(fd, &st);
   TEST_ASSERT_EQUAL_INT(0, r);
@@ -327,26 +326,26 @@ void test_dev_vfs_open_kernel_fd(void) {
   close(fd);
 }
 
-/* 25. read/write/close are thin syscall wrappers (no libc fd_type dispatch) */
+// 25. read/write/close are thin syscall wrappers (no libc fd_type dispatch)
 void test_dev_vfs_thin_wrappers(void) {
   int fd = open("/dev/serial", O_RDWR);
   TEST_ASSERT_TRUE(fd >= 0);
 
-  /* write goes directly to sys_write → FD_DEV → ops->write */
+  // write goes directly to sys_write → FD_DEV → ops->write
   ssize_t w = write(fd, "W", 1);
   TEST_ASSERT_EQUAL_INT(1, (int)w);
 
-  /* close goes directly to sys_close → FD_DEV → ops->close + inode_put */
+  // close goes directly to sys_close → FD_DEV → ops->close + inode_put
   int r = close(fd);
   TEST_ASSERT_EQUAL_INT(0, r);
 
-  /* Double close → EBADF (kernel fd_table already cleared) */
+  // Double close → EBADF (kernel fd_table already cleared)
   r = close(fd);
   TEST_ASSERT_TRUE(r < 0);
   TEST_ASSERT_EQUAL_INT(EBADF, errno);
 }
 
-/* 26. dup2 on dev fd: kernel ref-counts inode (no libc fd_table copy) */
+// 26. dup2 on dev fd: kernel ref-counts inode (no libc fd_table copy)
 void test_dev_vfs_dup2_refcount(void) {
   int fd = open("/dev/serial", O_RDWR);
   TEST_ASSERT_TRUE(fd >= 0);
@@ -354,7 +353,7 @@ void test_dev_vfs_dup2_refcount(void) {
   int new_fd = dup2(fd, 30);
   TEST_ASSERT_EQUAL_INT(30, new_fd);
 
-  /* Close original — dup'd fd should still work */
+  // Close original — dup'd fd should still work
   close(fd);
   ssize_t w = write(new_fd, "X", 1);
   TEST_ASSERT_EQUAL_INT(1, (int)w);
@@ -362,7 +361,7 @@ void test_dev_vfs_dup2_refcount(void) {
   close(new_fd);
 }
 
-/* 27. fcntl F_GETFL on dev fd → kernel returns flags directly */
+// 27. fcntl F_GETFL on dev fd → kernel returns flags directly
 void test_dev_vfs_fcntl_getfl(void) {
   int fd = open("/dev/serial", O_RDWR);
   TEST_ASSERT_TRUE(fd >= 0);
@@ -374,7 +373,7 @@ void test_dev_vfs_fcntl_getfl(void) {
   close(fd);
 }
 
-/* 28. fcntl F_SETFL O_NONBLOCK on serial fd */
+// 28. fcntl F_SETFL O_NONBLOCK on serial fd
 void test_dev_vfs_fcntl_setfl(void) {
   int fd = open("/dev/serial", O_RDWR);
   TEST_ASSERT_TRUE(fd >= 0);
@@ -385,7 +384,7 @@ void test_dev_vfs_fcntl_setfl(void) {
   int flags = fcntl(fd, F_GETFL);
   TEST_ASSERT_TRUE(flags & O_NONBLOCK);
 
-  /* Serial input was removed (dev_ops.read is NULL) → read returns ENOSYS */
+  // Serial input was removed (dev_ops.read is NULL) → read returns ENOSYS
   char buf[1];
   ssize_t rr = read(fd, buf, 1);
   TEST_ASSERT_EQUAL_INT(-1, (int)rr);
@@ -394,13 +393,12 @@ void test_dev_vfs_fcntl_setfl(void) {
   close(fd);
 }
 
-/* 29. mmap MAP_SHARED on /dev/dri/card0 → kernel auto resolves via dev_ops.mmap
- */
+// 29. mmap MAP_SHARED on /dev/dri/card0 → kernel auto resolves via dev_ops.mmap
 void test_dev_vfs_kms_mmap_shared(void) {
   int fd = open("/dev/dri/card0", O_RDWR);
   if (fd >= 0) {
-    /* Without CREATE_BUF, mmap returns NULL (no back buffer).
-     * Test that the kernel path works without crashing. */
+    // Without CREATE_BUF, mmap returns NULL (no back buffer).
+    // Test that the kernel path works without crashing.
     void *p = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     (void)p;
     close(fd);
@@ -408,7 +406,7 @@ void test_dev_vfs_kms_mmap_shared(void) {
   TEST_ASSERT_TRUE(1);
 }
 
-/* 30. pipe + dev fd coexist (no libc fd_table interference) */
+// 30. pipe + dev fd coexist (no libc fd_table interference)
 void test_dev_vfs_pipe_dev_coexist(void) {
   int pipefd[2];
   int r = pipe(pipefd);
@@ -417,14 +415,14 @@ void test_dev_vfs_pipe_dev_coexist(void) {
   int serial_fd = open("/dev/serial", O_RDWR);
   TEST_ASSERT_TRUE(serial_fd >= 0);
 
-  /* Write to pipe */
+  // Write to pipe
   write(pipefd[1], "P", 1);
   char buf[2] = {0};
   ssize_t rr = read(pipefd[0], buf, 1);
   TEST_ASSERT_EQUAL_INT(1, (int)rr);
   TEST_ASSERT_EQUAL_STRING("P", buf);
 
-  /* Write to serial */
+  // Write to serial
   ssize_t ws = write(serial_fd, "S", 1);
   TEST_ASSERT_EQUAL_INT(1, (int)ws);
 
@@ -433,35 +431,34 @@ void test_dev_vfs_pipe_dev_coexist(void) {
   close(serial_fd);
 }
 
-/* ===== Cross-phase integration ===== */
+// ===== Cross-phase integration =====
 
-/* 31. (removed in Phase 4: KMS FLIP retired with bochs-display) */
+// 31. (removed in Phase 4: KMS FLIP retired with bochs-display)
 
-/* 32. Full /dev/serial lifecycle: open → write → fstat → poll → close → reopen
- */
+// 32. Full /dev/serial lifecycle: open → write → fstat → poll → close → reopen
 void test_dev_vfs_serial_lifecycle(void) {
   int fd = open("/dev/serial", O_RDWR);
   TEST_ASSERT_TRUE(fd >= 0);
 
-  /* Write */
+  // Write
   ssize_t w = write(fd, "L", 1);
   TEST_ASSERT_EQUAL_INT(1, (int)w);
 
-  /* fstat */
+  // fstat
   struct stat st;
   TEST_ASSERT_EQUAL_INT(0, fstat(fd, &st));
   TEST_ASSERT_TRUE(S_ISCHR(st.st_mode));
 
-  /* poll → POLLOUT */
+  // poll → POLLOUT
   struct pollfd pfd = {.fd = fd, .events = POLLOUT, .revents = 0};
   int pr = poll(&pfd, 1, 100);
   TEST_ASSERT_TRUE(pr > 0);
   TEST_ASSERT_TRUE(pfd.revents & POLLOUT);
 
-  /* isatty → 1 */
+  // isatty → 1
   TEST_ASSERT_EQUAL_INT(1, isatty(fd));
 
-  /* Close + reopen */
+  // Close + reopen
   close(fd);
   fd = open("/dev/serial", O_RDWR);
   TEST_ASSERT_TRUE(fd >= 0);
@@ -470,7 +467,7 @@ void test_dev_vfs_serial_lifecycle(void) {
   close(fd);
 }
 
-/* 33. /dev/serial and /dev/dri/card0 have distinct inodes */
+// 33. /dev/serial and /dev/dri/card0 have distinct inodes
 void test_dev_vfs_distinct_inodes(void) {
   int serial_fd = open("/dev/serial", O_RDWR);
   int kms_fd = open("/dev/dri/card0", O_RDWR);
@@ -496,7 +493,7 @@ void test_dev_vfs_distinct_inodes(void) {
     TEST_ASSERT_TRUE(1);
 }
 
-/* 34. fstat on /dev/fs (user-space driver node) */
+// 34. fstat on /dev/fs (user-space driver node)
 void test_dev_vfs_fstat_fs(void) {
   int fd = open("/dev/fs", O_RDWR);
   if (fd >= 0) {
@@ -506,20 +503,19 @@ void test_dev_vfs_fstat_fs(void) {
     TEST_ASSERT_TRUE(S_ISCHR(st.st_mode));
     close(fd);
   } else {
-    /* /dev/fs may not be available in test env */
+    // /dev/fs may not be available in test env
     TEST_ASSERT_TRUE(1);
   }
 }
 
-/* ===== Phase 8: ioctl IPC proxy ===== */
+// ===== Phase 8: ioctl IPC proxy =====
 
-/* 36. (removed in Phase 4: KMS CREATE_BUF retired with bochs-display) */
+// 36. (removed in Phase 4: KMS CREATE_BUF retired with bochs-display)
 
-/* 37. (removed: input bind ioctl retired with the SHM-ring evdev path; the
- *      broker replaces bind/notify with INPUT_REGISTER on /dev/input/control)
- */
+// 37. (removed: input bind ioctl retired with the SHM-ring evdev path; the
+//      broker replaces bind/notify with INPUT_REGISTER on /dev/input/control)
 
-/* 38. (removed in Phase 4: KMS FLIP retired with bochs-display) */
+// 38. (removed in Phase 4: KMS FLIP retired with bochs-display)
 
 int main(int argc, char **argv, char **envp) {
   (void)argc;
@@ -527,11 +523,11 @@ int main(int argc, char **argv, char **envp) {
   (void)envp;
   UNITY_BEGIN();
 
-  /* Phase 1: dev_ops callback dispatch */
+  // Phase 1: dev_ops callback dispatch
   RUN_TEST(test_dev_vfs_kms_mmap);
   RUN_TEST(test_dev_vfs_kms_ioctl_unknown);
 
-  /* Phase 2: FD type consolidation + serial dev_ops */
+  // Phase 2: FD type consolidation + serial dev_ops
   RUN_TEST(test_dev_vfs_serial_open);
   RUN_TEST(test_dev_vfs_serial_write);
   RUN_TEST(test_dev_vfs_serial_read_nonblock);
@@ -540,25 +536,25 @@ int main(int argc, char **argv, char **envp) {
   RUN_TEST(test_dev_vfs_serial_close_reopen);
   RUN_TEST(test_dev_vfs_serial_multi_open);
 
-  /* Phase 3: devtmpfs unified */
+  // Phase 3: devtmpfs unified
   RUN_TEST(test_dev_vfs_serial_devtmpfs_path);
   RUN_TEST(test_dev_vfs_kms_devtmpfs_path);
   RUN_TEST(test_dev_vfs_open_nonexistent);
 
-  /* Phase 4: sys_ioctl + sys_fstat */
+  // Phase 4: sys_ioctl + sys_fstat
   RUN_TEST(test_dev_vfs_fstat_serial);
   RUN_TEST(test_dev_vfs_fstat_bad_fd);
   RUN_TEST(test_dev_vfs_serial_ioctl_unknown);
   RUN_TEST(test_dev_vfs_serial_lseek);
   RUN_TEST(test_dev_vfs_serial_dup2);
 
-  /* Phase 5: sys_dev_create simplified */
+  // Phase 5: sys_dev_create simplified
   RUN_TEST(test_dev_vfs_dev_create);
 
-  /* Phase 6: dev_table elimination */
+  // Phase 6: dev_table elimination
   RUN_TEST(test_dev_vfs_cleanup);
 
-  /* Phase 7: libc fd_table elimination */
+  // Phase 7: libc fd_table elimination
   RUN_TEST(test_dev_vfs_open_kernel_fd);
   RUN_TEST(test_dev_vfs_thin_wrappers);
   RUN_TEST(test_dev_vfs_dup2_refcount);
@@ -567,13 +563,12 @@ int main(int argc, char **argv, char **envp) {
   RUN_TEST(test_dev_vfs_kms_mmap_shared);
   RUN_TEST(test_dev_vfs_pipe_dev_coexist);
 
-  /* Cross-phase integration */
+  // Cross-phase integration
   RUN_TEST(test_dev_vfs_serial_lifecycle);
   RUN_TEST(test_dev_vfs_distinct_inodes);
   RUN_TEST(test_dev_vfs_fstat_fs);
 
-  /* Phase 8: (removed: input bind ioctl retired with the SHM-ring evdev path)
-   */
+  // Phase 8: (removed: input bind ioctl retired with the SHM-ring evdev path)
 
   return UNITY_END();
 }

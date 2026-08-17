@@ -2,8 +2,8 @@
  * Copyright (c) 2026 hesse
  *
  * SPDX-License-Identifier: MIT
- *
  */
+
 // evdev kernel char-device broker (mirrors Linux drivers/input/evdev.c kernel
 // layer). evdev user-space process registers devices via INPUT_REGISTER ioctl
 // on /dev/input/control; broker exposes /dev/input/eventN with standard evdev

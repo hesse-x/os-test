@@ -84,4 +84,4 @@ void dump_stack_trace(void);
 #define ASSERT(cond) BUG_ON(!(cond))
 #endif
 
-#endif /* KERNEL_LOG_H */
+#endif // KERNEL_LOG_H

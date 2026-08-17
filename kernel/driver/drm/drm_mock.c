@@ -182,8 +182,8 @@ void drm_mock_register_test_device(void) {
   struct drm_get_cap cap = {.capability = DRM_CAP_TIMESTAMP_MONOTONIC};
   BUG_ON(drm_mock_get_cap(&cap) != 0 || cap.value != 1);
 
-  /* With no hardware DRM device, retain a second mock so pure-core boots
-   * exercise two simultaneously registered devices as well. */
+  // With no hardware DRM device, retain a second mock so pure-core boots
+  // exercise two simultaneously registered devices as well.
   if (mock_slot == 0) {
     drm_mock_device2 = drm_mock_alloc(1);
     BUG_ON(!drm_mock_device2);

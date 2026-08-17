@@ -69,7 +69,7 @@ void kasan_slab_free(const void *object, size_t size);
 void kasan_bfc_alloc(const void *addr, size_t size);
 void kasan_bfc_free(const void *addr, size_t size);
 
-#else /* !SANITIZER */
+#else // !SANITIZER
 
 // Non-sanitizer build: all functions are no-ops
 static inline void kasan_init(void) {}
@@ -116,6 +116,6 @@ static inline void kasan_bfc_free(const void *a, size_t s) {
   (void)s;
 }
 
-#endif /* SANITIZER */
+#endif // SANITIZER
 
-#endif /* KERNEL_MEM_KASAN_H */
+#endif // KERNEL_MEM_KASAN_H

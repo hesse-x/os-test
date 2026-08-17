@@ -7,7 +7,7 @@
 #ifndef XOS_KERNEL_PERF_PHASE_IDS_H
 #define XOS_KERNEL_PERF_PHASE_IDS_H
 
-/* Stable IDs are part of the raw trace ABI; never renumber existing entries. */
+// Stable IDs are part of the raw trace ABI; never renumber existing entries.
 #define PERF_PHASE_BOOT_TO_KERNEL_MAIN 1
 #define PERF_PHASE_EARLY_PAGING 2
 #define PERF_PHASE_EARLY_GDT 3

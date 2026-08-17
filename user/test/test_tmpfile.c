@@ -4,12 +4,12 @@
  * SPDX-License-Identifier: MIT
  */
 
-/* tmpfile/tmpnam/tempnam — musl src/stdio (musl_stdio_objs), added back once
- * the time module migrated (their __randname → __clock_gettime dep resolved;
- * same blocker as stdlib mkstemp, todo.md:344/379/391). All three name under
- * /tmp, which the kernel does not pre-create (vfs.c only makes /dev /sys /proc
- * /run), so the suite mkdirs /tmp up front. tmpfile opens O_CREAT|O_EXCL then
- * unlinks immediately (unlink-on-open) and hands a "w+" FILE. */
+// tmpfile/tmpnam/tempnam — musl src/stdio (musl_stdio_objs), added back once
+// the time module migrated (their __randname → __clock_gettime dep resolved;
+// same blocker as stdlib mkstemp, todo.md:344/379/391). All three name under
+// /tmp, which the kernel does not pre-create (vfs.c only makes /dev /sys /proc
+// /run), so the suite mkdirs /tmp up front. tmpfile opens O_CREAT|O_EXCL then
+// unlinks immediately (unlink-on-open) and hands a "w+" FILE.
 
 #include <errno.h>
 #include <stdio.h>
@@ -23,13 +23,13 @@
 void setUp(void) {}
 void tearDown(void) {}
 
-/* mkdir /tmp if missing; ignore EEXIST. Idempotent like init's /run/udev. */
+// mkdir /tmp if missing; ignore EEXIST. Idempotent like init's /run/udev.
 static void ensure_tmp_dir(void) {
   if (mkdir("/tmp", 0755) != 0 && errno != EEXIST)
     TEST_FAIL_MESSAGE("mkdir(/tmp) failed");
 }
 
-/* 1. tmpfile: write, rewind, read back. */
+// 1. tmpfile: write, rewind, read back.
 void test_tmpfile_write_read(void) {
   ensure_tmp_dir();
   FILE *f = tmpfile();
@@ -44,7 +44,7 @@ void test_tmpfile_write_read(void) {
   fclose(f);
 }
 
-/* 2. tmpfile: rewound empty stream reports EOF. */
+// 2. tmpfile: rewound empty stream reports EOF.
 void test_tmpfile_empty_eof(void) {
   ensure_tmp_dir();
   FILE *f = tmpfile();
@@ -53,7 +53,7 @@ void test_tmpfile_empty_eof(void) {
   fclose(f);
 }
 
-/* 3. tmpnam(NULL): returns a name, writes to internal static buffer. */
+// 3. tmpnam(NULL): returns a name, writes to internal static buffer.
 void test_tmpnam_null(void) {
   ensure_tmp_dir();
   char *s = tmpnam(NULL);
@@ -61,7 +61,7 @@ void test_tmpnam_null(void) {
   TEST_ASSERT_EQUAL_INT(0, strncmp(s, "/tmp/", 5));
 }
 
-/* 4. tmpnam(buf): returns buf, same content. */
+// 4. tmpnam(buf): returns buf, same content.
 void test_tmpnam_buf(void) {
   ensure_tmp_dir();
   char buf[L_tmpnam] = {0};
@@ -70,7 +70,7 @@ void test_tmpnam_buf(void) {
   TEST_ASSERT_EQUAL_INT(0, strncmp(buf, "/tmp/", 5));
 }
 
-/* 5. tempnam(NULL, NULL): defaults to P_tmpdir + "temp" prefix. */
+// 5. tempnam(NULL, NULL): defaults to P_tmpdir + "temp" prefix.
 void test_tempnam_defaults(void) {
   ensure_tmp_dir();
   char *s = tempnam(NULL, NULL);
@@ -79,7 +79,7 @@ void test_tempnam_defaults(void) {
   free(s);
 }
 
-/* 6. tempnam(dir, pfx): honors caller dir + prefix. */
+// 6. tempnam(dir, pfx): honors caller dir + prefix.
 void test_tempnam_custom(void) {
   ensure_tmp_dir();
   char *s = tempnam("/tmp", "myapp");

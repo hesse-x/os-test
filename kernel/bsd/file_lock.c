@@ -92,7 +92,7 @@ static struct file_lock *find_conflict(struct inode *ip, pid_t pid,
     if (fl->is_bsd)
       continue; // BSD flock locks never conflict with POSIX/OFD record locks
     if (fl->is_ofd == is_ofd) {
-      /* Same class: same owner never conflicts. */
+      // Same class: same owner never conflicts.
       if (is_ofd) {
         if (fl->owner_file == fowner)
           continue;
@@ -100,7 +100,7 @@ static struct file_lock *find_conflict(struct inode *ip, pid_t pid,
         continue;
       }
     }
-    /* Different class (POSIX vs OFD): always treated as distinct owners. */
+    // Different class (POSIX vs OFD): always treated as distinct owners.
     if (fl->type == F_RDLCK && type == F_RDLCK)
       continue;
     if (fl->start < end && start < fl->end)
@@ -120,7 +120,7 @@ static void locks_delete_range(struct inode *ip, pid_t pid, struct file *fowner,
     struct file_lock *fl = (struct file_lock *)n;
     n = n->next;
 
-    /* Only same-class & same-owner locks are released. */
+    // Only same-class & same-owner locks are released.
     if (fl->is_bsd)
       continue; // BSD flock is released via its own path (file_put)
     if (fl->is_ofd != is_ofd)
@@ -266,9 +266,9 @@ static int64_t apply_lock(struct inode *ip, pid_t pid, struct file *fowner,
     add_wait_queue(wq, &wait);
     proc->state = BLOCKED;
     proc->wait_event = WAIT_NONE;
-    /* No user timeout for F_SETLKW (POSIX: indefinite, signal-interruptible
-     * only). Borrow the process alarm deadline (if armed) so a pending SIGALRM
-     * can interrupt, mirroring sys_pause / blocking pipe write. */
+    // No user timeout for F_SETLKW (POSIX: indefinite, signal-interruptible
+    // only). Borrow the process alarm deadline (if armed) so a pending SIGALRM
+    // can interrupt, mirroring sys_pause / blocking pipe write.
     uint64_t alarm_dl = 0;
     if (proc->proc && proc->proc->signal) {
       uint64_t sflags;
@@ -299,14 +299,14 @@ int64_t do_fcntl_lock(xtask *proc, struct file *f, int cmd, struct flock *lk) {
   if (!f->inode)
     return -ENOLCK;
 
-  /* 1. Validate l_type / l_whence. */
+  // 1. Validate l_type / l_whence.
   if (lk->l_type != F_RDLCK && lk->l_type != F_WRLCK && lk->l_type != F_UNLCK)
     return -EINVAL;
   if (lk->l_whence != SEEK_SET && lk->l_whence != SEEK_CUR &&
       lk->l_whence != SEEK_END)
     return -EINVAL;
 
-  /* 2. Resolve absolute byte range. */
+  // 2. Resolve absolute byte range.
   uint64_t base;
   switch (lk->l_whence) {
   case SEEK_SET:
@@ -321,8 +321,8 @@ int64_t do_fcntl_lock(xtask *proc, struct file *f, int cmd, struct flock *lk) {
   default:
     return -EINVAL;
   }
-  /* l_start/l_len are signed; negative start/len is allowed (Linux) but this OS
-   * has no real file-lock users exercising it, so reject underflow simply. */
+  // l_start/l_len are signed; negative start/len is allowed (Linux) but this OS
+  // has no real file-lock users exercising it, so reject underflow simply.
   if (lk->l_start < 0)
     return -EINVAL;
   uint64_t start = base + (uint64_t)lk->l_start;
@@ -333,7 +333,7 @@ int64_t do_fcntl_lock(xtask *proc, struct file *f, int cmd, struct flock *lk) {
   struct inode *ip = f->inode;
   pid_t pid = proc->pid;
 
-  /* 3. F_GETLK: probe (never blocks). */
+  // 3. F_GETLK: probe (never blocks).
   if (cmd == F_GETLK) {
     spin_lock(&ip->i_flock_lock);
     struct file_lock *conf =
@@ -356,7 +356,7 @@ int64_t do_fcntl_lock(xtask *proc, struct file *f, int cmd, struct flock *lk) {
     return 0;
   }
 
-  /* 4. F_SETLK / F_SETLKW. */
+  // 4. F_SETLK / F_SETLKW.
   int blocking = (cmd == F_SETLKW) ? 1 : 0;
   return apply_lock(ip, pid, NULL, false, lk->l_type, start, end, blocking);
 }
@@ -366,14 +366,14 @@ int64_t do_fcntl_lock_ofd(xtask *proc, struct file *f, int cmd,
   if (!f->inode)
     return -ENOLCK;
 
-  /* 1. Validate l_type / l_whence. */
+  // 1. Validate l_type / l_whence.
   if (lk->l_type != F_RDLCK && lk->l_type != F_WRLCK && lk->l_type != F_UNLCK)
     return -EINVAL;
   if (lk->l_whence != SEEK_SET && lk->l_whence != SEEK_CUR &&
       lk->l_whence != SEEK_END)
     return -EINVAL;
 
-  /* 2. Resolve absolute byte range (same rules as POSIX path). */
+  // 2. Resolve absolute byte range (same rules as POSIX path).
   uint64_t base;
   switch (lk->l_whence) {
   case SEEK_SET:
@@ -398,9 +398,9 @@ int64_t do_fcntl_lock_ofd(xtask *proc, struct file *f, int cmd,
   struct inode *ip = f->inode;
   pid_t pid = proc->pid;
 
-  /* 3. F_OFD_GETLK: probe (never blocks). OFD locks report the holder's creator
-   *    pid in l_pid (Linux behavior: the lock is per-file-description, but the
-   *    conflict report still names a pid). */
+  // 3. F_OFD_GETLK: probe (never blocks). OFD locks report the holder's creator
+  //    pid in l_pid (Linux behavior: the lock is per-file-description, but the
+  //    conflict report still names a pid).
   if (cmd == F_OFD_GETLK) {
     spin_lock(&ip->i_flock_lock);
     struct file_lock *conf =
@@ -423,7 +423,7 @@ int64_t do_fcntl_lock_ofd(xtask *proc, struct file *f, int cmd,
     return 0;
   }
 
-  /* 4. F_OFD_SETLK / F_OFD_SETLKW. */
+  // 4. F_OFD_SETLK / F_OFD_SETLKW.
   int blocking = (cmd == F_OFD_SETLKW) ? 1 : 0;
   return apply_lock(ip, pid, f, true, lk->l_type, start, end, blocking);
 }
@@ -565,9 +565,9 @@ int64_t do_flock(struct file *f, int operation) {
     add_wait_queue(wq, &wait);
     proc->state = BLOCKED;
     proc->wait_event = WAIT_NONE;
-    /* No user timeout for flock (indefinite, signal-interruptible only).
-     * Borrow the process alarm deadline (if armed) so a pending SIGALRM can
-     * interrupt, mirroring F_SETLKW / blocking pipe write. */
+    // No user timeout for flock (indefinite, signal-interruptible only).
+    // Borrow the process alarm deadline (if armed) so a pending SIGALRM can
+    // interrupt, mirroring F_SETLKW / blocking pipe write.
     uint64_t alarm_dl = 0;
     if (proc->proc && proc->proc->signal) {
       uint64_t sflags;
@@ -602,8 +602,8 @@ static void release_pid_on_inode(struct inode *ip, void *ctx) {
   while (n != &ip->i_flock) {
     struct file_lock *fl = (struct file_lock *)n;
     n = n->next;
-    /* POSIX only: OFD locks outlive their creating process (owned by the
-     * open file description, released by file_lock_release_file). */
+    // POSIX only: OFD locks outlive their creating process (owned by the
+    // open file description, released by file_lock_release_file).
     if (!fl->is_ofd && fl->owner_pid == dead_pid) {
       list_remove(&fl->node);
       kfree(fl);

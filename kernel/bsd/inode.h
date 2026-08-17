@@ -129,41 +129,39 @@ struct inode {
   int nlink;
   refcount_t i_count;
   mutex i_lock;
-  void *i_priv;         /* INODE_DEV -> dev_ops*; INODE_REGULAR -> NULL */
-  void *device_private; /* device instance; independent of dev_ops/i_priv */
+  void *i_priv;         // INODE_DEV -> dev_ops*; INODE_REGULAR -> NULL
+  void *device_private; // device instance; independent of dev_ops/i_priv
   const struct inode_operations
       *i_op; // behavior table (attached at iget exit); unmounted → dispatch
              // returns -ENOSYS/-EACCES
   const struct file_operations *i_fop;
   const struct address_space_operations *i_aop;
   void *i_private;
-  struct shm *shm; /* Device SHM or tmpfs regular-file shared backing. */
-  struct mount_entry *mount; /* owning mount (set by sys_open lookup) */
-  wait_queue_head *wq; /* ringbuf-backed: shared wq for epoll/poll waiters */
+  struct shm *shm;           // Device SHM or tmpfs regular-file shared backing.
+  struct mount_entry *mount; // owning mount (set by sys_open lookup)
+  wait_queue_head *wq;       // ringbuf-backed: shared wq for epoll/poll waiters
   void (*release)(struct inode *ip, void *arg);
   void *release_arg;
 
-  /* POSIX file locks (S09): per-inode lock list + its own spinlock (independent
-   * of i_lock, which guards filesystem metadata — flock ops never touch it).
-   */
-  list_node i_flock;     /* head of file_lock list (list_init on create) */
-  spinlock i_flock_lock; /* protects i_flock */
+  // POSIX file locks (S09): per-inode lock list + its own spinlock (independent
+  // of i_lock, which guards filesystem metadata — flock ops never touch it).
+  list_node i_flock;     // head of file_lock list (list_init on create)
+  spinlock i_flock_lock; // protects i_flock
 
-  /* POSIX timestamps in ns since epoch (CLOCK_REALTIME). In-memory only —
-   * FAT32 stores no timestamps (Q5: llvm libc utimensat tests don't survive
-   * reboot); getattr reads these. Updated by update_time / generic_update_time.
-   */
+  // POSIX timestamps in ns since epoch (CLOCK_REALTIME). In-memory only —
+  // FAT32 stores no timestamps (Q5: llvm libc utimensat tests don't survive
+  // reboot); getattr reads these. Updated by update_time / generic_update_time.
   struct vfs_timespec64 atime;
   struct vfs_timespec64 mtime;
   struct vfs_timespec64 ctime;
 
-  /* Hash chain */
+  // Hash chain
   struct inode *hash_next;
   struct inode *hash_prev;
 };
 
 #define INODE_HASH_BITS 6
-#define INODE_HASH_SIZE (1 << INODE_HASH_BITS) /* 64 */
+#define INODE_HASH_SIZE (1 << INODE_HASH_BITS) // 64
 
 void inode_init(void);
 struct inode *inode_lookup(struct super_block *sb, uint64_t ino);
@@ -174,9 +172,9 @@ struct inode *inode_get_or_create(struct super_block *sb, uint64_t ino,
 void inode_put(struct inode *ip);
 struct inode *inode_get(struct inode *ip);
 
-/* Walk every cached inode, calling fn(ip, ctx) for each. Used by S09 file-lock
- * cleanup to release a dying process's POSIX locks across all inodes without
- * exposing the static hash table. fn must not block on inode eviction. */
+// Walk every cached inode, calling fn(ip, ctx) for each. Used by S09 file-lock
+// cleanup to release a dying process's POSIX locks across all inodes without
+// exposing the static hash table. fn must not block on inode eviction.
 typedef void (*inode_iter_fn)(struct inode *ip, void *ctx);
 void inode_for_each(inode_iter_fn fn, void *ctx);
 

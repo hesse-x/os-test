@@ -45,4 +45,4 @@ LIBC_EXPORT int ipcfd_read(int fd, struct recv_msg *msg, void *data_buf,
 }
 #endif
 
-#endif /* XOS_IPC_H */
+#endif // XOS_IPC_H

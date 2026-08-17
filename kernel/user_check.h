@@ -30,4 +30,4 @@ static inline bool validate_user_ptr(const void *ptr) {
   return v && v < KERNEL_VMA_BOUNDARY;
 }
 
-#endif /* KERNEL_USER_CHECK_H */
+#endif // KERNEL_USER_CHECK_H

@@ -4,16 +4,19 @@
  * SPDX-License-Identifier: MIT
  */
 
-// test_display_info_smoke — wlroots 前置依赖 libdisplay-info 的目标端冒烟测试。
+// test_display_info_smoke — end-to-end smoke test for libdisplay-info, a
+// wlroots prerequisite.
 //
-// 喂一段静态 QEMU 显示器 EDID blob 给 di_info_parse_edid，验证解析成功、
-// 能取出底层 di_edid、厂商 PNP ID 与 failure_msg 合理。这是 WF-5 的运行时
-// 验证（EDID 冒烟测试），并覆盖 build.sh
-// 的符号导出修复（-fvisibility=default）： 若 di_* 符号未被导出，loader 会报
-// undefined symbol。
+// Feed a static QEMU monitor EDID blob to di_info_parse_edid and verify that
+// parsing succeeds and the underlying di_edid, the vendor PNP ID, and
+// failure_msg are sane. This is the runtime verification for WF-5 (EDID smoke
+// test) and also covers build.sh's symbol-export fix (-fvisibility=default): if
+// the di_* symbols were not exported, the loader would report undefined symbol.
 //
-// EDID 来自 third_party/libdisplay-info/test/data/qemu.edid（256 字节，含一个
-// 扩展块），与本项目 QEMU 验收环境一致。参考 test_pixman_smoke.c 的诊断式风格。
+// The EDID comes from third_party/libdisplay-info/test/data/qemu.edid (256
+// bytes, including one extension block), matching this project's QEMU
+// acceptance environment. See test_pixman_smoke.c for the diagnostic-style
+// approach.
 
 #include <libdisplay-info/edid.h>
 #include <libdisplay-info/info.h>
@@ -27,7 +30,7 @@ static int fail(const char *what) {
   _exit(1);
 }
 
-/* 256-byte QEMU monitor EDID, from libdisplay-info test data */
+// 256-byte QEMU monitor EDID, from libdisplay-info test data
 static const unsigned char edid_qemu[] = {
     0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00, 0x49, 0x14, 0x34, 0x12,
     0x00, 0x00, 0x00, 0x00, 0x2a, 0x18, 0x01, 0x04, 0xa5, 0x20, 0x14, 0x78,
@@ -55,34 +58,36 @@ static const unsigned char edid_qemu[] = {
 static const unsigned long edid_qemu_len = 256;
 
 int main(void) {
-  // 1. 解析 EDID。NULL 表示彻底无法解析（坏头/校验和）；非 NULL 也可能带
-  //    failure_msg（规范警告）。QEMU EDID 应解析成功。
+  // 1. Parse the EDID. NULL means it could not be parsed at all (bad header /
+  //    checksum); non-NULL may still carry a failure_msg (spec warning). The
+  //    QEMU EDID should parse successfully.
   struct di_info *info = di_info_parse_edid(edid_qemu, edid_qemu_len);
   if (!info)
     fail("di_info_parse_edid returned NULL");
   printf("display_info: parsed EDID, info=%p\n", (void *)info);
 
-  // 2. failure_msg：NULL 表示完全合规。QEMU EDID 可能有轻微警告，不视为致命。
+  // 2. failure_msg: NULL means fully compliant. The QEMU EDID may carry minor
+  //    warnings, which are not treated as fatal.
   const char *failmsg = di_info_get_failure_msg(info);
   printf("display_info: failure_msg=%s\n", failmsg ? failmsg : "(none)");
 
-  // 3. 取底层 di_edid。
+  // 3. Obtain the underlying di_edid.
   const struct di_edid *edid = di_info_get_edid(info);
   if (!edid)
     fail("di_info_get_edid returned NULL");
   printf("display_info: got edid %p\n", (void *)edid);
 
-  // 4. EDID 版本号：EDID 1.4 → version=1, revision=4。
+  // 4. EDID version: EDID 1.4 → version=1, revision=4.
   int ver = di_edid_get_version(edid);
   int rev = di_edid_get_revision(edid);
   printf("display_info: edid version=%d revision=%d\n", ver, rev);
   if (ver != 1 || rev != 4)
     fail("di_edid_get_version/revision not 1.4");
 
-  // 5. 厂商 PNP ID：QEMU EDID 厂商编码为 "RHT"（3 字符 PNP ID；产品名描述符
-  //    才是 "QEMU Monitor"，厂商与产品名是两个独立字段）。与上游参考
-  //    third_party/libdisplay-info/test/data/qemu.ref 的 "Manufacturer: RHT"
-  //    一致。
+  // 5. Vendor PNP ID: the QEMU EDID vendor code is "RHT" (a 3-character PNP ID;
+  //    the product-name descriptor is "QEMU Monitor", vendor and product name
+  //    being two separate fields). Consistent with "Manufacturer: RHT" in the
+  //    upstream reference third_party/libdisplay-info/test/data/qemu.ref.
   const struct di_edid_vendor_product *vp = di_edid_get_vendor_product(edid);
   if (!vp)
     fail("di_edid_get_vendor_product returned NULL");

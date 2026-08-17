@@ -23,10 +23,10 @@
 #define HAVE_QUIRKS 1
 #define LIBINPUT_QUIRKS_DIR "/usr/share/libinput"
 
-/* libc.so now provides versionsort + strverscmp (musl dirent/string). Tell
- * libinput-versionsort.h (HAVE_VERSIONSORT) to drop its own static inline
- * copies and use the system ones — avoids a "static follows non-static" clash
- * with <dirent.h>'s versionsort declaration (libinput defines _GNU_SOURCE). */
+// libc.so now provides versionsort + strverscmp (musl dirent/string). Tell
+// libinput-versionsort.h (HAVE_VERSIONSORT) to drop its own static inline
+// copies and use the system ones — avoids a "static follows non-static" clash
+// with <dirent.h>'s versionsort declaration (libinput defines _GNU_SOURCE).
 #define HAVE_VERSIONSORT 1
 
 #define LIBINPUT_QUIRKS_OVERRIDE_FILE "/etc/libinput/local-overrides.quirks"
@@ -35,13 +35,13 @@
 
 #define HTTP_DOC_LINK "https://wayland.freedesktop.org/libinput/doc/1.30.4"
 
-/* HAVE_VERSIONSORT: this libc provides strverscmp/versionsort (musl
- * src/string/strverscmp.c, merged into libc.a). libinput's
- * libinput-versionsort.h #ifndef-guards a static-inline strverscmp fallback;
- * under _GNU_SOURCE musl's <string.h> also declares strverscmp (non-static),
- * so without this the static definition clashes ("static declaration follows
- * non-static declaration"). Defining HAVE_VERSIONSORT skips libinput's
- * fallback — mirroring libinput's own meson feature-probe (meson.build:116). */
+// HAVE_VERSIONSORT: this libc provides strverscmp/versionsort (musl
+// src/string/strverscmp.c, merged into libc.a). libinput's
+// libinput-versionsort.h #ifndef-guards a static-inline strverscmp fallback;
+// under _GNU_SOURCE musl's <string.h> also declares strverscmp (non-static),
+// so without this the static definition clashes ("static declaration follows
+// non-static declaration"). Defining HAVE_VERSIONSORT skips libinput's
+// fallback — mirroring libinput's own meson feature-probe (meson.build:116).
 #define HAVE_VERSIONSORT 1
 
 #undef HAVE_LIBWACOM

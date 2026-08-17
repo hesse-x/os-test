@@ -15,7 +15,7 @@
 
 #include <xos/errno.h>
 
-/* Helper: page-align a size */
+// Helper: page-align a size
 static bool checked_ring_size(uint16_t size, size_t elem, size_t base,
                               size_t *bytes, uint16_t *pages) {
   if (!size || size > VRING_MAX_SIZE || (size & (size - 1)) ||
@@ -31,8 +31,8 @@ static bool checked_ring_size(uint16_t size, size_t elem, size_t base,
   return true;
 }
 
-/* Physical address of a kernel virtual pointer (higher-half kernel: vaddr -
- * VMA_BASE) */
+// Physical address of a kernel virtual pointer (higher-half kernel: vaddr -
+// VMA_BASE)
 static uint64_t virt_to_phys(void *vaddr) {
   return (uint64_t)PHY_ADDR((uintptr_t)vaddr);
 }
@@ -54,9 +54,8 @@ int vring_create(struct virtqueue *vq, uint16_t index, uint16_t size,
   vq->size = size;
   vq->notify_off = notify_off;
 
-  /* Allocate each ring on its own page(s) for alignment.
-     bfc_alloc_page_data(n) returns a data pointer (not Page*), n = page count.
-   */
+  // Allocate each ring on its own page(s) for alignment.
+  // bfc_alloc_page_data(n) returns a data pointer (not Page*), n = page count.
   vq->desc = (struct vring_desc *)bfc_alloc_page_data(vq->desc_pages);
   vq->avail = (struct vring_avail *)bfc_alloc_page_data(vq->avail_pages);
   vq->used = (struct vring_used *)bfc_alloc_page_data(vq->used_pages);
@@ -77,7 +76,7 @@ int vring_create(struct virtqueue *vq, uint16_t index, uint16_t size,
   __memset(vq->ctx, 0, size * sizeof(void *));
   __memset(vq->desc_state, VRING_DESC_FREE, size);
 
-  /* Build free list: next_free[i] = i+1, last -> 0xFFFF (end) */
+  // Build free list: next_free[i] = i+1, last -> 0xFFFF (end)
   for (int i = 0; i < size - 1; i++)
     vq->next_free[i] = i + 1;
   vq->next_free[size - 1] = 0xFFFF;
@@ -86,7 +85,7 @@ int vring_create(struct virtqueue *vq, uint16_t index, uint16_t size,
   vq->avail_idx = 0;
   vq->used_idx = 0;
 
-  /* Physical addresses for device */
+  // Physical addresses for device
   vq->desc_phys = virt_to_phys(vq->desc);
   vq->avail_phys = virt_to_phys(vq->avail);
   vq->used_phys = virt_to_phys(vq->used);
@@ -176,7 +175,7 @@ int vring_add_buf(struct virtqueue *vq, uint64_t *addrs, uint32_t *lens,
   }
   vq->ctx[head] = ctx;
 
-  /* Publish to avail ring */
+  // Publish to avail ring
   vq->avail->ring[vq->avail_idx % vq->size] = head;
   vq->avail_idx++;
 
@@ -184,11 +183,10 @@ int vring_add_buf(struct virtqueue *vq, uint64_t *addrs, uint32_t *lens,
 }
 
 void vring_kick(struct virtqueue *vq) {
-  /* Ensure avail ring writes are visible before updating idx */
+  // Ensure avail ring writes are visible before updating idx
   __atomic_thread_fence(__ATOMIC_RELEASE);
   __atomic_store_n(&vq->avail->idx, vq->avail_idx, __ATOMIC_RELEASE);
-  /* Actual notify (write to notify BAR) is done by caller via virtio_pci_notify
-   */
+  // Actual notify (write to notify BAR) is done by caller via virtio_pci_notify
 }
 
 bool vring_has_used(struct virtqueue *vq) {
@@ -226,7 +224,7 @@ int vring_poll_used_budget(struct virtqueue *vq, uint16_t budget) {
       return -EPROTO;
     }
     void *callback_ctx = vq->ctx[desc_id];
-    /* Walk the desc chain and free all descs */
+    // Walk the desc chain and free all descs
     int cur = desc_id;
     uint16_t walked = 0;
     bool terminated = false;
@@ -253,7 +251,7 @@ int vring_poll_used_budget(struct virtqueue *vq, uint16_t budget) {
       vq->broken = true;
       return -EPROTO;
     }
-    /* Call callback on the head (ctx stored on head) */
+    // Call callback on the head (ctx stored on head)
     if (vq->callback)
       vq->callback(callback_ctx, e->len);
     vq->used_idx++;

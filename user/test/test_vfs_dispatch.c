@@ -14,8 +14,8 @@
 void setUp(void) {}
 void tearDown(void) {}
 
-/* 1. 只读 fs (sysfs) 上 O_CREAT 应失败(EACCES:parent->i_op->create 为 NULL,对齐
- * Linux vfs_create)。 */
+// 1. O_CREAT on a read-only fs (sysfs) must fail (EACCES: parent->i_op->create
+// is NULL, matching Linux vfs_create).
 void test_vfs_dispatch_sysfs_create_denied(void) {
   errno = 0;
   int fd = open("/sys/foo_bar_nonexistent", O_CREAT | O_WRONLY, 0644);
@@ -23,18 +23,18 @@ void test_vfs_dispatch_sysfs_create_denied(void) {
   TEST_ASSERT_EQUAL_INT(EACCES, errno);
 }
 
-/* 2. 只读 fs 无 setattr:truncate 应失败(EISDIR:/sys 是目录,对齐 Linux truncate
- * 优先判 INODE_REGULAR)。 */
+// 2. A read-only fs has no setattr: truncate must fail (EISDIR: /sys is a
+// directory, matching Linux truncate which checks INODE_REGULAR first).
 void test_vfs_dispatch_sysfs_truncate_denied(void) {
   errno = 0;
   int rc = truncate("/sys", 0);
   TEST_ASSERT_EQUAL_INT(-1, rc);
   TEST_ASSERT_EQUAL_INT(EISDIR,
-                        errno); /* 目录 truncate → EISDIR(非旧的 EINVAL) */
+                        errno); // truncate on a dir → EISDIR (not old EINVAL)
 }
 
-/* 3. fat32 上 O_CREAT|O_TRUNC 建文件并截 0(经 fat32_dir_create +
- * fat32_setattr)。 */
+// 3. O_CREAT|O_TRUNC on fat32 creates a file and truncates it to 0 (via
+// fat32_dir_create + fat32_setattr).
 void test_vfs_dispatch_fat32_create_trunc(void) {
   int fd = open("/vfs_test_ct", O_CREAT | O_TRUNC | O_WRONLY, 0644);
   TEST_ASSERT_TRUE(fd >= 0);
@@ -47,7 +47,7 @@ void test_vfs_dispatch_fat32_create_trunc(void) {
   }
 }
 
-/* 4. fat32 sys_truncate 经 i_op->setattr 改大小。 */
+// 4. fat32 sys_truncate changes size via i_op->setattr.
 void test_vfs_dispatch_fat32_truncate_grow(void) {
   int fd = open("/vfs_test_tr", O_CREAT | O_WRONLY, 0644);
   if (fd >= 0) {
@@ -63,7 +63,7 @@ void test_vfs_dispatch_fat32_truncate_grow(void) {
   }
 }
 
-/* 5. fat32 sys_ftruncate 经 f->inode->i_op->setattr。 */
+// 5. fat32 sys_ftruncate via f->inode->i_op->setattr.
 void test_vfs_dispatch_fat32_ftruncate(void) {
   int fd = open("/vfs_test_ft", O_CREAT | O_WRONLY, 0644);
   TEST_ASSERT_TRUE(fd >= 0);
@@ -77,15 +77,17 @@ void test_vfs_dispatch_fat32_ftruncate(void) {
   }
 }
 
-/* 6. path_walk 穿非目录组件 → ENOTDIR(Linux 语义:自包含,不依赖 /dev 人口)。 */
+// 6. path_walk through a non-directory component → ENOTDIR (Linux semantics:
+// self-contained, does not depend on /dev population).
 void test_vfs_dispatch_path_walk_enotdir(void) {
-  /* 在 FAT32 根建普通文件,再尝试穿它开子路径 → ENOTDIR */
+  // Create a regular file at the FAT32 root, then try to open a sub-path
+  // through it → ENOTDIR
   int fd = open("/vfs_test_enotdir", O_CREAT | O_WRONLY, 0644);
   TEST_ASSERT_TRUE(fd >= 0);
   if (fd >= 0)
     close(fd);
   int fd2 = open("/vfs_test_enotdir/sub", O_RDONLY);
-  TEST_ASSERT_TRUE(fd2 < 0); /* 非目录做中间段 → ENOTDIR */
+  TEST_ASSERT_TRUE(fd2 < 0); // non-directory as middle component → ENOTDIR
   if (fd2 >= 0)
     close(fd2);
   unlink("/vfs_test_enotdir");

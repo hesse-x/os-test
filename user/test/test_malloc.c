@@ -11,7 +11,7 @@
 void setUp(void) {}
 void tearDown(void) {}
 
-/* 1. malloc(32) returns non-NULL, can write and read */
+// 1. malloc(32) returns non-NULL, can write and read
 void test_malloc_small(void) {
   char *p = (char *)malloc(32);
   TEST_ASSERT_NOT_NULL(p);
@@ -22,7 +22,7 @@ void test_malloc_small(void) {
   free(p);
 }
 
-/* 2. malloc size classes: 8/128/1024, non-overlapping */
+// 2. malloc size classes: 8/128/1024, non-overlapping
 void test_malloc_size_classes(void) {
   char *p1 = (char *)malloc(8);
   char *p2 = (char *)malloc(128);
@@ -31,7 +31,7 @@ void test_malloc_size_classes(void) {
   TEST_ASSERT_NOT_NULL(p2);
   TEST_ASSERT_NOT_NULL(p3);
 
-  /* Write to each to verify they are usable */
+  // Write to each to verify they are usable
   memset(p1, 'A', 8);
   memset(p2, 'B', 128);
   memset(p3, 'C', 1024);
@@ -44,7 +44,7 @@ void test_malloc_size_classes(void) {
   free(p3);
 }
 
-/* 3. free(p) → malloc(same size) should reuse */
+// 3. free(p) → malloc(same size) should reuse
 void test_malloc_free_reuse(void) {
   char *p1 = (char *)malloc(64);
   TEST_ASSERT_NOT_NULL(p1);
@@ -55,8 +55,8 @@ void test_malloc_free_reuse(void) {
   char *p2 = (char *)malloc(64);
   TEST_ASSERT_NOT_NULL(p2);
   uintptr_t addr2 = (uintptr_t)p2;
-  /* Same size class — address may be the same or different */
-  /* Just verify it's usable */
+  // Same size class — address may be the same or different
+  // Just verify it's usable
   memset(p2, 'E', 64);
   TEST_ASSERT_EQUAL_INT('E', p2[0]);
   (void)addr1;
@@ -64,7 +64,7 @@ void test_malloc_free_reuse(void) {
   free(p2);
 }
 
-/* 4. calloc returns zeroed memory */
+// 4. calloc returns zeroed memory
 void test_calloc_zero(void) {
   int *arr = (int *)calloc(10, sizeof(int));
   TEST_ASSERT_NOT_NULL(arr);
@@ -78,7 +78,7 @@ void test_calloc_zero(void) {
   free(arr);
 }
 
-/* 5. malloc(4096) — large allocation via mmap */
+// 5. malloc(4096) — large allocation via mmap
 void test_malloc_large(void) {
   char *p = (char *)malloc(4096);
   TEST_ASSERT_NOT_NULL(p);
@@ -88,7 +88,7 @@ void test_malloc_large(void) {
   free(p);
 }
 
-/* 6. realloc grow: 64 → 128, original content preserved */
+// 6. realloc grow: 64 → 128, original content preserved
 void test_realloc_grow(void) {
   char *p = (char *)malloc(64);
   TEST_ASSERT_NOT_NULL(p);
@@ -96,14 +96,14 @@ void test_realloc_grow(void) {
 
   p = (char *)realloc(p, 128);
   TEST_ASSERT_NOT_NULL(p);
-  /* First 64 bytes preserved */
+  // First 64 bytes preserved
   for (int i = 0; i < 64; i++) {
     TEST_ASSERT_EQUAL_INT('X', p[i]);
   }
   free(p);
 }
 
-/* 7. realloc shrink: 64 → 32, first 32 bytes preserved */
+// 7. realloc shrink: 64 → 32, first 32 bytes preserved
 void test_realloc_shrink(void) {
   char *p = (char *)malloc(64);
   TEST_ASSERT_NOT_NULL(p);
@@ -117,7 +117,7 @@ void test_realloc_shrink(void) {
   free(p);
 }
 
-/* 8. Free all allocations — no crash */
+// 8. Free all allocations — no crash
 void test_free_all(void) {
   char *p1 = (char *)malloc(16);
   char *p2 = (char *)malloc(256);
@@ -125,27 +125,27 @@ void test_free_all(void) {
   free(p1);
   free(p2);
   free(p3);
-  /* If we get here, no crash occurred */
+  // If we get here, no crash occurred
   TEST_ASSERT_TRUE(1);
 }
 
-/* 9. malloc(0) — POSIX allows NULL or unique pointer */
+// 9. malloc(0) — POSIX allows NULL or unique pointer
 void test_malloc_null(void) {
   void *p = malloc(0);
-  /* POSIX: may return NULL or a unique pointer — both are valid */
+  // POSIX: may return NULL or a unique pointer — both are valid
   if (p)
     free(p);
-  TEST_ASSERT_TRUE(1); /* no crash = pass */
+  TEST_ASSERT_TRUE(1); // no crash = pass
 }
 
-/* 10. double free — should not crash */
+// 10. double free — should not crash
 void test_double_free(void) {
   char *p = (char *)malloc(64);
   TEST_ASSERT_NOT_NULL(p);
   free(p);
-  /* Double free — may crash or be handled gracefully */
-  /* For safety, skip actual double free in automated tests */
-  /* free(p); — commented out; test documents the expectation */
+  // Double free — may crash or be handled gracefully
+  // For safety, skip actual double free in automated tests
+  // free(p); — commented out; test documents the expectation
   TEST_ASSERT_TRUE(1);
 }
 

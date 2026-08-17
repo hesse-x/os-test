@@ -2,14 +2,13 @@
  * Copyright (c) 2026 hesse
  *
  * SPDX-License-Identifier: MIT
- *
- * C11 <threads.h> regression. musl src/thread/{thrd,mtx,cnd,tss,call_once}_*.c
- * are compiled into libc by the src/thread glob in pthread.cmake; the C11
- * symbols are exported via libc.map's <threads.h> block (thrd_current /
- * thrd_detach / tss_get are weak_alias of the pthread equivalents). This test
- * exercises the C11 surface end-to-end so a dropped export or a missing source
- * shows up as a link or runtime failure.
  */
+// C11 <threads.h> regression. musl src/thread/{thrd,mtx,cnd,tss,call_once}_*.c
+// are compiled into libc by the src/thread glob in pthread.cmake; the C11
+// symbols are exported via libc.map's <threads.h> block (thrd_current /
+// thrd_detach / tss_get are weak_alias of the pthread equivalents). This test
+// exercises the C11 surface end-to-end so a dropped export or a missing source
+// shows up as a link or runtime failure.
 
 #include <errno.h>
 #include <stdio.h>
@@ -21,7 +20,7 @@
 void setUp(void) {}
 void tearDown(void) {}
 
-/* ---- thrd: create / join / exit retval ---- */
+// ---- thrd: create / join / exit retval ----
 static int thread_basic_fn(void *arg) {
   int *p = (int *)arg;
   *p = 42;
@@ -38,7 +37,7 @@ void test_thrd_create_join(void) {
   TEST_ASSERT_EQUAL_INT(7, res);
 }
 
-/* ---- mtx: plain lock / unlock, recursive ---- */
+// ---- mtx: plain lock / unlock, recursive ----
 static int counter;
 static mtx_t cnt_mtx;
 
@@ -71,7 +70,7 @@ void test_mtx_recursive(void) {
   mtx_t m;
   TEST_ASSERT_EQUAL_INT(thrd_success, mtx_init(&m, mtx_recursive));
   TEST_ASSERT_EQUAL_INT(thrd_success, mtx_lock(&m));
-  TEST_ASSERT_EQUAL_INT(thrd_success, mtx_lock(&m)); /* reentrant */
+  TEST_ASSERT_EQUAL_INT(thrd_success, mtx_lock(&m)); // reentrant
   TEST_ASSERT_EQUAL_INT(thrd_success, mtx_unlock(&m));
   TEST_ASSERT_EQUAL_INT(thrd_success, mtx_unlock(&m));
   mtx_destroy(&m);
@@ -81,12 +80,12 @@ void test_mtx_trylock(void) {
   mtx_t m;
   TEST_ASSERT_EQUAL_INT(thrd_success, mtx_init(&m, mtx_plain));
   TEST_ASSERT_EQUAL_INT(thrd_success, mtx_trylock(&m));
-  TEST_ASSERT_EQUAL_INT(thrd_busy, mtx_trylock(&m)); /* already held */
+  TEST_ASSERT_EQUAL_INT(thrd_busy, mtx_trylock(&m)); // already held
   mtx_unlock(&m);
   mtx_destroy(&m);
 }
 
-/* ---- cnd: signal / wait, broadcast ---- */
+// ---- cnd: signal / wait, broadcast ----
 static mtx_t cnd_mtx;
 static cnd_t cnd_cv;
 static int cnd_ready;
@@ -108,7 +107,7 @@ void test_cnd_signal(void) {
   int seen = 0;
   thrd_t t;
   TEST_ASSERT_EQUAL_INT(thrd_success, thrd_create(&t, waiter_fn, &seen));
-  /* let waiter block on the cv */
+  // let waiter block on the cv
   thrd_sleep(&(struct timespec){.tv_sec = 0, .tv_nsec = 50 * 1000 * 1000},
              NULL);
   mtx_lock(&cnd_mtx);
@@ -121,7 +120,7 @@ void test_cnd_signal(void) {
   mtx_destroy(&cnd_mtx);
 }
 
-/* ---- call_once ---- */
+// ---- call_once ----
 static once_flag once_flag_var = ONCE_FLAG_INIT;
 static int once_count;
 static mtx_t once_mtx;
@@ -152,7 +151,7 @@ void test_call_once(void) {
   mtx_destroy(&once_mtx);
 }
 
-/* ---- tss: thread-specific storage ---- */
+// ---- tss: thread-specific storage ----
 static tss_t tss_key;
 static int tss_dtor_ran;
 static void tss_dtor(void *p) {
@@ -181,7 +180,7 @@ void test_tss(void) {
   tss_delete(tss_key);
 }
 
-/* ---- thrd_yield / thrd_current ---- */
+// ---- thrd_yield / thrd_current ----
 static int current_reporter_fn(void *arg) {
   *(thrd_t *)arg = thrd_current();
   return 0;
@@ -194,9 +193,9 @@ void test_thrd_current_self(void) {
   TEST_ASSERT_EQUAL_INT(thrd_success,
                         thrd_create(&child, current_reporter_fn, &child_self));
   TEST_ASSERT_EQUAL_INT(thrd_success, thrd_join(child, NULL));
-  /* thrd_equal returns non-zero when equal (C11). The child's self-reported
-   * id must match the handle thrd_create returned, and must differ from the
-   * spawner's id (each thread has its own TCB at %fs:0). */
+  // thrd_equal returns non-zero when equal (C11). The child's self-reported
+  // id must match the handle thrd_create returned, and must differ from the
+  // spawner's id (each thread has its own TCB at %fs:0).
   TEST_ASSERT_EQUAL_INT(1, thrd_equal(child_self, child));
   TEST_ASSERT_EQUAL_INT(0, thrd_equal(me, child_self));
   thrd_yield();

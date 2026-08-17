@@ -8,11 +8,12 @@
 #define XOS_KERNEL_PERF_PMU_H
 
 #include <stdbool.h>
-#include <stdint.h>
 
 #include "arch/x64/trap.h"
 
 #ifdef PERF
+#include <stdint.h>
+
 void perf_pmu_ensure_cpu(void);
 bool perf_pmu_active_cpu(void);
 void perf_pmu_handle_nmi(const trapframe *tf);

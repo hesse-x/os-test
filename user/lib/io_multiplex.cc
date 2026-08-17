@@ -2,11 +2,10 @@
  * Copyright (c) 2026 hesse
  *
  * SPDX-License-Identifier: MIT
- *
- * I/O multiplexing residuals: select, ipcfd (evdev downstream-IPC fd),
- * timerfd_create/timerfd_settime. epoll/eventfd/signalfd migrated to musl
- * src/linux (musl_linux_objs); select stays (src/select batch deferred).
  */
+// I/O multiplexing residuals: select, ipcfd (evdev downstream-IPC fd),
+// timerfd_create/timerfd_settime. epoll/eventfd/signalfd migrated to musl
+// src/linux (musl_linux_objs); select stays (src/select batch deferred).
 
 #include <errno.h> // IWYU pragma: keep
 #include <stdint.h>

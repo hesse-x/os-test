@@ -7,7 +7,7 @@
 #ifndef KERNEL_DRIVER_DRM_INTERNAL_H
 #define KERNEL_DRIVER_DRM_INTERNAL_H
 
-#include "kernel/bsd/devtmpfs.h" /* __poll, xtask via inode.h chain */
+#include "kernel/bsd/devtmpfs.h" // __poll, xtask via inode.h chain
 #include "kernel/xcore/spinlock.h"
 #include "kernel/xcore/wait_queue.h"
 #include "kernel/xcore/workqueue.h"
@@ -16,41 +16,41 @@
 
 struct drm_gem_object;
 
-/* The virtio topology is fixed, but its IDs belong to the device namespace. */
+// The virtio topology is fixed, but its IDs belong to the device namespace.
 #define DRM_PLANE_TYPE_OVERLAY 0
 #define DRM_PLANE_TYPE_PRIMARY 1
 #define DRM_PLANE_TYPE_CURSOR 2
 
-/* ===== Software cursor (Phase C) ===== */
+// ===== Software cursor (Phase C) =====
 #define CURSOR_WIDTH 64
 #define CURSOR_HEIGHT 64
-#define CURSOR_SIZE (CURSOR_WIDTH * CURSOR_HEIGHT * 4) /* 32bpp ARGB */
+#define CURSOR_SIZE (CURSOR_WIDTH * CURSOR_HEIGHT * 4) // 32bpp ARGB
 
 struct drm_cursor {
   bool enabled;
-  int16_t x; /* current cursor position (screen coords) */
+  int16_t x; // current cursor position (screen coords)
   int16_t y;
-  int16_t hotspot_x; /* from CURSOR2 */
+  int16_t hotspot_x; // from CURSOR2
   int16_t hotspot_y;
-  uint32_t buffer[CURSOR_WIDTH * CURSOR_HEIGHT]; /* ARGB cursor bitmap */
-  bool dirty; /* cursor position/content changed since last flip */
+  uint32_t buffer[CURSOR_WIDTH * CURSOR_HEIGHT]; // ARGB cursor bitmap
+  bool dirty; // cursor position/content changed since last flip
   spinlock lock;
 };
 
-/* ===== Resource pool sizes (shared across per-fd tracking, dumb, fb) ===== */
+// ===== Resource pool sizes (shared across per-fd tracking, dumb, fb) =====
 #define MAX_DUMB_BUFFERS 16
 #define MAX_FRAMEBUFFERS 16
 
-/* ===== per-fd tracking (Phase C) ===== */
+// ===== per-fd tracking (Phase C) =====
 #define DRM_FD_INITIAL_CAPACITY 8
 #define DRM_FD_MAX_CAPACITY 1024
 
 #define MAX_CAPSETS 8
 #define MAX_CTX_IDS 256
 
-/* virgl legacy (v1) resources: GEM handles allocated from VIRGL_HANDLE_BASE
- * upward so they never collide numerically with dumb (1..16) handles, letting
- * GEM_CLOSE / RESOURCE_INFO dispatch by a single range test. */
+// virgl legacy (v1) resources: GEM handles allocated from VIRGL_HANDLE_BASE
+// upward so they never collide numerically with dumb (1..16) handles, letting
+// GEM_CLOSE / RESOURCE_INFO dispatch by a single range test.
 #define MAX_VIRGL_RESOURCES 1024
 #define VIRGL_HANDLE_BASE 0x1000u
 
@@ -64,87 +64,86 @@ struct drm_backend_fence_slot {
   struct drm_fence *fence;
 };
 
-/* virgl legacy (v1) resource: kernel-allocated guest backing attached to a
- * host 3D resource. The winsys passes only bo_handle to TRANSFER/WAIT, so the
- * kernel persists bo_handle→res_handle here and resolves it internally. */
+// virgl legacy (v1) resource: kernel-allocated guest backing attached to a
+// host 3D resource. The winsys passes only bo_handle to TRANSFER/WAIT, so the
+// kernel persists bo_handle→res_handle here and resolves it internally.
 struct drm_virgl_resource {
-  uint32_t bo_handle;  /* == VIRGL_HANDLE_BASE + index, 0 = free slot */
-  uint32_t res_handle; /* host virtio-gpu resource id (== bo_handle) */
-  uint64_t guest_phys; /* guest physical address of backing pages */
-  void *kernel_vaddr;  /* kernel virtual address of backing pages */
+  uint32_t bo_handle;  // == VIRGL_HANDLE_BASE + index, 0 = free slot
+  uint32_t res_handle; // host virtio-gpu resource id (== bo_handle)
+  uint64_t guest_phys; // guest physical address of backing pages
+  void *kernel_vaddr;  // kernel virtual address of backing pages
   uint64_t size;
   int refcount;
   struct drm_gem_object *gem;
   struct work release_work;
-  /* A resource may be shared through PRIME and used by several contexts. */
+  // A resource may be shared through PRIME and used by several contexts.
   uint32_t ctx_attach_bitmap[(MAX_CTX_IDS + 31) / 32];
-  /* Most recent EXECBUFFER which referenced this BO. */
+  // Most recent EXECBUFFER which referenced this BO.
   uint32_t last_ctx_id;
   uint8_t last_ring_idx;
   uint64_t last_fence_id;
 };
 
-/* Cached capset info fetched at init via GET_CAPSET_INFO/GET_CAPSET. */
+// Cached capset info fetched at init via GET_CAPSET_INFO/GET_CAPSET.
 struct drm_capset {
   uint32_t id;
   uint32_t ver;
   uint32_t size;
-  void *data; /* kmalloc'd capset payload */
+  void *data; // kmalloc'd capset payload
 };
 
 struct drm_file {
-  int fd;         /* system fd number, 0 = free slot */
-  xtask *proc;    /* owning process */
-  bool used;      /* slot in use */
-  bool is_render; /* render nodes do not participate in master/auth */
+  int fd;         // system fd number, 0 = free slot
+  xtask *proc;    // owning process
+  bool used;      // slot in use
+  bool is_render; // render nodes do not participate in master/auth
 
-  /* Venus 3D context (plan1 CONTEXT_INIT) */
-  uint32_t ctx_id;    /* 0 = no context */
-  uint32_t num_rings; /* rings allocated by CONTEXT_INIT */
+  // Venus 3D context (plan1 CONTEXT_INIT)
+  uint32_t ctx_id;    // 0 = no context
+  uint32_t num_rings; // rings allocated by CONTEXT_INIT
   uint32_t poll_rings_mask;
-  uint64_t *ring_fence_counters; /* per-ring fence counter (plan2 uses) */
+  uint64_t *ring_fence_counters; // per-ring fence counter (plan2 uses)
 
-  /* virgl legacy (v1) resources created by this fd (for drm_close cleanup) */
+  // virgl legacy (v1) resources created by this fd (for drm_close cleanup)
   int created_virgl_handles[MAX_VIRGL_RESOURCES];
   int created_virgl_count;
 
-  /* Tracking of resources owned by this fd */
+  // Tracking of resources owned by this fd
   int created_fb_ids[MAX_FRAMEBUFFERS];
   int created_fb_count;
   int created_dumb_handles[MAX_DUMB_BUFFERS];
   int created_dumb_count;
 };
 
-/* ===== Default mode: 800x600@60 ===== */
+// ===== Default mode: 800x600@60 =====
 #define DRM_FB_WIDTH 800
 #define DRM_FB_HEIGHT 600
 #define DRM_FB_BPP 32
 #define DRM_FB_PITCH (DRM_FB_WIDTH * 4)
 #define DRM_FB_SIZE (DRM_FB_PITCH * DRM_FB_HEIGHT)
 
-/* ===== dumb buffer (kernel-allocated, refcounted) ===== */
+// ===== dumb buffer (kernel-allocated, refcounted) =====
 
 struct drm_dumb_buffer {
-  int handle; /* 1-based handle, 0 = free slot */
+  int handle; // 1-based handle, 0 = free slot
   int refcount;
   struct drm_gem_object *gem;
   struct work release_work;
-  uint64_t guest_phys; /* guest physical address of buffer pages */
-  void *kernel_vaddr;  /* kernel virtual address */
+  uint64_t guest_phys; // guest physical address of buffer pages
+  void *kernel_vaddr;  // kernel virtual address
   uint32_t width;
   uint32_t height;
   uint32_t pitch;
   uint64_t size;
-  uint32_t
-      virtio_res_id; /* virtio-gpu host resource id (assigned on create_2d) */
+  uint32_t virtio_res_id; // virtio-gpu host resource id (assigned on create_2d)
 };
 
-/* ===== framebuffer (references a dumb buffer, refcounted) ===== */
+// ===== framebuffer (references a dumb buffer, refcounted) =====
 
 struct drm_framebuffer {
-  int fb_id; /* 1-based, 0 = free slot */
+  int fb_id; // 1-based, 0 = free slot
   int refcount;
-  int dumb_handle; /* references drm_dumb_buffer.handle */
+  int dumb_handle; // references drm_dumb_buffer.handle
   bool is_virgl;
   bool is_imported;
   uint32_t resource_id;
@@ -156,49 +155,49 @@ struct drm_framebuffer {
   uint32_t bpp;
 };
 
-/* ===== DRM device ===== */
+// ===== DRM device =====
 struct drm_device {
   bool initialized;
   uint32_t crtc_id;
   uint32_t connector_id;
   uint32_t encoder_id;
   uint32_t plane_id;
-  /* current CRTC state */
+  // current CRTC state
   uint32_t current_fb_id;
   bool mode_valid;
 
-  /* runtime display mode (defaults from DRM_FB_* macros, overridable later) */
+  // runtime display mode (defaults from DRM_FB_* macros, overridable later)
   uint32_t fb_width;
   uint32_t fb_height;
   uint32_t fb_bpp;
   uint32_t fb_pitch;
 
-  /* capset cache (plan1 GET_CAPS) */
+  // capset cache (plan1 GET_CAPS)
   struct drm_capset capsets[MAX_CAPSETS];
   uint32_t num_capsets;
   spinlock capset_lock;
 
-  /* ctx_id allocation pool (plan1 CONTEXT_INIT) */
-  uint32_t ctx_id_bitmap[(MAX_CTX_IDS + 31) /
-                         32]; /* bit i set = ctx_id i+1 in use */
+  // ctx_id allocation pool (plan1 CONTEXT_INIT)
+  uint32_t
+      ctx_id_bitmap[(MAX_CTX_IDS + 31) / 32]; // bit i set = ctx_id i+1 in use
   spinlock ctx_id_lock;
 
-  /* virgl legacy (v1) resource table. Handles start at VIRGL_HANDLE_BASE. */
+  // virgl legacy (v1) resource table. Handles start at VIRGL_HANDLE_BASE.
   struct drm_virgl_resource virgl_res[MAX_VIRGL_RESOURCES];
-  uint32_t next_virgl_handle; /* next slot to probe, wraps across free slots */
+  uint32_t next_virgl_handle; // next slot to probe, wraps across free slots
   spinlock virgl_lock;
 
-  /* fence table (plan2). slot free iff ctx_id==0. */
+  // fence table (plan2). slot free iff ctx_id==0.
   struct drm_backend_fence_slot fences[MAX_FENCES];
   uint64_t completed_fence_ids[MAX_CTX_IDS][MAX_CTX_RINGS];
-  spinlock fence_lock; /* protects slot alloc/find across the table */
+  spinlock fence_lock; // protects slot alloc/find across the table
 
-  /* dumb buffer table */
+  // dumb buffer table
   struct drm_dumb_buffer dumbs[MAX_DUMB_BUFFERS];
   int next_dumb_handle;
   spinlock dumb_lock;
 
-  /* framebuffer table */
+  // framebuffer table
   struct drm_framebuffer fbs[MAX_FRAMEBUFFERS];
   int next_fb_id;
   spinlock fb_lock;
@@ -206,16 +205,16 @@ struct drm_device {
   struct drm_cursor cursor;
 };
 
-/* ===== Fence lifecycle (plan2). drm_fence_put reclaims the slot when the
- * last ref drops; called from sync_file fd close (proc.c file_put) and
- * EXECBUFFER error paths, so non-static. ===== */
+// ===== Fence lifecycle (plan2). drm_fence_put reclaims the slot when the
+// last ref drops; called from sync_file fd close (proc.c file_put) and
+// EXECBUFFER error paths, so non-static. =====
 void drm_fence_put(struct drm_fence *fence);
 
-/* Drop the PRIME fd's buffer reference and release its wrapper object. */
+// Drop the PRIME fd's buffer reference and release its wrapper object.
 void drm_prime_object_put(struct drm_prime_object *object);
 
-/* Read-only signaled probe for sync_file poll (file_poll.c calls this to avoid
- * pulling the driver-layer drm_internal.h into the BSD layer). */
+// Read-only signaled probe for sync_file poll (file_poll.c calls this to avoid
+// pulling the driver-layer drm_internal.h into the BSD layer).
 bool drm_fence_is_signaled(struct drm_fence *fence);
 
-#endif /* KERNEL_DRIVER_DRM_INTERNAL_H */
+#endif // KERNEL_DRIVER_DRM_INTERNAL_H

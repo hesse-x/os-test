@@ -43,7 +43,7 @@ void tearDown(void) {}
 #define TRAMPOLINE_BELOW 0x4FFFF000UL
 #define TRAMPOLINE_PAGE 0x50000000UL
 
-/* TC1: hint with no conflict is honored. */
+// TC1: hint with no conflict is honored.
 void test_hint_satisfied(void) {
   void *p = mmap((void *)HINT_A, PAGE, PROT_READ | PROT_WRITE,
                  MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
@@ -54,7 +54,7 @@ void test_hint_satisfied(void) {
   munmap(p, PAGE);
 }
 
-/* TC2: conflicting hint falls back to a different (bump) address. */
+// TC2: conflicting hint falls back to a different (bump) address.
 void test_hint_conflict_fallback(void) {
   void *p1 = mmap((void *)HINT_A, PAGE, PROT_READ | PROT_WRITE,
                   MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
@@ -73,7 +73,7 @@ void test_hint_conflict_fallback(void) {
   munmap(p2, PAGE);
 }
 
-/* TC3: a non-page-aligned hint is tolerated (rounded down or bumped). */
+// TC3: a non-page-aligned hint is tolerated (rounded down or bumped).
 void test_hint_unaligned(void) {
   void *p = mmap((void *)(HINT_A + 0x500), PAGE, PROT_READ | PROT_WRITE,
                  MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
@@ -84,7 +84,7 @@ void test_hint_unaligned(void) {
   munmap(p, PAGE);
 }
 
-/* TC4: MAP_FIXED places exactly at the requested page-aligned addr. */
+// TC4: MAP_FIXED places exactly at the requested page-aligned addr.
 void test_fixed_basic(void) {
   void *p = mmap((void *)HINT_B, PAGE, PROT_READ | PROT_WRITE,
                  MAP_FIXED | MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
@@ -94,8 +94,8 @@ void test_fixed_basic(void) {
   munmap(p, PAGE);
 }
 
-/* TC5: MAP_FIXED overwrites part of an existing mapping; the untouched tail
- * keeps its data, the overwritten head reads back zero (fresh page). */
+// TC5: MAP_FIXED overwrites part of an existing mapping; the untouched tail
+// keeps its data, the overwritten head reads back zero (fresh page).
 void test_fixed_overwrite_partial(void) {
   void *p = mmap(NULL, 2 * PAGE, PROT_READ | PROT_WRITE,
                  MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
@@ -112,7 +112,7 @@ void test_fixed_overwrite_partial(void) {
   munmap(p, 2 * PAGE);
 }
 
-/* TC6: MAP_FIXED with an unaligned addr fails with EINVAL. */
+// TC6: MAP_FIXED with an unaligned addr fails with EINVAL.
 void test_fixed_unaligned_einval(void) {
   errno = 0;
   void *p = mmap((void *)(HINT_B + 0x500), PAGE, PROT_READ | PROT_WRITE,
@@ -121,7 +121,7 @@ void test_fixed_unaligned_einval(void) {
   TEST_ASSERT_EQUAL_INT(EINVAL, errno);
 }
 
-/* TC7: MAP_FIXED_NOREPLACE with no conflict places exactly at addr. */
+// TC7: MAP_FIXED_NOREPLACE with no conflict places exactly at addr.
 void test_noreplace_no_conflict(void) {
   void *p = mmap((void *)HINT_C, PAGE, PROT_READ | PROT_WRITE,
                  MAP_FIXED_NOREPLACE | MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
@@ -131,8 +131,8 @@ void test_noreplace_no_conflict(void) {
   munmap(p, PAGE);
 }
 
-/* TC8: MAP_FIXED_NOREPLACE on an existing mapping fails with EEXIST and does
- * not disturb the existing data. */
+// TC8: MAP_FIXED_NOREPLACE on an existing mapping fails with EEXIST and does
+// not disturb the existing data.
 void test_noreplace_conflict_eexist(void) {
   void *p = mmap((void *)HINT_C, PAGE, PROT_READ | PROT_WRITE,
                  MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
@@ -149,9 +149,9 @@ void test_noreplace_conflict_eexist(void) {
   munmap(p, PAGE);
 }
 
-/* TC9: MAP_FIXED overwriting a SHM mapping releases that mapping instance
- * (shm_put) but the shm object survives while the memfd stays open; remapping
- * SHM over the same range reads back the original data. */
+// TC9: MAP_FIXED overwriting a SHM mapping releases that mapping instance
+// (shm_put) but the shm object survives while the memfd stays open; remapping
+// SHM over the same range reads back the original data.
 void test_fixed_overwrite_shm(void) {
   int fd = memfd_create("s11_shm", 0);
   TEST_ASSERT_TRUE(fd >= 0);
@@ -183,9 +183,9 @@ void test_fixed_overwrite_shm(void) {
   close(fd);
 }
 
-/* TC11: mmap_brk does not advance on a MAP_FIXED placement. Two NULL mmaps
- * bump consecutively; a fixed mapping elsewhere; the next NULL mmap continues
- * right after the second bump (not skipping past the fixed mapping). */
+// TC11: mmap_brk does not advance on a MAP_FIXED placement. Two NULL mmaps
+// bump consecutively; a fixed mapping elsewhere; the next NULL mmap continues
+// right after the second bump (not skipping past the fixed mapping).
 void test_brk_no_advance_on_fixed(void) {
   void *v0 = mmap(NULL, PAGE, PROT_READ | PROT_WRITE,
                   MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
@@ -210,9 +210,9 @@ void test_brk_no_advance_on_fixed(void) {
   munmap(v2, PAGE);
 }
 
-/* Kernel-installed mappings have PTEs but no VMA metadata. Gap selection must
- * skip the signal trampoline instead of choosing a range that crosses it and
- * failing later with a misleading ENOMEM. */
+// Kernel-installed mappings have PTEs but no VMA metadata. Gap selection must
+// skip the signal trampoline instead of choosing a range that crosses it and
+// failing later with a misleading ENOMEM.
 void test_hint_crosses_signal_trampoline(void) {
   char *p =
       (char *)mmap((void *)TRAMPOLINE_BELOW, 3 * PAGE, PROT_READ | PROT_WRITE,
@@ -226,7 +226,7 @@ void test_hint_crosses_signal_trampoline(void) {
   munmap(p, 3 * PAGE);
 }
 
-/* The kernel ABI page cannot be replaced or removed through MAP_FIXED. */
+// The kernel ABI page cannot be replaced or removed through MAP_FIXED.
 void test_fixed_rejects_signal_trampoline(void) {
   errno = 0;
   void *p = mmap((void *)TRAMPOLINE_PAGE, PAGE, PROT_READ | PROT_WRITE,

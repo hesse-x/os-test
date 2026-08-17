@@ -4,11 +4,10 @@
  * SPDX-License-Identifier: MIT
  */
 
-/* accept4(2): accept() + flags.
- *   - SOCK_CLOEXEC sets FD_CLOEXEC on the new fd.
- *   - SOCK_NONBLOCK sets O_NONBLOCK on the new socket.
- *   - Invalid flags → EINVAL (no connection consumed).
- */
+// accept4(2): accept() + flags.
+//   - SOCK_CLOEXEC sets FD_CLOEXEC on the new fd.
+//   - SOCK_NONBLOCK sets O_NONBLOCK on the new socket.
+//   - Invalid flags → EINVAL (no connection consumed).
 
 #define _GNU_SOURCE
 
@@ -42,7 +41,7 @@ static int make_listener(void) {
   return lst;
 }
 
-/* accept4 with bogus flags → EINVAL, no child needed. */
+// accept4 with bogus flags → EINVAL, no child needed.
 void test_accept4_bad_flags(void) {
   int lst = make_listener();
 
@@ -52,7 +51,7 @@ void test_accept4_bad_flags(void) {
   close(lst);
 }
 
-/* SOCK_CLOEXEC + SOCK_NONBLOCK: the accepted fd carries both attributes. */
+// SOCK_CLOEXEC + SOCK_NONBLOCK: the accepted fd carries both attributes.
 void test_accept4_cloexec_nonblock(void) {
   int lst = make_listener();
 
@@ -68,8 +67,8 @@ void test_accept4_cloexec_nonblock(void) {
     strncpy(addr.sun_path, g_path, sizeof(addr.sun_path) - 1);
     if (connect(c, (struct sockaddr *)&addr, sizeof(addr)) != 0)
       _exit(101);
-    /* The connection is now in the listener backlog; let the parent accept it
-     * before this end closes. */
+    // The connection is now in the listener backlog; let the parent accept it
+    // before this end closes.
     sleep(1);
     close(c);
     _exit(0);

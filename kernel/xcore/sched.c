@@ -449,12 +449,12 @@ void sched_try_steal_task(void) {
   }
   ASSERT(cpu_locals[v].run_count > 0);
 
-  /* A task may already be on its run queue while it is still executing on the
-     victim CPU: wake_from_wait can win the short BLOCKED -> schedule window,
-     or schedule() can enqueue prev before switch_to saves its RSP.  switch_to
-     publishes next as _cur_proc only after changing stacks, so _cur_proc is the
-     authoritative task whose kernel stack is still active.  Stealing it would
-     run one kernel stack on two CPUs. */
+  // A task may already be on its run queue while it is still executing on the
+  // victim CPU: wake_from_wait can win the short BLOCKED -> schedule window,
+  // or schedule() can enqueue prev before switch_to saves its RSP.  switch_to
+  // publishes next as _cur_proc only after changing stacks, so _cur_proc is the
+  // authoritative task whose kernel stack is still active.  Stealing it would
+  // run one kernel stack on two CPUs.
   list_node *head = &cpu_locals[v].run_queue;
   list_node *tail_node = head->prev;
   xtask *victim_current = cpu_locals[v]._cur_proc;

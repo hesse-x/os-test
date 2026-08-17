@@ -3,7 +3,7 @@
  *
  * SPDX-License-Identifier: MIT
  */
-/* Kernel-side definitions for the Linux evdev ABI. */
+// Kernel-side definitions for the Linux evdev ABI.
 #ifndef KERNEL_BSD_INPUT_ABI_H
 #define KERNEL_BSD_INPUT_ABI_H
 

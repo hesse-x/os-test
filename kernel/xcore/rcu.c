@@ -41,11 +41,11 @@ void synchronize_rcu(void) {
   // same rcu_quiescent() calls from timer IRQs.
   spin_unlock(&g_rcu_state.writer_lock);
 
-  /* Do not rely solely on the periodic LAPIC timer to move an idle CPU
-     through a grace period.  A CPU halted in the idle loop may otherwise
-     remain one generation behind indefinitely.  The reschedule IPI handler
-     publishes a quiescent state; if the target is inside an RCU read-side
-     section, IRQs are disabled and the pending IPI runs only after unlock. */
+  // Do not rely solely on the periodic LAPIC timer to move an idle CPU
+  // through a grace period.  A CPU halted in the idle loop may otherwise
+  // remain one generation behind indefinitely.  The reschedule IPI handler
+  // publishes a quiescent state; if the target is inside an RCU read-side
+  // section, IRQs are disabled and the pending IPI runs only after unlock.
   for (int i = 0; i < ncpu; i++) {
     if (i != my_cpu)
       lapic_send_reschedule(i);

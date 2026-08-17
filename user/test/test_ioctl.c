@@ -24,7 +24,7 @@
 void setUp(void) {}
 void tearDown(void) {}
 
-/* 1. fstat on regular file → S_ISREG */
+// 1. fstat on regular file → S_ISREG
 void test_fstat_regular(void) {
   int fd = open("/local/ioctl_test.txt", O_WRONLY | O_CREAT);
   TEST_ASSERT_TRUE(fd >= 0);
@@ -43,7 +43,7 @@ void test_fstat_regular(void) {
   close(fd);
 }
 
-/* 2. fstat on pipe → S_ISFIFO */
+// 2. fstat on pipe → S_ISFIFO
 void test_fstat_pipe(void) {
   int fd[2];
   pipe(fd);
@@ -57,7 +57,7 @@ void test_fstat_pipe(void) {
   close(fd[1]);
 }
 
-/* 3. fstat on dir → S_ISDIR */
+// 3. fstat on dir → S_ISDIR
 void test_fstat_dir(void) {
   int fd = open("/local", O_RDONLY);
   if (fd >= 0) {
@@ -67,12 +67,12 @@ void test_fstat_dir(void) {
     TEST_ASSERT_TRUE(S_ISDIR(st.st_mode));
     close(fd);
   } else {
-    /* Directory may not exist, skip */
+    // Directory may not exist, skip
     TEST_ASSERT_TRUE(1);
   }
 }
 
-/* 4. fstat on /dev/dri/card0 → S_ISCHR */
+// 4. fstat on /dev/dri/card0 → S_ISCHR
 void test_fstat_dev(void) {
   int fd = open("/dev/dri/card0", O_RDWR);
   if (fd >= 0) {
@@ -83,12 +83,12 @@ void test_fstat_dev(void) {
 
     close(fd);
   } else {
-    /* DRM may not be available in test env */
+    // DRM may not be available in test env
     TEST_ASSERT_TRUE(1);
   }
 }
 
-/* 5. fstat on bad fd → EBADF */
+// 5. fstat on bad fd → EBADF
 void test_fstat_bad_fd(void) {
   struct stat st;
   int r = fstat(-1, &st);
@@ -96,7 +96,7 @@ void test_fstat_bad_fd(void) {
   TEST_ASSERT_EQUAL_INT(EBADF, errno);
 }
 
-/* 6. ioctl on regular file → ENOTTY */
+// 6. ioctl on regular file → ENOTTY
 void test_ioctl_regular(void) {
   int fd = open("/local/ioctl_ioctl.txt", O_WRONLY | O_CREAT);
   TEST_ASSERT_TRUE(fd >= 0);
@@ -113,7 +113,7 @@ void test_ioctl_regular(void) {
   close(fd);
 }
 
-/* 7. ioctl on pipe → ENOTTY */
+// 7. ioctl on pipe → ENOTTY
 void test_ioctl_pipe(void) {
   int fd[2];
   pipe(fd);
@@ -126,7 +126,7 @@ void test_ioctl_pipe(void) {
   close(fd[1]);
 }
 
-/* 8. isatty on pipe → 0 */
+// 8. isatty on pipe → 0
 void test_isatty_pipe(void) {
   int fd[2];
   pipe(fd);
@@ -138,7 +138,7 @@ void test_isatty_pipe(void) {
   close(fd[1]);
 }
 
-/* 9. isatty on regular file → 0 */
+// 9. isatty on regular file → 0
 void test_isatty_regular(void) {
   int fd = open("/local/ioctl_isatty.txt", O_WRONLY | O_CREAT);
   TEST_ASSERT_TRUE(fd >= 0);
@@ -154,7 +154,7 @@ void test_isatty_regular(void) {
   close(fd);
 }
 
-/* 10. isatty on /dev/dri/card0 → 0 (DRM doesn't support TCGETS) */
+// 10. isatty on /dev/dri/card0 → 0 (DRM doesn't support TCGETS)
 void test_isatty_dev_kms(void) {
   int fd = open("/dev/dri/card0", O_RDWR);
   if (fd >= 0) {
@@ -166,7 +166,7 @@ void test_isatty_dev_kms(void) {
   }
 }
 
-/* 11. stat (path-based) on regular file */
+// 11. stat (path-based) on regular file
 void test_stat_regular(void) {
   int fd = open("/local/ioctl_stat.txt", O_WRONLY | O_CREAT);
   TEST_ASSERT_TRUE(fd >= 0);
@@ -180,14 +180,14 @@ void test_stat_regular(void) {
   TEST_ASSERT_EQUAL_INT(9, (int)st.st_size);
 }
 
-/* ---- Phase 2: FD_DEV unified + serial dev_ops ---- */
+// ---- Phase 2: FD_DEV unified + serial dev_ops ----
 
-/* 13. open("/dev/serial") returns valid fd */
+// 13. open("/dev/serial") returns valid fd
 void test_open_dev_serial(void) {
   int fd = open("/dev/serial", O_RDWR);
   TEST_ASSERT_TRUE(fd >= 0);
 
-  /* fstat → S_ISCHR */
+  // fstat → S_ISCHR
   struct stat st;
   int r = fstat(fd, &st);
   TEST_ASSERT_EQUAL_INT(0, r);
@@ -196,7 +196,7 @@ void test_open_dev_serial(void) {
   close(fd);
 }
 
-/* 14. isatty on /dev/serial → 1 (serial supports TCGETS) */
+// 14. isatty on /dev/serial → 1 (serial supports TCGETS)
 void test_isatty_dev_serial(void) {
   int fd = open("/dev/serial", O_RDWR);
   if (fd >= 0) {
@@ -208,7 +208,7 @@ void test_isatty_dev_serial(void) {
   }
 }
 
-/* 15. ioctl TCGETS on /dev/serial → success */
+// 15. ioctl TCGETS on /dev/serial → success
 void test_ioctl_serial_tcgets(void) {
   int fd = open("/dev/serial", O_RDWR);
   if (fd >= 0) {
@@ -220,9 +220,9 @@ void test_ioctl_serial_tcgets(void) {
   }
 }
 
-/* ---- Phase 3: open("/dev/") unified ---- */
+// ---- Phase 3: open("/dev/") unified ----
 
-/* 18. open("/dev/serial") → close → open again (serial open/close lifecycle) */
+// 18. open("/dev/serial") → close → open again (serial open/close lifecycle)
 void test_serial_reopen(void) {
   int fd1 = open("/dev/serial", O_RDWR);
   TEST_ASSERT_TRUE(fd1 >= 0);
@@ -233,7 +233,7 @@ void test_serial_reopen(void) {
   close(fd2);
 }
 
-/* 19. fstat on /dev/serial → S_ISCHR */
+// 19. fstat on /dev/serial → S_ISCHR
 void test_fstat_dev_serial(void) {
   int fd = open("/dev/serial", O_RDWR);
   if (fd >= 0) {
@@ -247,7 +247,7 @@ void test_fstat_dev_serial(void) {
   }
 }
 
-/* 20. fstat on memfd → S_ISREG */
+// 20. fstat on memfd → S_ISREG
 void test_fstat_shm(void) {
   int fd = memfd_create("test_fstat_shm", 0);
   if (fd >= 0) {
@@ -263,7 +263,7 @@ void test_fstat_shm(void) {
   }
 }
 
-/* 21. ioctl on /dev/serial with unknown cmd → ENOTTY */
+// 21. ioctl on /dev/serial with unknown cmd → ENOTTY
 void test_ioctl_serial_unknown(void) {
   int fd = open("/dev/serial", O_RDWR);
   if (fd >= 0) {
@@ -276,14 +276,14 @@ void test_ioctl_serial_unknown(void) {
   }
 }
 
-/* 22. ioctl on bad fd → EBADF */
+// 22. ioctl on bad fd → EBADF
 void test_ioctl_bad_fd(void) {
   long r = ioctl(-1, TCGETS, 0);
   TEST_ASSERT_TRUE(r < 0);
   TEST_ASSERT_EQUAL_INT(EBADF, errno);
 }
 
-/* 23. lseek on /dev/serial → ESPIPE */
+// 23. lseek on /dev/serial → ESPIPE
 void test_lseek_dev_serial(void) {
   int fd = open("/dev/serial", O_RDWR);
   if (fd >= 0) {
@@ -296,7 +296,7 @@ void test_lseek_dev_serial(void) {
   }
 }
 
-/* 24. lseek on /dev/dri/card0 → ESPIPE */
+// 24. lseek on /dev/dri/card0 → ESPIPE
 void test_lseek_dev_kms(void) {
   int fd = open("/dev/dri/card0", O_RDWR);
   if (fd >= 0) {
@@ -309,14 +309,14 @@ void test_lseek_dev_kms(void) {
   }
 }
 
-/* 25. dup2 with /dev/serial fd — both fds usable */
+// 25. dup2 with /dev/serial fd — both fds usable
 void test_dup2_dev_serial(void) {
   int fd = open("/dev/serial", O_RDWR);
   if (fd >= 0) {
     int new_fd = dup2(fd, 25);
     TEST_ASSERT_EQUAL_INT(25, new_fd);
 
-    /* Both should be writable */
+    // Both should be writable
     ssize_t w1 = write(fd, "A", 1);
     ssize_t w2 = write(new_fd, "B", 1);
     TEST_ASSERT_EQUAL_INT(1, (int)w1);
@@ -329,7 +329,7 @@ void test_dup2_dev_serial(void) {
   }
 }
 
-/* 26. fstat on /dev/fs (user-space driver) */
+// 26. fstat on /dev/fs (user-space driver)
 void test_fstat_dev_fs(void) {
   int fd = open("/dev/fs", O_RDWR);
   if (fd >= 0) {
@@ -343,38 +343,38 @@ void test_fstat_dev_fs(void) {
   }
 }
 
-/* ===== Phase 8: ioctl IPC proxy + _IOC macros ===== */
+// ===== Phase 8: ioctl IPC proxy + _IOC macros =====
 
-/* 27. _IOC macros produce correct encoding */
+// 27. _IOC macros produce correct encoding
 void test_ioc_macros(void) {
-  /* _IO: no data */
+  // _IO: no data
   uint32_t cmd_io = _IO('K', 1);
   TEST_ASSERT_EQUAL_INT(0, _IOC_DIR(cmd_io));
   TEST_ASSERT_EQUAL_INT('K', _IOC_TYPE(cmd_io));
   TEST_ASSERT_EQUAL_INT(1, _IOC_NR(cmd_io));
   TEST_ASSERT_EQUAL_INT(0, _IOC_SIZE(cmd_io));
 
-  /* _IOW: write (user→kernel) */
+  // _IOW: write (user→kernel)
   uint32_t cmd_iow = _IOW('K', 2, int);
   TEST_ASSERT_EQUAL_INT(_IOC_WRITE, _IOC_DIR(cmd_iow));
   TEST_ASSERT_EQUAL_INT('K', _IOC_TYPE(cmd_iow));
   TEST_ASSERT_EQUAL_INT(2, _IOC_NR(cmd_iow));
   TEST_ASSERT_EQUAL_INT(sizeof(int), _IOC_SIZE(cmd_iow));
 
-  /* _IOR: read (kernel→user) */
+  // _IOR: read (kernel→user)
   uint32_t cmd_ior = _IOR('K', 3, int);
   TEST_ASSERT_EQUAL_INT(_IOC_READ, _IOC_DIR(cmd_ior));
 
-  /* _IOWR: bidirectional */
+  // _IOWR: bidirectional
   uint32_t cmd_iowr = _IOWR('K', 4, int);
   TEST_ASSERT_EQUAL_INT(_IOC_READ | _IOC_WRITE, _IOC_DIR(cmd_iowr));
 }
 
-/* 31. _IO-based cmd on /dev/serial → ENOTTY (serial only supports TCGETS) */
+// 31. _IO-based cmd on /dev/serial → ENOTTY (serial only supports TCGETS)
 void test_ioctl_serial_ioc_cmd(void) {
   int fd = open("/dev/serial", O_RDWR);
   if (fd >= 0) {
-    /* Use _IO to construct a command serial doesn't support */
+    // Use _IO to construct a command serial doesn't support
     uint32_t bad_cmd = _IO('X', 99);
     long r = ioctl(fd, bad_cmd, 0);
     TEST_ASSERT_TRUE(r < 0);
@@ -413,7 +413,7 @@ int main(int argc, char **argv, char **envp) {
   RUN_TEST(test_lseek_dev_kms);
   RUN_TEST(test_dup2_dev_serial);
   RUN_TEST(test_fstat_dev_fs);
-  /* Phase 8 */
+  // Phase 8
   RUN_TEST(test_ioc_macros);
   RUN_TEST(test_ioctl_serial_ioc_cmd);
   return UNITY_END();

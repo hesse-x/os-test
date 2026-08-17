@@ -34,7 +34,7 @@
 // headroom for future EVIOCGABS (struct input_absinfo across ABS_CNT axes) etc.
 #define REPLY_BUF_SIZE 256
 
-/* minor → owner write-fd (broker broadcast fd, returned by INPUT_REGISTER). */
+// minor → owner write-fd (broker broadcast fd, returned by INPUT_REGISTER).
 static int device_table[MAX_EVDEV_DEVICES];
 
 struct evdev_device {
@@ -357,7 +357,7 @@ extern "C" int main(int argc, char **argv, char **envp) {
     fprintf(stderr, "evdev: INPUT_REGISTER failed errno=%d\n", errno);
     return 1;
   }
-  device_table[0] = owner_fd; /* minor 0 → owner write-fd */
+  device_table[0] = owner_fd; // minor 0 → owner write-fd
 
   {
     struct dev_props props;

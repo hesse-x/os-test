@@ -213,7 +213,7 @@ int db_remove(uint32_t devnum) {
 
 // Device completion: given a uevent (with name=DEVPATH), build the full KV set
 // and write it into out (buf). Identifier KVs are built from name+subsystem;
-// properties (ID_INPUT_*) are read from the db and appended (乙).
+// properties (ID_INPUT_*) are read from the db and appended (part 2).
 // out_nul is the capacity of out. Returns bytes written (including the
 // trailing \0 separators), <0 to skip.
 // KV format (mirrors §4.3, \0-separated):
@@ -263,7 +263,7 @@ static int device_complete_kv(const char *action, const char *name,
   APPEND_KV0("DEVNUM=%u", devnum);
 #undef APPEND_KV0
 
-  // Read db for properties (乙). The db file is KEY=VALUE\n; convert to
+  // Read db for properties (part 2). The db file is KEY=VALUE\n; convert to
   // \0-separated KV and append.
   char dbbuf[1024];
   ssize_t dn = db_read_all(devnum, dbbuf, sizeof(dbbuf));
@@ -542,8 +542,8 @@ static int input_id_compute(const char *devnode, uint32_t devnum) {
 
 // udevd entry after receiving an add uevent (integrated into the existing
 // main-loop netlink-fd branch)
-static void handle_uevent_add(const char *devname /* DEVPATH=<name> */,
-                              const char *subsystem) {
+// DEVPATH=<name>
+static void handle_uevent_add(const char *devname, const char *subsystem) {
   // 1. Device completion: take devnum (three-way consistent = ino) as the db
   // key
   char devnode[64];
@@ -681,8 +681,8 @@ int main(void) {
   if (listen_fd < 0)
     listen_fd = fallback_self_bind_listen();
 
-  /* mkdir /run/udev/data(db 落点,init 只建到 /run/udev)。
-   * 幂等(EEXIST 忽略)。 */
+  // mkdir /run/udev/data (db destination; init only creates up to /run/udev).
+  // Idempotent (EEXIST ignored).
   mkdir("/run/udev/data", 0755);
 
   // Create netlink socket
@@ -724,23 +724,27 @@ int main(void) {
     return 1;
   }
 
-  /* coldplug:trigger 写各 /sys/class/input/<sysname>/uevent 触发内核重广播,
-   * drain 同步处理完写 db,然后建 /run/udev/settled。须在 nl_fd 入 epoll 之后
-   * (trigger 产的 uevent 入 recv_queue 不丢)且 listen_fd 注册之前(先 settle
-   * 再服务)。 */
-  /* 先初始化 monitor client 表(全部空闲 pipe_wr=-1):coldplug drain 会经
-   * process_one_uevent → clients_broadcast,若表未初始化(BSS pipe_wr==0)会被
-   * <0 guard 误判为活跃槽向 fd 0(stdin)写垃圾。coldplug 启动广播本就无 client
-   * 接收(真实 coldplug 转发在 accept_client 首连时重触发),故先 init 再
-   * coldplug。 */
+  // coldplug: trigger writes /sys/class/input/<sysname>/uevent to cause a
+  // kernel rebroadcast; drain processes them synchronously and writes the db,
+  // then creates /run/udev/settled. Must happen after nl_fd is added to epoll
+  // (so triggered uevents enter recv_queue, not lost) and before listen_fd is
+  // registered (settle first, then serve).
+  // First initialize the monitor client table (all slots pipe_wr=-1): the
+  // coldplug drain goes through process_one_uevent → clients_broadcast; if the
+  // table were uninitialized (BSS pipe_wr==0), the <0 guard would mistake slots
+  // for active and write garbage to fd 0 (stdin). The coldplug startup
+  // broadcast has no client to receive it anyway (the real coldplug forward is
+  // retriggered on the first accept_client connect), so init first, then
+  // coldplug.
   clients_init();
   coldplug_trigger();
   coldplug_drain_settle(nl_fd);
   printf("udevd: coldplug trigger done\n");
 
-  /* socket activation：将 init 传入的 listen fd 纳入 epoll（非阻塞）。
-   * udevd 主体方案在此 accept 客户端并处理 udev 协议；本轮只保活 + accept。
-   * listen_fd < 0（无 socket activation）时跳过，udevd 仍跑 netlink。 */
+  // socket activation: add the init-passed listen fd to epoll (non-blocking).
+  // The udevd main design accepts clients here and handles the udev protocol;
+  // this round only keeps it alive + accepts. If listen_fd < 0 (no socket
+  // activation), skip; udevd still runs netlink.
   if (listen_fd >= 0) {
     struct epoll_event lev;
     lev.events = EPOLLIN;
@@ -793,11 +797,12 @@ int main(void) {
         char *payload = (char *)NLMSG_DATA(nh);
         int payload_len = (int)(nh->nlmsg_len) - NLMSG_HDRLEN;
 
-        /* 解析 KV + add 处理(drain 与主循环共用 process_one_uevent) */
+        // Parse KV + add handling (drain and main loop share
+        // process_one_uevent)
         process_one_uevent(payload, payload_len);
       } else if (events[i].data.fd == listen_fd) {
-        /* 新 client 连接:accept → 建 pipe → SCM_RIGHTS 回传 pipe rd fd
-         * → 首个 client 补 coldplug(§4.4/§4.5)。 */
+        // New client connection: accept → build pipe → send the pipe rd fd back
+        // via SCM_RIGHTS → first client catches up coldplug (§4.4/§4.5).
         accept_client(listen_fd);
       } else {
         int slot = client_find_by_wr(events[i].data.fd);

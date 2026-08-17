@@ -19,4 +19,4 @@ LIBC_EXPORT int irq_bind(int irq);
 }
 #endif
 
-#endif /* _SYS_IRQ_H */
+#endif // _SYS_IRQ_H

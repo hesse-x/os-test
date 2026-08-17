@@ -52,7 +52,7 @@ static inline uint64_t perf_rdtsc(void) {
 }
 
 static bool perf_phase_known(uint16_t id) {
-  /* Duplicate IDs deliberately fail compilation as duplicate case labels. */
+  // Duplicate IDs deliberately fail compilation as duplicate case labels.
   switch (id) {
   case PERF_PHASE_BOOT_TO_KERNEL_MAIN:
   case PERF_PHASE_EARLY_PAGING:

@@ -2,8 +2,8 @@
  * Copyright (c) 2026 hesse
  *
  * SPDX-License-Identifier: MIT
- *
  */
+
 // evdev kernel broker. Mirrors refact_evdev.md §5.
 //  - control node /dev/input/control: driver_pid==0, ops.ioctl =
 //  evdev_control_ioctl

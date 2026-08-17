@@ -3,8 +3,7 @@
  *
  * SPDX-License-Identifier: MIT
  */
-
-/* test_timerfd — timerfd Unity tests (design §8.4, TF-001~010). */
+// test_timerfd — timerfd Unity tests (design §8.4, TF-001~010).
 
 #include <errno.h>
 #include <fcntl.h>
@@ -27,26 +26,26 @@ static uint64_t now_ms(void) {
   return (uint64_t)ts.tv_sec * 1000ULL + (uint64_t)ts.tv_nsec / 1000000ULL;
 }
 
-/* TF-001 */
+// TF-001
 void test_timerfd_create(void) {
   int fd = timerfd_create(CLOCK_MONOTONIC, 0);
   TEST_ASSERT_TRUE(fd >= 0);
   close(fd);
 }
 
-/* TF-002 */
+// TF-002
 void test_timerfd_invalid_clock(void) {
   int fd = timerfd_create(CLOCK_REALTIME, 0);
   TEST_ASSERT_EQUAL_INT(-1, fd);
   TEST_ASSERT_EQUAL_INT(EINVAL, errno);
 }
 
-/* TF-003 */
+// TF-003
 void test_timerfd_oneshot(void) {
   int fd = timerfd_create(CLOCK_MONOTONIC, 0);
   struct itimerspec its;
   memset(&its, 0, sizeof(its));
-  its.it_value.tv_nsec = 50 * 1000000L; /* 50ms */
+  its.it_value.tv_nsec = 50 * 1000000L; // 50ms
   TEST_ASSERT_EQUAL_INT(0, timerfd_settime(fd, 0, &its, NULL));
   uint64_t t0 = now_ms();
   uint64_t ticks = 0;
@@ -58,17 +57,17 @@ void test_timerfd_oneshot(void) {
   close(fd);
 }
 
-/* TF-004 */
+// TF-004
 void test_timerfd_periodic(void) {
   int fd = timerfd_create(CLOCK_MONOTONIC, 0);
   struct itimerspec its;
   memset(&its, 0, sizeof(its));
-  its.it_value.tv_nsec = 40 * 1000000L;    /* 40ms first */
-  its.it_interval.tv_nsec = 40 * 1000000L; /* 40ms period */
+  its.it_value.tv_nsec = 40 * 1000000L;    // 40ms first
+  its.it_interval.tv_nsec = 40 * 1000000L; // 40ms period
   timerfd_settime(fd, 0, &its, NULL);
   uint64_t ticks = 0;
-  read(fd, &ticks, 8); /* first */
-  usleep(120 * 1000);  /* wait for ~3 periods */
+  read(fd, &ticks, 8); // first
+  usleep(120 * 1000);  // wait for ~3 periods
   ticks = 0;
   int r = read(fd, &ticks, 8);
   TEST_ASSERT_EQUAL_INT(8, r);
@@ -76,7 +75,7 @@ void test_timerfd_periodic(void) {
   close(fd);
 }
 
-/* TF-005 */
+// TF-005
 void test_timerfd_read_clears(void) {
   int fd = timerfd_create(CLOCK_MONOTONIC, 0);
   struct itimerspec its;
@@ -86,14 +85,14 @@ void test_timerfd_read_clears(void) {
   uint64_t ticks = 0;
   read(fd, &ticks, 8);
   TEST_ASSERT_TRUE(ticks >= 1);
-  /* Set nonblock: no pending ticks → EAGAIN. */
+  // Set nonblock: no pending ticks → EAGAIN.
   fcntl(fd, F_SETFL, O_NONBLOCK);
   TEST_ASSERT_EQUAL_INT(-1, read(fd, &ticks, 8));
   TEST_ASSERT_EQUAL_INT(EAGAIN, errno);
   close(fd);
 }
 
-/* TF-006 */
+// TF-006
 void test_timerfd_nonblock_eagain(void) {
   int fd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK);
   uint64_t ticks = 0;
@@ -102,7 +101,7 @@ void test_timerfd_nonblock_eagain(void) {
   close(fd);
 }
 
-/* TF-007 */
+// TF-007
 void test_timerfd_abstime(void) {
   int fd = timerfd_create(CLOCK_MONOTONIC, 0);
   struct timespec now;
@@ -123,14 +122,14 @@ void test_timerfd_abstime(void) {
   close(fd);
 }
 
-/* TF-008 */
+// TF-008
 void test_timerfd_disarm(void) {
   int fd = timerfd_create(CLOCK_MONOTONIC, 0);
   struct itimerspec its;
   memset(&its, 0, sizeof(its));
-  its.it_value.tv_nsec = 100 * 1000000L; /* 100ms */
+  its.it_value.tv_nsec = 100 * 1000000L; // 100ms
   timerfd_settime(fd, 0, &its, NULL);
-  /* Disarm: it_value = 0. */
+  // Disarm: it_value = 0.
   memset(&its, 0, sizeof(its));
   timerfd_settime(fd, 0, &its, NULL);
   fcntl(fd, F_SETFL, O_NONBLOCK);
@@ -141,7 +140,7 @@ void test_timerfd_disarm(void) {
   close(fd);
 }
 
-/* TF-009 */
+// TF-009
 void test_timerfd_poll(void) {
   int fd = timerfd_create(CLOCK_MONOTONIC, 0);
   struct pollfd pfd = {.fd = fd, .events = POLLIN};
@@ -156,7 +155,7 @@ void test_timerfd_poll(void) {
   close(fd);
 }
 
-/* TF-010 */
+// TF-010
 void test_timerfd_old_value(void) {
   int fd = timerfd_create(CLOCK_MONOTONIC, 0);
   struct itimerspec its;
@@ -164,12 +163,12 @@ void test_timerfd_old_value(void) {
   its.it_value.tv_nsec = 100 * 1000000L;
   its.it_interval.tv_nsec = 200 * 1000000L;
   timerfd_settime(fd, 0, &its, NULL);
-  /* Re-arm with different config; capture old. */
+  // Re-arm with different config; capture old.
   struct itimerspec neu, old;
   memset(&neu, 0, sizeof(neu));
   neu.it_value.tv_nsec = 500 * 1000000L;
   TEST_ASSERT_EQUAL_INT(0, timerfd_settime(fd, 0, &neu, &old));
-  /* old should reflect the previous interval. */
+  // old should reflect the previous interval.
   TEST_ASSERT_EQUAL_INT(200000000L, (long)old.it_interval.tv_nsec);
   close(fd);
 }

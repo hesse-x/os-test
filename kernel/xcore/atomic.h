@@ -73,4 +73,4 @@ static inline bool refcount_dec_and_test(refcount_t *r) {
   return new_val == 0;
 }
 
-#endif /* KERNEL_ATOMIC_H */
+#endif // KERNEL_ATOMIC_H

@@ -86,7 +86,7 @@ static void expect_write_denied(void *fault_page) {
   TEST_ASSERT_EQUAL_INT(SEGV_ACCERR, reap_child_code(pid));
 }
 
-/* TC1: sub-interval protect — middle page goes RO, residues stay RW. */
+// TC1: sub-interval protect — middle page goes RO, residues stay RW.
 void test_mprotect_subinterval(void) {
   char *p = mmap(NULL, 3 * PAGE, PROT_READ | PROT_WRITE,
                  MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -103,7 +103,7 @@ void test_mprotect_subinterval(void) {
   munmap(p, 3 * PAGE);
 }
 
-/* TC2: PROT_NONE sub-interval — access faults, neighbor survives. */
+// TC2: PROT_NONE sub-interval — access faults, neighbor survives.
 void test_mprotect_prot_none_subinterval(void) {
   char *p = mmap(NULL, 2 * PAGE, PROT_READ | PROT_WRITE,
                  MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -117,7 +117,7 @@ void test_mprotect_prot_none_subinterval(void) {
   munmap(p, 2 * PAGE);
 }
 
-/* TC3: PROT_GROWSDOWN masked to no-op (no longer -EINVAL). */
+// TC3: PROT_GROWSDOWN masked to no-op (no longer -EINVAL).
 void test_mprotect_growsdown_noop(void) {
   char *p = mmap(NULL, PAGE, PROT_READ | PROT_WRITE,
                  MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -129,7 +129,7 @@ void test_mprotect_growsdown_noop(void) {
   munmap(p, PAGE);
 }
 
-/* TC4: PROT_SEM masked to no-op. */
+// TC4: PROT_SEM masked to no-op.
 void test_mprotect_sem_noop(void) {
   char *p = mmap(NULL, PAGE, PROT_READ | PROT_WRITE,
                  MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -141,7 +141,7 @@ void test_mprotect_sem_noop(void) {
   munmap(p, PAGE);
 }
 
-/* TC5: fork inherits the split prot — child's mid page is RO, residue RW. */
+// TC5: fork inherits the split prot — child's mid page is RO, residue RW.
 void test_mprotect_fork_inherits_split(void) {
   char *p = mmap(NULL, 2 * PAGE, PROT_READ | PROT_WRITE,
                  MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -174,14 +174,14 @@ void test_mprotect_fork_inherits_split(void) {
   munmap(p, 2 * PAGE);
 }
 
-/* TC6: unmapped page in the interval → -ENOMEM (Linux strict). */
+// TC6: unmapped page in the interval → -ENOMEM (Linux strict).
 void test_mprotect_unmapped_enomem(void) {
   // 0x3f000000 is free user space.
   TEST_ASSERT_EQUAL_INT(-1, mprotect((void *)0x3f000000UL, PAGE, PROT_READ));
   TEST_ASSERT_EQUAL_INT(ENOMEM, errno);
 }
 
-/* TC7: cross-region protect — two adjacent anon pages both go RO. */
+// TC7: cross-region protect — two adjacent anon pages both go RO.
 void test_mprotect_cross_region(void) {
   char *a = mmap(NULL, PAGE, PROT_READ | PROT_WRITE,
                  MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -200,7 +200,7 @@ void test_mprotect_cross_region(void) {
   munmap(b, PAGE);
 }
 
-/* TC8: splitting at a VMA start must retain the following VMA chain. */
+// TC8: splitting at a VMA start must retain the following VMA chain.
 void test_mprotect_start_split_preserves_successor(void) {
   char *p = mmap(NULL, 2 * PAGE, PROT_READ | PROT_WRITE,
                  MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);

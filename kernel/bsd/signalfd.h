@@ -11,7 +11,7 @@
 
 #include "kernel/xcore/spinlock.h"
 
-/* Must equal O_CLOEXEC (02000000, kernel/bsd/kfcntl.h) — see timerfd.h. */
+// Must equal O_CLOEXEC (02000000, kernel/bsd/kfcntl.h) — see timerfd.h.
 #define SFD_CLOEXEC 02000000
 #define SFD_NONBLOCK 0x800
 #define SIGNALFD_SIGINFO_SIZE 128

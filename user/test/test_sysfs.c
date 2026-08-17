@@ -30,7 +30,7 @@
 void setUp(void) {}
 void tearDown(void) {}
 
-/* ===== S0: f_op regression ===== */
+// ===== S0: f_op regression =====
 
 void test_fop_pipe_regression(void) {
   int fd[2];
@@ -60,7 +60,7 @@ void test_fop_timerfd_regression(void) {
   TEST_ASSERT_TRUE(fd >= 0);
   struct pollfd pfd = {.fd = fd, .events = POLLIN, .revents = 0};
   int r = poll(&pfd, 1, 0);
-  TEST_ASSERT_EQUAL_INT(0, r); /* 未到期，无事件 */
+  TEST_ASSERT_EQUAL_INT(0, r); // not expired, no event
   close(fd);
 }
 
@@ -90,7 +90,7 @@ void test_fop_dev_serial_regression(void) {
   close(fd);
 }
 
-/* ===== S1: sysfs 伪文件系统基本 ===== */
+// ===== S1: sysfs pseudo-filesystem basics =====
 
 void test_sysfs_open_root(void) {
   int fd = open("/sys", O_RDONLY);
@@ -143,14 +143,14 @@ void test_sysfs_open_nonexistent(void) {
   TEST_ASSERT_EQUAL_INT(ENOENT, errno);
 }
 
-/* ===== S2: drm 属性树 ===== */
+// ===== S2: drm attribute tree =====
 
 void test_sysfs_drm_class_getdents(void) {
   DIR *d = opendir("/sys/class/drm");
   if (!d) {
     TEST_ASSERT_TRUE(1);
     return;
-  } /* DRM 可能未就绪 */
+  } // DRM may not be ready
   int found_card0 = 0;
   struct dirent *e;
   while ((e = readdir(d)) != NULL) {
@@ -182,12 +182,11 @@ void test_sysfs_drm_card0_getdents(void) {
   TEST_ASSERT_TRUE(found_mode);
   TEST_ASSERT_TRUE(
       count >=
-      9); /* 9 个属性文件
-             (vendor/device/class/driver/enabled/mode/connector_status/num_scanouts/dev)
-           */
+      9); // 9 attribute files
+          // (vendor/device/class/driver/enabled/mode/connector_status/num_scanouts/dev)
 }
 
-/* 通用 sysfs 属性读取 helper */
+// Generic sysfs attribute read helper
 static int read_sysfs_attr(const char *path, char *buf, size_t len) {
   int fd = open(path, O_RDONLY);
   if (fd < 0)
@@ -205,7 +204,7 @@ void test_sysfs_drm_vendor(void) {
     TEST_ASSERT_TRUE(1);
     return;
   }
-  /* 验证格式：0xXXXX\n */
+  // Verify format: 0xXXXX\n
   TEST_ASSERT_TRUE(strncmp(buf, "0x", 2) == 0);
 }
 
@@ -216,7 +215,7 @@ void test_sysfs_drm_mode(void) {
     TEST_ASSERT_TRUE(1);
     return;
   }
-  /* 格式：WIDTHxHEIGHT\n */
+  // Format: WIDTHxHEIGHT\n
   TEST_ASSERT_TRUE(strchr(buf, 'x') != NULL);
 }
 
@@ -248,7 +247,7 @@ void test_sysfs_drm_stat_attr(void) {
     return;
   }
   TEST_ASSERT_TRUE(S_ISREG(st.st_mode));
-  TEST_ASSERT_TRUE((st.st_mode & 0444) != 0); /* 可读 */
+  TEST_ASSERT_TRUE((st.st_mode & 0444) != 0); // readable
 }
 
 void test_sysfs_drm_stat_dir(void) {
@@ -261,7 +260,7 @@ void test_sysfs_drm_stat_dir(void) {
   TEST_ASSERT_TRUE(S_ISDIR(st.st_mode));
 }
 
-/* ===== S4 边界：sysfs attr 边界条件 ===== */
+// ===== S4 boundary: sysfs attr edge conditions =====
 
 void test_sysfs_read_large_count(void) {
   char buf[8192];
@@ -270,7 +269,7 @@ void test_sysfs_read_large_count(void) {
     TEST_ASSERT_TRUE(1);
     return;
   }
-  /* 内核截断到 4096，实际返回远小于此 */
+  // The kernel truncates to 4096; the actual return is far smaller.
   TEST_ASSERT_TRUE(r <= 4096);
 }
 
@@ -290,8 +289,9 @@ void test_sysfs_stat_ino_range(void) {
 }
 
 void test_sysfs_read_dir(void) {
-  /* 打开 sysfs 目录并尝试 read — sysfs_fops 只对 INODE_REGULAR 设 f_op，
-   * 目录走原有 path，read 应返回 -EISDIR 或类似错误 */
+  // Open a sysfs directory and try to read it — sysfs_fops only sets f_op
+  // for INODE_REGULAR, directories take the original path, so read should
+  // return -EISDIR or a similar error.
   int fd = open("/sys/class/drm", O_RDONLY);
   if (fd < 0) {
     TEST_ASSERT_TRUE(1);
@@ -299,11 +299,11 @@ void test_sysfs_read_dir(void) {
   }
   char buf[64];
   ssize_t r = read(fd, buf, sizeof(buf));
-  TEST_ASSERT_TRUE(r < 0); /* 目录不可 read */
+  TEST_ASSERT_TRUE(r < 0); // directory is not readable
   close(fd);
 }
 
-/* Phase B: /sys/class/drm/card0/dev 属性存在且格式正确 */
+// Phase B: /sys/class/drm/card0/dev attribute exists and has correct format
 void test_sysfs_drm_dev_attr(void) {
   const char *path = "/sys/class/drm/card0/dev";
   int fd = open(path, O_RDONLY);
@@ -315,20 +315,19 @@ void test_sysfs_drm_dev_attr(void) {
   TEST_ASSERT_TRUE(n > 0);
   buf[n] = '\0';
 
-  /* Expect format "226:0\n" (MAJOR:MINOR) */
+  // Expect format "226:0\n" (MAJOR:MINOR)
   TEST_ASSERT_EQUAL_STRING("226:0\n", buf);
 }
 
-/* ===== S3: evdev sysfs 属性树 ===== */
+// ===== S3: evdev sysfs attribute tree =====
 #ifdef TEST
 
-/* Register a test input device (event9) from the test program itself, so the
- * sysfs input class subtree can be exercised with >1 device. We only need the
- * sysfs attributes — no event ring — so pass shm_fd=-1 (no SHM binding). The
- * kernel fills driver_pid = our pid; the device has no ring so ringbuf fops are
- * never entered for it. This mirrors evdev's two-step registration
- * (device_register_shm → device_set_meta) and builds /sys/class/input/event9.
- */
+// Register a test input device (event9) from the test program itself, so the
+// sysfs input class subtree can be exercised with >1 device. We only need the
+// sysfs attributes — no event ring — so pass shm_fd=-1 (no SHM binding). The
+// kernel fills driver_pid = our pid; the device has no ring so ringbuf fops are
+// never entered for it. This mirrors evdev's two-step registration
+// (device_register_shm → device_set_meta) and builds /sys/class/input/event9.
 static void register_event9(void) {
   int rc = device_register_shm("input/event9", -1, 9);
   TEST_ASSERT_EQUAL_INT(0, rc);
@@ -378,7 +377,7 @@ void test_sysfs_input_event0_bustype(void) {
   int r =
       read_sysfs_attr("/sys/class/input/event0/id/bustype", buf, sizeof(buf));
   TEST_ASSERT_TRUE(r > 0);
-  /* BUS_USB = 0x03, show callback prints "%u\n" → "3\n" */
+  // BUS_USB = 0x03, show callback prints "%u\n" → "3\n"
   TEST_ASSERT_EQUAL_STRING("3\n", buf);
 }
 
@@ -424,8 +423,8 @@ void test_sysfs_dev_set_meta_enoent(void) {
 }
 
 void test_sysfs_nonexistent_class(void) {
-  /* /sys/class is a real directory; a class subdir that was never created
-   * must resolve to ENOENT (sysfs_walk falls off the tree). */
+  // /sys/class is a real directory; a class subdir that was never created
+  // must resolve to ENOENT (sysfs_walk falls off the tree).
   int fd = open("/sys/class/nonexistent", O_RDONLY);
   TEST_ASSERT_EQUAL_INT(-1, fd);
   TEST_ASSERT_EQUAL_INT(ENOENT, errno);
@@ -437,8 +436,8 @@ void test_sysfs_nonexistent_class(void) {
 }
 
 void test_sysfs_input_event9_name(void) {
-  /* event9 was registered by register_event9() in main(); its name attr
-   * should reflect the props.name we injected ("evdev test dev"). */
+  // event9 was registered by register_event9() in main(); its name attr
+  // should reflect the props.name we injected ("evdev test dev").
   char buf[64];
   int r = read_sysfs_attr("/sys/class/input/event9/name", buf, sizeof(buf));
   TEST_ASSERT_TRUE(r > 0);
@@ -446,12 +445,12 @@ void test_sysfs_input_event9_name(void) {
 }
 
 void test_sysfs_dev_set_meta_success(void) {
-  /* device_set_meta on a freshly registered device (event9, registered in
-   * main before tests run) already returned 0 via register_event9(). Here we
-   * re-assert the observable result: the sysfs subtree exists and is readable,
-   * which is only possible if the set_meta step succeeded. (We do NOT re-call
-   * set_meta on event0 — that path leaks subsys_priv and duplicates sysfs
-   * files, since sys_dev_set_meta has no idempotency guard.) */
+  // device_set_meta on a freshly registered device (event9, registered in
+  // main before tests run) already returned 0 via register_event9(). Here we
+  // re-assert the observable result: the sysfs subtree exists and is readable,
+  // which is only possible if the set_meta step succeeded. (We do NOT re-call
+  // set_meta on event0 — that path leaks subsys_priv and duplicates sysfs
+  // files, since sys_dev_set_meta has no idempotency guard.)
   char buf[32];
   int r =
       read_sysfs_attr("/sys/class/input/event9/id/vendor", buf, sizeof(buf));
@@ -463,9 +462,9 @@ void test_sysfs_dev_set_meta_success(void) {
   TEST_ASSERT_TRUE(S_ISDIR(st.st_mode));
 }
 
-#endif /* TEST */
+#endif // TEST
 
-/* ===== S4: evdev broker consumer fd 测试 ===== */
+// ===== S4: evdev broker consumer fd test =====
 #ifdef TEST
 
 void test_ringbuf_open_evdev(void) {
@@ -505,7 +504,7 @@ void test_ringbuf_write_einval(void) {
 void test_ringbuf_close_no_crash(void) {
   int fd = open("/dev/input/event0", O_RDWR | O_NONBLOCK);
   TEST_ASSERT_TRUE(fd >= 0);
-  /* close releases the broker consumer client — should not crash */
+  // close releases the broker consumer client — should not crash
   int r = close(fd);
   TEST_ASSERT_EQUAL_INT(0, r);
 }
@@ -520,24 +519,24 @@ void test_ringbuf_read_zero_count(void) {
 }
 
 void test_ringbuf_ioctl_proxy(void) {
-  /* /dev/input/eventN is a broker consumer fd; EVIOCG* is forwarded in-kernel
-   * to the evdev manager pid (broker ioctl path), so a served EVIOCGVERSION
-   * returns EV_VERSION. This verifies the consumer ioctl path reaches the
-   * driver intact (no crash, no spurious ENOTTY).
-   *
-   * Case A: a served EVIOCG* returns 0 with the expected payload.
-   * Case B: an unknown ioctl the driver cannot serve returns -1 with errno
-   *         set (evdev's default branch yields -ENOSYS). */
+  // /dev/input/eventN is a broker consumer fd; EVIOCG* is forwarded in-kernel
+  // to the evdev manager pid (broker ioctl path), so a served EVIOCGVERSION
+  // returns EV_VERSION. This verifies the consumer ioctl path reaches the
+  // driver intact (no crash, no spurious ENOTTY).
+  //
+  // Case A: a served EVIOCG* returns 0 with the expected payload.
+  // Case B: an unknown ioctl the driver cannot serve returns -1 with errno
+  //         set (evdev's default branch yields -ENOSYS).
   int fd = open("/dev/input/event0", O_RDWR | O_NONBLOCK);
   TEST_ASSERT_TRUE(fd >= 0);
 
-  /* Case A: EVIOCGVERSION → 0, v == EV_VERSION */
+  // Case A: EVIOCGVERSION → 0, v == EV_VERSION
   int32_t v = 0;
   long rc = ioctl(fd, EVIOCGVERSION, &v);
   TEST_ASSERT_EQUAL_INT(0, (int)rc);
   TEST_ASSERT_EQUAL_INT(EV_VERSION, v);
 
-  /* Case B: unknown cmd (type 'Z', nr 0x7f) → evdev default → -ENOSYS */
+  // Case B: unknown cmd (type 'Z', nr 0x7f) → evdev default → -ENOSYS
   uint32_t bogus = _IOC(_IOC_READ, 'Z', 0x7f, sizeof(int));
   errno = 0;
   long rc2 = ioctl(fd, bogus, &(int32_t){0});
@@ -547,9 +546,9 @@ void test_ringbuf_ioctl_proxy(void) {
   close(fd);
 }
 
-#endif /* TEST */
+#endif // TEST
 
-/* ===== R: 回归 ===== */
+// ===== R: regression =====
 
 void test_sysfs_drm_ioctl_regression(void) {
   int fd = open("/dev/dri/card0", O_RDWR);
@@ -557,8 +556,8 @@ void test_sysfs_drm_ioctl_regression(void) {
     TEST_ASSERT_TRUE(1);
     return;
   }
-  /* DRM ioctl 全链路不应被 sysfs f_op 影响 */
-  /* /dev/dri/card0 没有 f_op，走原有 FD_DEV path */
+  // DRM ioctl full path should not be affected by sysfs f_op
+  // /dev/dri/card0 has no f_op, takes the original FD_DEV path
   close(fd);
   TEST_ASSERT_TRUE(1);
 }
@@ -587,19 +586,19 @@ int main(int argc, char **argv, char **envp) {
 #ifdef TEST
   wait_dev_ready("/dev/dri/card0");
   wait_dev_ready("/dev/input/event0");
-  /* Register event9 so S3 multi-device cases have a test device. Done after
-   * event0 is ready so the /sys/class/input class dir already exists. */
+  // Register event9 so S3 multi-device cases have a test device. Done after
+  // event0 is ready so the /sys/class/input class dir already exists.
   register_event9();
 #endif
 
-  /* S0: f_op regression */
+  // S0: f_op regression
   RUN_TEST(test_fop_pipe_regression);
   RUN_TEST(test_fop_eventfd_regression);
   RUN_TEST(test_fop_timerfd_regression);
   RUN_TEST(test_fop_socket_regression);
   RUN_TEST(test_fop_dev_serial_regression);
 
-  /* S1: sysfs basic */
+  // S1: sysfs basic
   RUN_TEST(test_sysfs_open_root);
   RUN_TEST(test_sysfs_stat_root);
   RUN_TEST(test_sysfs_getdents_root);
@@ -608,7 +607,7 @@ int main(int argc, char **argv, char **envp) {
   RUN_TEST(test_sysfs_stat_nonexistent);
   RUN_TEST(test_sysfs_open_nonexistent);
 
-  /* S2: drm sysfs */
+  // S2: drm sysfs
   RUN_TEST(test_sysfs_drm_class_getdents);
   RUN_TEST(test_sysfs_drm_card0_getdents);
   RUN_TEST(test_sysfs_drm_vendor);
@@ -617,16 +616,16 @@ int main(int argc, char **argv, char **envp) {
   RUN_TEST(test_sysfs_drm_enabled);
   RUN_TEST(test_sysfs_drm_stat_attr);
   RUN_TEST(test_sysfs_drm_stat_dir);
-  /* Phase B: sysfs dev attr */
+  // Phase B: sysfs dev attr
   RUN_TEST(test_sysfs_drm_dev_attr);
 
-  /* S4 边界：sysfs 边界条件 */
+  // S4 boundary: sysfs edge conditions
 #ifdef TEST
   RUN_TEST(test_sysfs_read_large_count);
   RUN_TEST(test_sysfs_stat_ino_range);
   RUN_TEST(test_sysfs_read_dir);
 
-  /* S3: evdev sysfs 属性树 */
+  // S3: evdev sysfs attribute tree
   RUN_TEST(test_sysfs_input_class_getdents);
   RUN_TEST(test_sysfs_input_event0_name);
   RUN_TEST(test_sysfs_input_event0_vendor);
@@ -641,7 +640,7 @@ int main(int argc, char **argv, char **envp) {
   RUN_TEST(test_sysfs_input_event9_name);
   RUN_TEST(test_sysfs_dev_set_meta_success);
 
-  /* S4: evdev broker consumer fd (read/poll/ioctl via /dev/input/eventN) */
+  // S4: evdev broker consumer fd (read/poll/ioctl via /dev/input/eventN)
   RUN_TEST(test_ringbuf_open_evdev);
   RUN_TEST(test_ringbuf_read_empty_nonblock);
   RUN_TEST(test_ringbuf_poll_empty);
@@ -651,7 +650,7 @@ int main(int argc, char **argv, char **envp) {
   RUN_TEST(test_ringbuf_ioctl_proxy);
 #endif
 
-  /* R: cross-regression */
+  // R: cross-regression
   RUN_TEST(test_sysfs_drm_ioctl_regression);
   RUN_TEST(test_sysfs_fat32_regression);
   RUN_TEST(test_sysfs_mount_regression);

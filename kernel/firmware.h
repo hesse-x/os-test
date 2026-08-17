@@ -24,7 +24,7 @@ int request_firmware(const struct firmware **out, const char *name,
                      const struct device *dev);
 void release_firmware(const struct firmware *fw);
 
-/* Starts the TEST-only malformed-input and lifecycle checks. */
+// Starts the TEST-only malformed-input and lifecycle checks.
 void firmware_selftest_start(void);
 
 #endif

@@ -20,14 +20,14 @@
 void setUp(void) {}
 void tearDown(void) {}
 
-/* 1. mmap anonymous page returns non-NULL */
+// 1. mmap anonymous page returns non-NULL
 void test_mmap_anon(void) {
   void *p = mmap(NULL, 4096, PROT_READ | PROT_WRITE, 0, -1, 0);
   TEST_ASSERT_NOT_NULL(p);
   munmap(p, 4096);
 }
 
-/* 2. Write to mmap page → read back */
+// 2. Write to mmap page → read back
 void test_mmap_write_read(void) {
   char *p = (char *)mmap(NULL, 4096, PROT_READ | PROT_WRITE, 0, -1, 0);
   TEST_ASSERT_NOT_NULL(p);
@@ -38,7 +38,7 @@ void test_mmap_write_read(void) {
   munmap(p, 4096);
 }
 
-/* 3. mmap 3 pages, independent read/write */
+// 3. mmap 3 pages, independent read/write
 void test_mmap_multi_page(void) {
   char *p = (char *)mmap(NULL, 3 * 4096, PROT_READ | PROT_WRITE, 0, -1, 0);
   TEST_ASSERT_NOT_NULL(p);
@@ -51,7 +51,7 @@ void test_mmap_multi_page(void) {
   munmap(p, 3 * 4096);
 }
 
-/* 4. munmap returns 0 */
+// 4. munmap returns 0
 void test_munmap_basic(void) {
   void *p = mmap(NULL, 4096, PROT_READ | PROT_WRITE, 0, -1, 0);
   TEST_ASSERT_NOT_NULL(p);
@@ -59,16 +59,16 @@ void test_munmap_basic(void) {
   TEST_ASSERT_EQUAL_INT(0, r);
 }
 
-/* 5. mmap with address hint */
+// 5. mmap with address hint
 void test_mmap_addr_hint(void) {
-  /* Request a specific address hint — kernel may ignore it */
+  // Request a specific address hint — kernel may ignore it
   void *hint = (void *)0x900000;
   void *p = mmap(hint, 4096, PROT_READ | PROT_WRITE, 0, -1, 0);
   TEST_ASSERT_NOT_NULL(p);
   munmap(p, 4096);
 }
 
-/* 6. memfd_create + ftruncate + mmap shared */
+// 6. memfd_create + ftruncate + mmap shared
 void test_mmap_shm_fd(void) {
   int fd = memfd_create("test_shm_fd", 0);
   TEST_ASSERT_TRUE(fd >= 0);
@@ -76,7 +76,7 @@ void test_mmap_shm_fd(void) {
   void *addr = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
   TEST_ASSERT_NOT_NULL(addr);
 
-  /* Write data */
+  // Write data
   memset(addr, 'S', 4096);
   TEST_ASSERT_EQUAL_INT('S', ((char *)addr)[0]);
 
@@ -84,14 +84,14 @@ void test_mmap_shm_fd(void) {
   close(fd);
 }
 
-/* 7. memfd_create returns valid fd */
+// 7. memfd_create returns valid fd
 void test_memfd_create(void) {
   int fd = memfd_create("test", 0);
   TEST_ASSERT_TRUE(fd >= 0);
   close(fd);
 }
 
-/* POSIX shared memory is backed by the dedicated /dev/shm tmpfs mount. */
+// POSIX shared memory is backed by the dedicated /dev/shm tmpfs mount.
 void test_shm_open_mmap(void) {
   const char *name = "/test_mmap_posix_shm";
   shm_unlink(name);
@@ -112,7 +112,7 @@ void test_shm_open_mmap(void) {
   TEST_ASSERT_EQUAL_INT(0, shm_unlink(name));
 }
 
-/* 8. memfd → ftruncate → mmap → write/read */
+// 8. memfd → ftruncate → mmap → write/read
 void test_memfd_mmap(void) {
   int fd = memfd_create("test_mmap", 0);
   TEST_ASSERT_TRUE(fd >= 0);
@@ -122,7 +122,7 @@ void test_memfd_mmap(void) {
 
   void *p = mmap(NULL, 4096, PROT_READ | PROT_WRITE, 0, fd, 0);
   if (p == NULL || p == MAP_FAILED) {
-    /* memfd mmap may not be fully implemented yet */
+    // memfd mmap may not be fully implemented yet
     close(fd);
     TEST_ASSERT_NOT_NULL(p);
     return;
@@ -134,7 +134,7 @@ void test_memfd_mmap(void) {
   close(fd);
 }
 
-/* write(memfd) grows the object and is visible through MAP_SHARED. */
+// write(memfd) grows the object and is visible through MAP_SHARED.
 void test_memfd_write_mmap(void) {
   int fd = memfd_create("test_write", MFD_CLOEXEC);
   TEST_ASSERT_TRUE(fd >= 0);
@@ -150,7 +150,7 @@ void test_memfd_write_mmap(void) {
   close(fd);
 }
 
-/* 9. ftruncate grow memfd */
+// 9. ftruncate grow memfd
 void test_ftruncate_grow(void) {
   int fd = memfd_create("test_grow", 0);
   TEST_ASSERT_TRUE(fd >= 0);
@@ -161,17 +161,17 @@ void test_ftruncate_grow(void) {
   close(fd);
 }
 
-/* 10. mmap PROT_READ|PROT_EXEC (code page, indirect) */
+// 10. mmap PROT_READ|PROT_EXEC (code page, indirect)
 void test_mmap_prot_exec(void) {
   void *p = mmap(NULL, 4096, PROT_READ | PROT_EXEC, 0, -1, 0);
-  /* May return NULL if exec-only not supported without read */
+  // May return NULL if exec-only not supported without read
   if (p && p != MAP_FAILED) {
     munmap(p, 4096);
   }
-  TEST_ASSERT_TRUE(1); /* no crash = pass */
+  TEST_ASSERT_TRUE(1); // no crash = pass
 }
 
-/* 11. Two memfd mmap MAP_SHARED: write via mmap, verify cross-visibility */
+// 11. Two memfd mmap MAP_SHARED: write via mmap, verify cross-visibility
 void test_mmap_memfd_shared_cross(void) {
   int fd = memfd_create("cross_vis", 0);
   TEST_ASSERT_TRUE(fd >= 0);
@@ -180,7 +180,7 @@ void test_mmap_memfd_shared_cross(void) {
   void *p1 = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
   TEST_ASSERT_TRUE(p1 != NULL && p1 != MAP_FAILED);
 
-  /* Second mapping of same memfd — writes should be visible in both */
+  // Second mapping of same memfd — writes should be visible in both
   void *p2 = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
   TEST_ASSERT_TRUE(p2 != NULL && p2 != MAP_FAILED);
 
@@ -196,7 +196,7 @@ void test_mmap_memfd_shared_cross(void) {
   close(fd);
 }
 
-/* Separate file offsets must map separate memfd pages. */
+// Separate file offsets must map separate memfd pages.
 void test_mmap_memfd_offset_isolation(void) {
   int fd = memfd_create("offset_isolation", 0);
   TEST_ASSERT_TRUE(fd >= 0);
@@ -250,21 +250,21 @@ void test_mmap_rejects_invalid_length_and_offset(void) {
   close(fd);
 }
 
-/* 12. mmap on nonexistent fd → graceful failure */
+// 12. mmap on nonexistent fd → graceful failure
 void test_mmap_bad_fd(void) {
   void *p = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, 999, 0);
   TEST_ASSERT_TRUE(p == NULL || p == MAP_FAILED);
 }
 
-/* 13. mmap memfd: ftruncate + mmap, verify via direct mmap write/read */
+// 13. mmap memfd: ftruncate + mmap, verify via direct mmap write/read
 void test_mmap_memfd_verify(void) {
   int fd = memfd_create("verify_buf", 0);
   TEST_ASSERT_TRUE(fd >= 0);
 
-  /* Grow to one page */
+  // Grow to one page
   TEST_ASSERT_EQUAL_INT(0, ftruncate(fd, 4096));
 
-  /* mmap and write known data */
+  // mmap and write known data
   void *p = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
   TEST_ASSERT_TRUE(p != NULL && p != MAP_FAILED);
 
@@ -272,7 +272,7 @@ void test_mmap_memfd_verify(void) {
   memcpy(p, msg, strlen(msg) + 1);
   TEST_ASSERT_EQUAL_STRING(msg, (char *)p);
 
-  /* Modify via mmap and verify persistence in same mapping */
+  // Modify via mmap and verify persistence in same mapping
   ((char *)p)[0] = 'M';
   TEST_ASSERT_EQUAL_STRING("Mmap_verify", (char *)p);
 
@@ -280,7 +280,7 @@ void test_mmap_memfd_verify(void) {
   close(fd);
 }
 
-/* Writable regular-file MAP_SHARED pages must reach FAT32 when unmapped. */
+// Writable regular-file MAP_SHARED pages must reach FAT32 when unmapped.
 void test_mmap_file_shared_writeback(void) {
   const char *path = "/tmp/mmap_shared_writeback";
   const char first[] = "fat-shared-first";
@@ -308,19 +308,19 @@ void test_mmap_file_shared_writeback(void) {
   unlink(path);
 }
 
-/* 14. getpagesize returns the page size (4096 on x86-64) */
+// 14. getpagesize returns the page size (4096 on x86-64)
 void test_getpagesize(void) {
   int ps = getpagesize();
   TEST_ASSERT_TRUE(ps > 0);
   TEST_ASSERT_EQUAL_INT(4096, ps);
 }
 
-/* 15. getpagesize matches sys/param.h PAGESIZE macro */
+// 15. getpagesize matches sys/param.h PAGESIZE macro
 void test_getpagesize_matches_param(void) {
   TEST_ASSERT_EQUAL_INT(PAGESIZE, getpagesize());
 }
 
-/* 16. getpagesize: mmap one page and index last byte */
+// 16. getpagesize: mmap one page and index last byte
 void test_getpagesize_mmap_boundary(void) {
   int ps = getpagesize();
   char *p = (char *)mmap(NULL, ps, PROT_READ | PROT_WRITE, 0, -1, 0);
@@ -330,7 +330,7 @@ void test_getpagesize_mmap_boundary(void) {
   munmap(p, ps);
 }
 
-/* 17. sys/time.h: gettimeofday fills struct timeval (header integration) */
+// 17. sys/time.h: gettimeofday fills struct timeval (header integration)
 void test_sys_time_gettimeofday(void) {
   struct timeval tv;
   int r = gettimeofday(&tv, NULL);
@@ -338,7 +338,7 @@ void test_sys_time_gettimeofday(void) {
   TEST_ASSERT_TRUE(tv.tv_sec >= 0);
 }
 
-/* 18. mremap anon grow in place: existing data preserved, new tail usable */
+// 18. mremap anon grow in place: existing data preserved, new tail usable
 void test_mremap_anon_grow(void) {
   char *p = (char *)mmap(NULL, 4096, PROT_READ | PROT_WRITE, 0, -1, 0);
   TEST_ASSERT_NOT_NULL(p);
@@ -346,10 +346,10 @@ void test_mremap_anon_grow(void) {
 
   char *q = (char *)mremap(p, 4096, 8192, MREMAP_MAYMOVE);
   TEST_ASSERT_TRUE(q != MAP_FAILED && q != NULL);
-  /* Existing page content survived the resize. */
+  // Existing page content survived the resize.
   TEST_ASSERT_EQUAL_INT('G', q[0]);
   TEST_ASSERT_EQUAL_INT('G', q[4095]);
-  /* New tail is a fresh writable page. */
+  // New tail is a fresh writable page.
   q[4096] = 'T';
   q[8191] = 'T';
   TEST_ASSERT_EQUAL_INT('T', q[4096]);
@@ -357,7 +357,7 @@ void test_mremap_anon_grow(void) {
   munmap(q, 8192);
 }
 
-/* 19. mremap anon shrink: head data preserved, tail released */
+// 19. mremap anon shrink: head data preserved, tail released
 void test_mremap_anon_shrink(void) {
   char *p = (char *)mmap(NULL, 8192, PROT_READ | PROT_WRITE, 0, -1, 0);
   TEST_ASSERT_NOT_NULL(p);
@@ -370,17 +370,16 @@ void test_mremap_anon_shrink(void) {
   munmap(q, 4096);
 }
 
-/* 20. mremap MREMAP_FIXED move: pages relocated to a new VA, content preserved
- */
+// 20. mremap MREMAP_FIXED move: pages relocated to a new VA, content preserved
 void test_mremap_fixed_move(void) {
   char *p = (char *)mmap(NULL, 2 * 4096, PROT_READ | PROT_WRITE, 0, -1, 0);
   TEST_ASSERT_NOT_NULL(p);
-  /* Distinctive pattern so we can verify the *same* pages moved. */
+  // Distinctive pattern so we can verify the *same* pages moved.
   p[0] = 'A';
   p[4096] = 'B';
   p[8191] = 'C';
 
-  /* Pick a non-conflicting fixed destination in user VA space. */
+  // Pick a non-conflicting fixed destination in user VA space.
   void *dst = (void *)0x40000000ULL;
   char *q =
       (char *)mremap(p, 2 * 4096, 2 * 4096, MREMAP_MAYMOVE | MREMAP_FIXED, dst);
@@ -391,8 +390,7 @@ void test_mremap_fixed_move(void) {
   munmap(q, 2 * 4096);
 }
 
-/* 21. mremap FIXED move + grow: relocated pages preserved AND new tail usable
- */
+// 21. mremap FIXED move + grow: relocated pages preserved AND new tail usable
 void test_mremap_fixed_move_grow(void) {
   char *p = (char *)mmap(NULL, 4096, PROT_READ | PROT_WRITE, 0, -1, 0);
   TEST_ASSERT_NOT_NULL(p);
@@ -402,10 +400,10 @@ void test_mremap_fixed_move_grow(void) {
   char *q =
       (char *)mremap(p, 4096, 2 * 4096, MREMAP_MAYMOVE | MREMAP_FIXED, dst);
   TEST_ASSERT_EQUAL_PTR(dst, q);
-  /* Moved page preserved. */
+  // Moved page preserved.
   TEST_ASSERT_EQUAL_INT('M', q[0]);
   TEST_ASSERT_EQUAL_INT('M', q[4095]);
-  /* Grown tail is a fresh page. */
+  // Grown tail is a fresh page.
   q[4096] = 'Z';
   TEST_ASSERT_EQUAL_INT('Z', q[4096]);
   munmap(q, 2 * 4096);

@@ -15,14 +15,14 @@
 void setUp(void) {}
 void tearDown(void) {}
 
-/* 1. socket(AF_UNIX, SOCK_STREAM, 0) returns fd >= 0 */
+// 1. socket(AF_UNIX, SOCK_STREAM, 0) returns fd >= 0
 void test_socket_create(void) {
   int fd = socket(AF_UNIX, SOCK_STREAM, 0);
   TEST_ASSERT_TRUE(fd >= 0);
   close(fd);
 }
 
-/* SOCK_CLOEXEC and SOCK_NONBLOCK must configure the new descriptor. */
+// SOCK_CLOEXEC and SOCK_NONBLOCK must configure the new descriptor.
 void test_socket_create_flags(void) {
   int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
   TEST_ASSERT_TRUE(fd >= 0);
@@ -31,7 +31,7 @@ void test_socket_create_flags(void) {
   close(fd);
 }
 
-/* 2. bind + listen succeed */
+// 2. bind + listen succeed
 void test_bind_listen(void) {
   int fd = socket(AF_UNIX, SOCK_STREAM, 0);
   TEST_ASSERT_TRUE(fd >= 0);
@@ -49,10 +49,10 @@ void test_bind_listen(void) {
   close(fd);
 }
 
-/* 3. connect/accept (multi-process — test socketpair instead) */
+// 3. connect/accept (multi-process — test socketpair instead)
 void test_connect_accept(void) { TEST_ASSERT_TRUE(1); }
 
-/* 4. socketpair creates connected pair */
+// 4. socketpair creates connected pair
 void test_socketpair_basic(void) {
   int sv[2];
   int r = socketpair(AF_UNIX, SOCK_STREAM, 0, sv);
@@ -63,7 +63,7 @@ void test_socketpair_basic(void) {
   close(sv[1]);
 }
 
-/* Helper: send data via sendmsg */
+// Helper: send data via sendmsg
 static ssize_t sock_send(int fd, const void *buf, size_t len) {
   struct iovec iov = {.iov_base = (void *)buf, .iov_len = len};
   struct msghdr msg = {0};
@@ -72,7 +72,7 @@ static ssize_t sock_send(int fd, const void *buf, size_t len) {
   return sendmsg(fd, &msg, 0);
 }
 
-/* Helper: recv data via recvmsg */
+// Helper: recv data via recvmsg
 static ssize_t sock_recv(int fd, void *buf, size_t len) {
   struct iovec iov = {.iov_base = buf, .iov_len = len};
   struct msghdr msg = {0};
@@ -81,7 +81,7 @@ static ssize_t sock_recv(int fd, void *buf, size_t len) {
   return recvmsg(fd, &msg, 0);
 }
 
-/* 5. socketpair write "hello" → read back → strcmp */
+// 5. socketpair write "hello" → read back → strcmp
 void test_socketpair_write_read(void) {
   int sv[2];
   socketpair(AF_UNIX, SOCK_STREAM, 0, sv);
@@ -99,18 +99,18 @@ void test_socketpair_write_read(void) {
   close(sv[1]);
 }
 
-/* 6. Bidirectional stream via socketpair */
+// 6. Bidirectional stream via socketpair
 void test_stream_bidirectional(void) {
   int sv[2];
   socketpair(AF_UNIX, SOCK_STREAM, 0, sv);
 
-  /* Direction 1: sv[0] → sv[1] */
+  // Direction 1: sv[0] → sv[1]
   sock_send(sv[0], "AB", 2);
   char buf1[4] = {0};
   sock_recv(sv[1], buf1, 2);
   TEST_ASSERT_EQUAL_STRING("AB", buf1);
 
-  /* Direction 2: sv[1] → sv[0] */
+  // Direction 2: sv[1] → sv[0]
   sock_send(sv[1], "CD", 2);
   char buf2[4] = {0};
   sock_recv(sv[0], buf2, 2);
@@ -120,10 +120,10 @@ void test_stream_bidirectional(void) {
   close(sv[1]);
 }
 
-/* 7. SCM_RIGHTS fd passing (multi-process — deferred) */
+// 7. SCM_RIGHTS fd passing (multi-process — deferred)
 void test_scm_rights_fd(void) { TEST_ASSERT_TRUE(1); }
 
-/* 8. shutdown SHUT_WR → peer read returns 0 (EOF) */
+// 8. shutdown SHUT_WR → peer read returns 0 (EOF)
 void test_shutdown_write(void) {
   int sv[2];
   socketpair(AF_UNIX, SOCK_STREAM, 0, sv);
@@ -132,22 +132,22 @@ void test_shutdown_write(void) {
 
   char buf[4];
   ssize_t r = sock_recv(sv[1], buf, 4);
-  TEST_ASSERT_EQUAL_INT(0, (int)r); /* EOF */
+  TEST_ASSERT_EQUAL_INT(0, (int)r); // EOF
 
   close(sv[0]);
   close(sv[1]);
 }
 
-/* 9. shutdown SHUT_RD → peer write returns -EPIPE. S16 made sendmsg raise
- * SIGPIPE on this EPIPE path (POSIX default); the test ignores SIGPIPE so the
- * process survives to observe the -EPIPE return value. */
+// 9. shutdown SHUT_RD → peer write returns -EPIPE. S16 made sendmsg raise
+// SIGPIPE on this EPIPE path (POSIX default); the test ignores SIGPIPE so the
+// process survives to observe the -EPIPE return value.
 void test_shutdown_read(void) {
   int sv[2];
   socketpair(AF_UNIX, SOCK_STREAM, 0, sv);
 
   shutdown(sv[0], SHUT_RD);
 
-  /* Writing from sv[1] to sv[0] which has shut down read */
+  // Writing from sv[1] to sv[0] which has shut down read
   ssize_t w = sock_send(sv[1], "x", 1);
   TEST_ASSERT_TRUE(w < 0);
 
@@ -155,15 +155,15 @@ void test_shutdown_read(void) {
   close(sv[1]);
 }
 
-/* 10. accept backlog (multi-process — deferred) */
+// 10. accept backlog (multi-process — deferred)
 void test_accept_backlog(void) { TEST_ASSERT_TRUE(1); }
 
-/* 11. sendmsg/recvmsg with cmsg data (socketpair) */
+// 11. sendmsg/recvmsg with cmsg data (socketpair)
 void test_sendmsg_recvmsg_cmsg(void) {
   int sv[2];
   socketpair(AF_UNIX, SOCK_STREAM, 0, sv);
 
-  /* Simple sendmsg with data payload */
+  // Simple sendmsg with data payload
   char data[] = "msg";
   struct iovec iov = {.iov_base = data, .iov_len = 3};
   struct msghdr msg = {0};
@@ -173,7 +173,7 @@ void test_sendmsg_recvmsg_cmsg(void) {
   ssize_t w = sendmsg(sv[0], &msg, 0);
   TEST_ASSERT_EQUAL_INT(3, (int)w);
 
-  /* recvmsg */
+  // recvmsg
   char rbuf[8] = {0};
   struct iovec riov = {.iov_base = rbuf, .iov_len = 3};
   struct msghdr rmsg = {0};
@@ -192,9 +192,9 @@ int main(int argc, char **argv, char **envp) {
   (void)argc;
   (void)argv;
   (void)envp;
-  /* S16: sendmsg/pipe now raise SIGPIPE on EPIPE (POSIX default). Several
-   * tests below write to a peer whose read end is shut/closed; ignore SIGPIPE
-   * process-wide so those writes return -EPIPE instead of killing the test. */
+  // S16: sendmsg/pipe now raise SIGPIPE on EPIPE (POSIX default). Several
+  // tests below write to a peer whose read end is shut/closed; ignore SIGPIPE
+  // process-wide so those writes return -EPIPE instead of killing the test.
   signal(SIGPIPE, SIG_IGN);
   UNITY_BEGIN();
   RUN_TEST(test_socket_create);

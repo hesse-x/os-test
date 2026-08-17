@@ -4,11 +4,9 @@
  * SPDX-License-Identifier: MIT
  */
 
-/*
- * x86_64 already uses 64-bit off_t and struct stat.  Keep the explicit LFS
- * entry points because some hosted compilers redirect calls to them when
- * _FILE_OFFSET_BITS=64 is enabled, even though musl's headers alias the names.
- */
+// x86_64 already uses 64-bit off_t and struct stat.  Keep the explicit LFS
+// entry points because some hosted compilers redirect calls to them when
+// _FILE_OFFSET_BITS=64 is enabled, even though musl's headers alias the names.
 
 #include <fcntl.h>
 #include <stdarg.h>
@@ -18,6 +16,8 @@
 #include <sys/types.h>
 
 #define LFS64_EXPORT __attribute__((visibility("default")))
+
+struct stat;
 
 LFS64_EXPORT int open64(const char *path, int flags, ...) {
   mode_t mode = 0;

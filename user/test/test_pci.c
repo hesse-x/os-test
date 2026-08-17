@@ -16,11 +16,11 @@
 
 #include <xos/syscall_ext.h>
 
-/* AHCI: (class << 8) | subclass = 0x0106 */
+// AHCI: (class << 8) | subclass = 0x0106
 #define PCI_CLASS_STORAGE_AHCI 0x0106
 #define AHCI_VENDOR_INTEL 0x8086
 
-/* Scan bus 0 for a device matching class_code; fill out info if found */
+// Scan bus 0 for a device matching class_code; fill out info if found
 static int find_pci_device(uint16_t class_code, struct pci_dev_info *out) {
   for (int dev = 0; dev < 32; dev++) {
     for (int func = 0; func < 8; func++) {
@@ -37,19 +37,19 @@ static int find_pci_device(uint16_t class_code, struct pci_dev_info *out) {
 void setUp(void) {}
 void tearDown(void) {}
 
-/* 1. AHCI device found by class has vendor=0x8086 */
+// 1. AHCI device found by class has vendor=0x8086
 void test_pci_dev_info_valid(void) {
   struct pci_dev_info info;
   int r = find_pci_device(PCI_CLASS_STORAGE_AHCI, &info);
   if (r == 0) {
     TEST_ASSERT_EQUAL_INT(AHCI_VENDOR_INTEL, info.vendor_id);
   } else {
-    /* AHCI device may not exist in some QEMU configs */
+    // AHCI device may not exist in some QEMU configs
     TEST_ASSERT_TRUE(1);
   }
 }
 
-/* 2. pci_dev_info_get(255,0,0) returns -ENOENT */
+// 2. pci_dev_info_get(255,0,0) returns -ENOENT
 void test_pci_dev_info_invalid(void) {
   struct pci_dev_info info;
   memset(&info, 0, sizeof(info));
@@ -57,7 +57,7 @@ void test_pci_dev_info_invalid(void) {
   TEST_ASSERT_TRUE(r < 0);
 }
 
-/* 3. AHCI device has at least one BAR with size > 0 */
+// 3. AHCI device has at least one BAR with size > 0
 void test_pci_bar_info(void) {
   struct pci_dev_info info;
   int r = find_pci_device(PCI_CLASS_STORAGE_AHCI, &info);
@@ -75,7 +75,7 @@ void test_pci_bar_info(void) {
   }
 }
 
-/* 4. Scan bus 0 for known devices */
+// 4. Scan bus 0 for known devices
 void test_pci_scan_all(void) {
   int found_count = 0;
   struct pci_dev_info info;
@@ -88,11 +88,11 @@ void test_pci_scan_all(void) {
       }
     }
   }
-  /* QEMU should have at least AHCI */
+  // QEMU should have at least AHCI
   TEST_ASSERT_TRUE(found_count >= 1);
 }
 
-/* 5. open /dev/dri/card0 returns valid fd */
+// 5. open /dev/dri/card0 returns valid fd
 void test_open_dev_kms(void) {
   int fd = open("/dev/dri/card0", O_RDWR);
   if (fd >= 0) {
@@ -101,7 +101,7 @@ void test_open_dev_kms(void) {
   TEST_ASSERT_TRUE(1);
 }
 
-/* 6. open /dev/fs returns valid fd */
+// 6. open /dev/fs returns valid fd
 void test_open_dev_fs(void) {
   int fd = open("/dev/fs", O_RDWR);
   if (fd >= 0) {
@@ -110,7 +110,7 @@ void test_open_dev_fs(void) {
   TEST_ASSERT_TRUE(1);
 }
 
-/* 7. fstat on /dev/dri/card0 → S_ISCHR */
+// 7. fstat on /dev/dri/card0 → S_ISCHR
 void test_fstat_dev_kms(void) {
   int fd = open("/dev/dri/card0", O_RDWR);
   if (fd >= 0) {
@@ -120,12 +120,12 @@ void test_fstat_dev_kms(void) {
     TEST_ASSERT_TRUE(S_ISCHR(st.st_mode));
     close(fd);
   } else {
-    /* KMS may not be available in test env */
+    // KMS may not be available in test env
     TEST_ASSERT_TRUE(1);
   }
 }
 
-/* 8. isatty on /dev/dri/card0 → 0 (KMS doesn't support TCGETS) */
+// 8. isatty on /dev/dri/card0 → 0 (KMS doesn't support TCGETS)
 void test_isatty_dev_kms(void) {
   int fd = open("/dev/dri/card0", O_RDWR);
   if (fd >= 0) {

@@ -4,8 +4,8 @@
  * SPDX-License-Identifier: MIT
  */
 
-/* test_inotify — inotify Unity tests (inotify.md §7.4, P0 coverage).
- * Operates on the root FAT32 filesystem under /inotify_*. */
+// test_inotify — inotify Unity tests (inotify.md §7.4, P0 coverage).
+// Operates on the root FAT32 filesystem under /inotify_*.
 
 #include <errno.h>
 #include <fcntl.h>
@@ -24,12 +24,12 @@
 void setUp(void) {}
 void tearDown(void) {}
 
-/* FAT32 creation currently stores 8.3 names, so keep these unique within the
- * first eight characters as well as at the POSIX path level. */
+// FAT32 creation currently stores 8.3 names, so keep these unique within the
+// first eight characters as well as at the POSIX path level.
 static const char *TEST_FILE = "/ino_file";
 static const char *TEST_DIR = "/ino_dir";
 
-/* IN-001: inotify_init1 returns a valid fd; bad flags → EINVAL. */
+// IN-001: inotify_init1 returns a valid fd; bad flags → EINVAL.
 void test_inotify_init(void) {
   int fd = inotify_init1(0);
   TEST_ASSERT_TRUE(fd >= 0);
@@ -45,14 +45,14 @@ void test_inotify_init(void) {
   TEST_ASSERT_TRUE(fd >= 0);
   close(fd);
 
-  /* Bogus flag bit → EINVAL. */
+  // Bogus flag bit → EINVAL.
   fd = inotify_init1(0x40000000);
   TEST_ASSERT_EQUAL_INT(-1, fd);
   TEST_ASSERT_EQUAL_INT(EINVAL, errno);
 }
 
-/* IN-002: add_watch returns wd>=1; dup add returns same wd; rm then rm →
- * EINVAL. */
+// IN-002: add_watch returns wd>=1; dup add returns same wd; rm then rm →
+// EINVAL.
 void test_inotify_add_rm(void) {
   int fd = inotify_init1(0);
   TEST_ASSERT_TRUE(fd >= 0);
@@ -60,23 +60,22 @@ void test_inotify_add_rm(void) {
   int wd = inotify_add_watch(fd, TEST_FILE, IN_MODIFY);
   TEST_ASSERT_TRUE(wd >= 1);
 
-  /* Re-adding the same inode returns the same wd (default replace semantics).
-   */
+  // Re-adding the same inode returns the same wd (default replace semantics).
   int wd2 = inotify_add_watch(fd, TEST_FILE, IN_MODIFY);
   TEST_ASSERT_EQUAL_INT(wd, wd2);
 
-  /* rm_watch succeeds. */
+  // rm_watch succeeds.
   TEST_ASSERT_EQUAL_INT(0, inotify_rm_watch(fd, wd));
-  /* rm again → EINVAL (no such wd). */
+  // rm again → EINVAL (no such wd).
   TEST_ASSERT_EQUAL_INT(-1, inotify_rm_watch(fd, wd));
   TEST_ASSERT_EQUAL_INT(EINVAL, errno);
 
-  /* rm on a bogus fd → EBADF. */
+  // rm on a bogus fd → EBADF.
   TEST_ASSERT_EQUAL_INT(-1, inotify_rm_watch(999, wd));
   close(fd);
 }
 
-/* IN-003: writing a watched file delivers IN_MODIFY + IN_CLOSE_WRITE. */
+// IN-003: writing a watched file delivers IN_MODIFY + IN_CLOSE_WRITE.
 void test_inotify_basic_event(void) {
   int fd = inotify_init1(0);
   TEST_ASSERT_TRUE(fd >= 0);
@@ -88,7 +87,7 @@ void test_inotify_basic_event(void) {
   TEST_ASSERT_EQUAL_INT(4, (int)write(f, "abcd", 4));
   close(f);
 
-  /* Expect IN_MODIFY and IN_CLOSE_WRITE (order: modify first, then close). */
+  // Expect IN_MODIFY and IN_CLOSE_WRITE (order: modify first, then close).
   struct inotify_event ev[8];
   int n = read(fd, ev, sizeof(ev));
   TEST_ASSERT_TRUE(n > 0);
@@ -108,10 +107,10 @@ void test_inotify_basic_event(void) {
   close(fd);
 }
 
-/* IN-004: watching a directory delivers IN_CREATE / IN_DELETE with the child
- * name in event->name. */
+// IN-004: watching a directory delivers IN_CREATE / IN_DELETE with the child
+// name in event->name.
 void test_inotify_dir_event(void) {
-  /* Ensure a clean test dir. */
+  // Ensure a clean test dir.
   rmdir(TEST_DIR);
   TEST_ASSERT_EQUAL_INT(0, mkdir(TEST_DIR, 0755));
 
@@ -150,7 +149,7 @@ void test_inotify_dir_event(void) {
   rmdir(TEST_DIR);
 }
 
-/* IN-005: empty queue + NONBLOCK read → EAGAIN. */
+// IN-005: empty queue + NONBLOCK read → EAGAIN.
 void test_inotify_nonblock(void) {
   int fd = inotify_init1(IN_NONBLOCK);
   TEST_ASSERT_TRUE(fd >= 0);
@@ -165,7 +164,7 @@ void test_inotify_nonblock(void) {
   close(fd);
 }
 
-/* IN-006: inotify fd is pollable; write makes it POLLIN-ready. */
+// IN-006: inotify fd is pollable; write makes it POLLIN-ready.
 void test_inotify_epoll(void) {
   int fd = inotify_init1(0);
   TEST_ASSERT_TRUE(fd >= 0);
@@ -173,7 +172,7 @@ void test_inotify_epoll(void) {
   TEST_ASSERT_TRUE(wd >= 1);
 
   struct pollfd pfd = {.fd = fd, .events = POLLIN};
-  TEST_ASSERT_EQUAL_INT(0, poll(&pfd, 1, 0)); /* empty → not ready */
+  TEST_ASSERT_EQUAL_INT(0, poll(&pfd, 1, 0)); // empty → not ready
 
   int f = open(TEST_FILE, O_WRONLY | O_CREAT | O_TRUNC, 0644);
   TEST_ASSERT_TRUE(f >= 0);
@@ -192,7 +191,7 @@ int main(int argc, char **argv, char **envp) {
   (void)argc;
   (void)argv;
   (void)envp;
-  /* Ensure the watched file exists for the file-event tests. */
+  // Ensure the watched file exists for the file-event tests.
   int f = open(TEST_FILE, O_WRONLY | O_CREAT, 0644);
   if (f >= 0)
     close(f);

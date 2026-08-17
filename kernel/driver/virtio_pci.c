@@ -14,11 +14,11 @@
 
 #include <xos/errno.h>
 
-/* Read a virtio_pci_cap from PCI config space cap chain.
-   Returns true if found, fills cap struct. */
+// Read a virtio_pci_cap from PCI config space cap chain.
+// Returns true if found, fills cap struct.
 static bool virtio_pci_find_cap(struct pci_device *pdev, uint8_t cfg_type,
                                 uint8_t min_len, struct virtio_pci_cap *out) {
-  /* Walk cap chain starting at offset 0x34 (cap pointer in config header) */
+  // Walk cap chain starting at offset 0x34 (cap pointer in config header)
   uint8_t cap_off =
       (uint8_t)(pci_read_config(pdev->bus, pdev->dev, pdev->func, 0x34) & 0xFF);
   uint64_t visited = 0;
@@ -37,7 +37,7 @@ static bool virtio_pci_find_cap(struct pci_device *pdev, uint8_t cfg_type,
     uint8_t cap_len = (hdr0 >> 16) & 0xFF;
     if (cap_vndr == PCI_CAP_ID_VNDR) {
       uint8_t this_cfg_type = (hdr0 >> 24) & 0xFF;
-      /* Read remaining fields: bar, offset, length (at cap_off + 4, +8, +12) */
+      // Read remaining fields: bar, offset, length (at cap_off + 4, +8, +12)
       uint32_t hdr1 =
           pci_read_config(pdev->bus, pdev->dev, pdev->func, cap_off + 4);
       uint32_t hdr2 =
@@ -64,7 +64,7 @@ static bool virtio_pci_find_cap(struct pci_device *pdev, uint8_t cfg_type,
   return false;
 }
 
-/* Get the kernel virtual address of a capability region (BAR vaddr + offset) */
+// Get the kernel virtual address of a capability region (BAR vaddr + offset)
 static void __iomem *virtio_pci_cap_addr(struct pci_device *pdev,
                                          struct virtio_pci_cap *cap) {
   if (cap->bar >= 6 || cap->length == 0)
@@ -81,14 +81,14 @@ int virtio_pci_init(struct virtio_pci_dev *vdev, struct pci_device *pdev) {
   __memset(vdev, 0, sizeof(*vdev));
   vdev->pdev = pdev;
 
-  /* Enable device (maps all BARs) */
+  // Enable device (maps all BARs)
   int rc = pci_enable_device(pdev);
   if (rc < 0) {
     printk(LOG_ERROR, "virtio_pci: pci_enable_device failed: %d\n", rc);
     return rc;
   }
 
-  /* Find and map capabilities */
+  // Find and map capabilities
   struct virtio_pci_cap cap_common, cap_notify, cap_isr, cap_dev;
   if (!virtio_pci_find_cap(pdev, VIRTIO_PCI_CAP_COMMON_CFG,
                            sizeof(struct virtio_pci_cap), &cap_common) ||
@@ -107,7 +107,7 @@ int virtio_pci_init(struct virtio_pci_dev *vdev, struct pci_device *pdev) {
     printk(LOG_ERROR, "virtio_pci: isr cap not found\n");
     return -ENODEV;
   }
-  /* device_cfg is optional for some devices but required for virtio-gpu */
+  // device_cfg is optional for some devices but required for virtio-gpu
   bool has_dev_cfg = virtio_pci_find_cap(
       pdev, VIRTIO_PCI_CAP_DEVICE_CFG, sizeof(struct virtio_pci_cap), &cap_dev);
 
@@ -121,8 +121,7 @@ int virtio_pci_init(struct virtio_pci_dev *vdev, struct pci_device *pdev) {
     vdev->dev_cfg_length = cap_dev.length;
   }
 
-  /* Read notify_off_multiplier (it's the 4 bytes after the base virtio_pci_cap)
-   */
+  // Read notify_off_multiplier (it's the 4 bytes after the base virtio_pci_cap)
   {
     uint8_t cap_off =
         (uint8_t)(pci_read_config(pdev->bus, pdev->dev, pdev->func, 0x34) &
@@ -135,8 +134,8 @@ int virtio_pci_init(struct virtio_pci_dev *vdev, struct pci_device *pdev) {
       uint8_t cap_next = (hdr0 >> 8) & 0xFF;
       if (cap_vndr == PCI_CAP_ID_VNDR &&
           ((hdr0 >> 24) & 0xFF) == VIRTIO_PCI_CAP_NOTIFY_CFG) {
-        /* notify_off_multiplier is at cap_off + cap_len - 4 (last 4 bytes of
-         * cap) */
+        // notify_off_multiplier is at cap_off + cap_len - 4 (last 4 bytes of
+        // cap)
         uint8_t cap_len = (hdr0 >> 16) & 0xFF;
         if (cap_len >= sizeof(struct virtio_pci_notify_cap))
           vdev->notify_off_multiplier =
@@ -164,7 +163,7 @@ int virtio_pci_init(struct virtio_pci_dev *vdev, struct pci_device *pdev) {
   if (rc)
     return rc;
 
-  /* Acknowledge + driver */
+  // Acknowledge + driver
   virtio_pci_write_status(vdev,
                           VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER);
 
@@ -232,8 +231,8 @@ int virtio_pci_read_dev_cfg(struct virtio_pci_dev *vdev, uint32_t offset,
   return 0;
 }
 
-/* Negotiate features: only accept VIRTIO_F_VERSION_1.
-   Returns 0 on success. */
+// Negotiate features: only accept VIRTIO_F_VERSION_1.
+// Returns 0 on success.
 int virtio_pci_negotiate_features(struct virtio_pci_dev *vdev, uint64_t want) {
   uint32_t dev_lo = virtio_pci_read_features(vdev, 0);
   uint32_t dev_hi = virtio_pci_read_features(vdev, 1);
@@ -246,7 +245,7 @@ int virtio_pci_negotiate_features(struct virtio_pci_dev *vdev, uint64_t want) {
   }
   virtio_pci_write_features(vdev, 0, (uint32_t)(driver & 0xFFFFFFFF));
   virtio_pci_write_features(vdev, 1, (uint32_t)(driver >> 32));
-  /* Set FEATURES_OK and check device accepts */
+  // Set FEATURES_OK and check device accepts
   virtio_pci_write_status(vdev, VIRTIO_STATUS_ACKNOWLEDGE |
                                     VIRTIO_STATUS_DRIVER |
                                     VIRTIO_STATUS_FEATURES_OK);

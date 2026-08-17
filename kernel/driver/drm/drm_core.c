@@ -302,9 +302,8 @@ static int drm_minor_open_file(xtask *proc, struct file *file) {
   if (!minor || !minor->dev)
     return -ENODEV;
 
-  /* This is the open/unregister linearization point. An open that observes
-   * REGISTERED owns a dev_ops fd reference and remains tied to this generation.
-   */
+  // This is the open/unregister linearization point. An open that observes
+  // REGISTERED owns a dev_ops fd reference and remains tied to this generation.
   if (__atomic_load_n(&minor->dev->state, __ATOMIC_ACQUIRE) !=
       DRM_CORE_REGISTERED)
     return -ENODEV;
@@ -344,8 +343,8 @@ static int drm_minor_open_file(xtask *proc, struct file *file) {
   int rc = 0;
   if (backend->open_file)
     rc = backend->open_file(proc, file);
-  /* Dynamic DRM nodes require OFD-aware opens; there is no reliable fd number
-   * available here with which to invoke a legacy open callback. */
+  // Dynamic DRM nodes require OFD-aware opens; there is no reliable fd number
+  // available here with which to invoke a legacy open callback.
   else if (backend->open)
     rc = -ENOSYS;
   if (rc) {

@@ -169,11 +169,11 @@ void test_pty_16_create_destroy(void) {
     int m, s;
     TEST_ASSERT_EQUAL_INT(0, openpty(&m, &s, name, NULL, NULL));
     TEST_ASSERT_EQUAL_INT(0, stat(name, &st));
-    close(s); /* slave close removes the devtmpfs node */
+    close(s); // slave close removes the devtmpfs node
     TEST_ASSERT_TRUE(stat(name, &st) != 0);
     close(m);
   }
-  /* A fresh pair still allocates: indices were recycled, nothing leaked. */
+  // A fresh pair still allocates: indices were recycled, nothing leaked.
   char name[64];
   int m, s;
   TEST_ASSERT_EQUAL_INT(0, openpty(&m, &s, name, NULL, NULL));
@@ -218,15 +218,15 @@ void test_pty_ldisc_erase(void) {
   TEST_ASSERT_EQUAL_INT((int)sizeof(input) - 1,
                         (int)write(m, input, sizeof(input) - 1));
 
-  /* The committed line comes back edited. */
+  // The committed line comes back edited.
   char line[64];
   ssize_t n = read(s, line, sizeof(line) - 1);
   TEST_ASSERT_EQUAL_INT(4, (int)n);
   line[n] = '\0';
   TEST_ASSERT_EQUAL_STRING("abd\n", line);
 
-  /* Echo reflects input + the ERASE seq; ICRNL makes the trailing \r echo
-   * as \n (OPOST -> \r\n on the master). */
+  // Echo reflects input + the ERASE seq; ICRNL makes the trailing \r echo
+  // as \n (OPOST -> \r\n on the master).
   fcntl(m, F_SETFL, O_NONBLOCK);
   char acc[ACC_CAP];
   int accn = 0;
@@ -250,8 +250,8 @@ void test_pty_ldisc_extended_editing(void) {
   TEST_ASSERT_EQUAL_HEX8(0x12, t.c_cc[VREPRINT]);
   TEST_ASSERT_EQUAL_HEX8(0x16, t.c_cc[VLNEXT]);
 
-  /* ^W removes "two", ^R redraws without changing input, and ^V makes the
-   * following ^D data instead of committing the line. */
+  // ^W removes "two", ^R redraws without changing input, and ^V makes the
+  // following ^D data instead of committing the line.
   const char input[] = "one two\x17X\x12!\x16\x04\r";
   TEST_ASSERT_EQUAL_INT((int)sizeof(input) - 1,
                         (int)write(m, input, sizeof(input) - 1));
@@ -278,13 +278,13 @@ void test_pty_ctrl_d_eof(void) {
   int m, s;
   TEST_ASSERT_EQUAL_INT(0, openpty(&m, &s, NULL, NULL, NULL));
 
-  /* Empty line + ^D: next read returns 0 (EOF). */
+  // Empty line + ^D: next read returns 0 (EOF).
   TEST_ASSERT_EQUAL_INT(1, (int)write(m, "\x04", 1));
   char buf[16];
   ssize_t n = read(s, buf, sizeof(buf));
   TEST_ASSERT_EQUAL_INT(0, (int)n);
 
-  /* Non-empty line + ^D: commits the bytes without a newline. */
+  // Non-empty line + ^D: commits the bytes without a newline.
   TEST_ASSERT_EQUAL_INT(3, (int)write(m, "hi\x04", 3));
   n = read(s, buf, sizeof(buf));
   TEST_ASSERT_EQUAL_INT(2, (int)n);
@@ -305,17 +305,17 @@ void test_pty_raw_mode(void) {
   t.c_lflag &= ~(ICANON | ECHO);
   TEST_ASSERT_EQUAL_INT(0, tcsetattr(s, TCSANOW, &t));
 
-  /* VMIN=1 semantics: a byte is readable immediately. */
+  // VMIN=1 semantics: a byte is readable immediately.
   TEST_ASSERT_EQUAL_INT(1, (int)write(m, "a", 1));
   char ch;
   TEST_ASSERT_EQUAL_INT(1, (int)read(s, &ch, 1));
   TEST_ASSERT_EQUAL_INT('a', ch);
 
-  /* ECHO cleared: nothing lands on the master. */
+  // ECHO cleared: nothing lands on the master.
   fcntl(m, F_SETFL, O_NONBLOCK);
   char tmp[16];
   ssize_t r = read(m, tmp, sizeof(tmp));
-  TEST_ASSERT_TRUE(r < 0); /* -EAGAIN */
+  TEST_ASSERT_TRUE(r < 0); // -EAGAIN
 
   close(s);
   close(m);
@@ -330,8 +330,8 @@ void test_pty_ctrl_c_sigint(void) {
   TEST_ASSERT_TRUE(pid >= 0);
   if (pid == 0) {
     close(ready[0]);
-    /* login_tty set t_pgid == our group; re-state it and tell the parent we
-     * are the foreground group before it injects ^C. */
+    // login_tty set t_pgid == our group; re-state it and tell the parent we
+    // are the foreground group before it injects ^C.
     tcsetpgrp(0, getpgrp());
     char c = 1;
     write(ready[1], &c, 1);
@@ -356,12 +356,11 @@ void test_pty_ctrl_c_sigint(void) {
 //      survives and reports the status via $? ------------------------------
 static void interactive_ctrl_c(int use_pipe) {
   int master;
-  /* The interactive shell drives linenoise, whose getColumns() probes the
-   * terminal width via TIOCGWINSZ and only falls back to an ESC[6n cursor
-   * report when ws_col == 0. Over a bare PTY nothing answers that report, so
-   * an uninitialised winsize (col 0) deadlocks the shell before it can draw
-   * the prompt. Give the pty a sane 80x24 default so the ioctl path succeeds.
-   */
+  // The interactive shell drives linenoise, whose getColumns() probes the
+  // terminal width via TIOCGWINSZ and only falls back to an ESC[6n cursor
+  // report when ws_col == 0. Over a bare PTY nothing answers that report, so
+  // an uninitialised winsize (col 0) deadlocks the shell before it can draw
+  // the prompt. Give the pty a sane 80x24 default so the ioctl path succeeds.
   struct winsize ws = {.ws_row = 24, .ws_col = 80};
   pid_t pid = forkpty(&master, NULL, NULL, &ws);
   TEST_ASSERT_TRUE(pid >= 0);
@@ -374,11 +373,11 @@ static void interactive_ctrl_c(int use_pipe) {
   int accn = 0;
   acc[0] = '\0';
 
-  /* Every wait/write is captured into a flag first and asserted only after
-   * the child has been force-cleaned up — a stuck shell must not leak or
-   * hang, it must only fail the assertion. */
+  // Every wait/write is captured into a flag first and asserted only after
+  // the child has been force-cleaned up — a stuck shell must not leak or
+  // hang, it must only fail the assertion.
 
-  /* Prompt = the shell is back in its readline loop. */
+  // Prompt = the shell is back in its readline loop.
   int prompt_ok = pty_wait_for(master, acc, &accn, "> ", 8000);
 
   const char *cmd = use_pipe ? "/test/test_pty_helper.elf --loop | "
@@ -387,15 +386,15 @@ static void interactive_ctrl_c(int use_pipe) {
   int write_ok =
       prompt_ok && write(master, cmd, strlen(cmd)) == (ssize_t)strlen(cmd);
 
-  /* Every job stage prints READY on stderr (the slave for pipeline stages —
-   * pipes redirect only stdout), so this proves the whole job is up and its
-   * leader has taken the terminal as foreground. */
+  // Every job stage prints READY on stderr (the slave for pipeline stages —
+  // pipes redirect only stdout), so this proves the whole job is up and its
+  // leader has taken the terminal as foreground.
   int ready_ok = pty_wait_ready(master, acc, &accn, use_pipe ? 2 : 1, 8000);
 
-  /* ^C: ldisc flushes input, echoes ^C, SIGINTs the job pgid. The shell —
-   * own group, SIGINT ignored — survives and regains the terminal. Wait for
-   * its next prompt before sending the probe so the probe cannot race the
-   * signal character's input flush. */
+  // ^C: ldisc flushes input, echoes ^C, SIGINTs the job pgid. The shell —
+  // own group, SIGINT ignored — survives and regains the terminal. Wait for
+  // its next prompt before sending the probe so the probe cannot race the
+  // signal character's input flush.
   int ctrlc_ok = ready_ok && write(master, "\x03", 1) == 1;
   accn = 0;
   acc[0] = '\0';
@@ -454,7 +453,7 @@ void test_pty_argv_path(void) {
   setenv("PATH", "/usr/local/bin:/usr/bin:/bin:/test", 1);
   int status = 0;
 
-  /* Absolute path: argv intact. */
+  // Absolute path: argv intact.
   int master;
   pid_t pid = forkpty(&master, NULL, NULL, NULL);
   TEST_ASSERT_TRUE(pid >= 0);
@@ -471,7 +470,7 @@ void test_pty_argv_path(void) {
   pty_reap(pid, 4000, &status);
   close(master);
 
-  /* PATH lookup via the bare name (packaged as /usr/bin/ptytest). */
+  // PATH lookup via the bare name (packaged as /usr/bin/ptytest).
   master = -1;
   pid = forkpty(&master, NULL, NULL, NULL);
   TEST_ASSERT_TRUE(pid >= 0);
@@ -487,7 +486,7 @@ void test_pty_argv_path(void) {
   pty_reap(pid, 4000, &status);
   close(master);
 
-  /* Unknown command: execvp fails, shell reports 127. */
+  // Unknown command: execvp fails, shell reports 127.
   master = -1;
   pid = forkpty(&master, NULL, NULL, NULL);
   TEST_ASSERT_TRUE(pid >= 0);
@@ -516,7 +515,7 @@ void test_pty_resize_winch(void) {
   char acc[ACC_CAP];
   int accn = 0;
   acc[0] = '\0';
-  /* Helper installed the handler before reporting ready. */
+  // Helper installed the handler before reporting ready.
   int ready_ok = pty_wait_for(master, acc, &accn, "WINCH_READY", 8000);
 
   struct winsize ws = {40, 80, 0, 0};
@@ -548,8 +547,8 @@ void test_pty_master_close_hup(void) {
   acc[0] = '\0';
   int ready_ok = pty_wait_for(master, acc, &accn, "READY", 8000);
 
-  /* Master close -> SIGHUP to the job pgid. The shell (own group) is not
-   * signalled; it reaps the job and exits with 128+SIGHUP. */
+  // Master close -> SIGHUP to the job pgid. The shell (own group) is not
+  // signalled; it reaps the job and exits with 128+SIGHUP.
   int close_ok = 0;
   if (ready_ok) {
     close(master);
@@ -577,9 +576,9 @@ void test_pty_bg_read_sigttin(void) {
   char acc[ACC_CAP];
   int accn = 0;
   acc[0] = '\0';
-  /* BGSTOPPED:21 = the bg child stopped on SIGTTIN (21). */
+  // BGSTOPPED:21 = the bg child stopped on SIGTTIN (21).
   int stop_ok = pty_wait_for(master, acc, &accn, "BGSTOPPED:21", 8000);
-  /* The slave is canonical: submit a line so the resumed read can return. */
+  // The slave is canonical: submit a line so the resumed read can return.
   int write_ok = stop_ok && write(master, "Z\r", 2) == 2;
   int read_ok = write_ok && pty_wait_for(master, acc, &accn, "BGREAD:Z", 8000);
   int exit_ok = read_ok && pty_wait_for(master, acc, &accn, "BGEXIT:0", 8000);
@@ -594,7 +593,7 @@ void test_pty_bg_read_sigttin(void) {
 
 // ---- M2-A: background slave write — allowed by default, SIGTTOU on TOSTOP --
 void test_pty_bg_write_tostop(void) {
-  /* Without TOSTOP: a background write succeeds and the child exits 0. */
+  // Without TOSTOP: a background write succeeds and the child exits 0.
   int master;
   pid_t pid = forkpty(&master, NULL, NULL, NULL);
   TEST_ASSERT_TRUE(pid >= 0);
@@ -614,7 +613,7 @@ void test_pty_bg_write_tostop(void) {
   TEST_ASSERT_TRUE(w_ok);
   TEST_ASSERT_TRUE(e_ok);
 
-  /* With TOSTOP: the background write is gated -> SIGTTOU (22) -> stop. */
+  // With TOSTOP: the background write is gated -> SIGTTOU (22) -> stop.
   pid = forkpty(&master, NULL, NULL, NULL);
   TEST_ASSERT_TRUE(pid >= 0);
   if (pid == 0) {
@@ -645,7 +644,7 @@ void test_pty_tcsetpgrp_errnos(void) {
   char acc[ACC_CAP];
   int accn = 0;
   acc[0] = '\0';
-  /* R1:-1:25 (ENOTTY)  R2:-1:1 (EPERM)  R3:-1:25 (ENOTTY) */
+  // R1:-1:25 (ENOTTY)  R2:-1:1 (EPERM)  R3:-1:25 (ENOTTY)
   int r1 = pty_wait_for(master, acc, &accn, "R1:-1:25", 8000);
   int r2 = r1 && pty_wait_for(master, acc, &accn, "R2:-1:1", 8000);
   int r3 = r2 && pty_wait_for(master, acc, &accn, "R3:-1:25", 8000);
@@ -735,7 +734,7 @@ void test_pty_poll_wakes_all_waiters(void) {
 }
 
 int main(void) {
-  alarm(90); /* backstop: a stuck kernel/shell path must not hang the runner */
+  alarm(90); // backstop: a stuck kernel/shell path must not hang the runner
   UNITY_BEGIN();
   RUN_TEST(test_pty_openpty_names);
   RUN_TEST(test_pty_forkpty_roundtrip);

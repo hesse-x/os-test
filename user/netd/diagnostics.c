@@ -58,7 +58,7 @@ static u8_t ping_recv(void *arg, struct raw_pcb *pcb, struct pbuf *p,
   (void)address;
   struct ping_state *s = arg;
   uint8_t bytes[sizeof(struct icmp_echo_hdr) + sizeof(struct diag_payload)];
-  /* raw IPv4 callbacks receive a pbuf positioned at the IP header. */
+  // raw IPv4 callbacks receive a pbuf positioned at the IP header.
   uint8_t first;
   if (pbuf_copy_partial(p, &first, 1, 0) != 1)
     return 0;

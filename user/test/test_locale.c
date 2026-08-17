@@ -4,29 +4,34 @@
  * SPDX-License-Identifier: MIT
  */
 
-/* test_locale.c — 验证 <locale.h> 迁移到 musl 上游后的 locale 管理与 collate。
- *
- * 本 OS 此前 <locale.h> 完全缺位（无 user/include/locale.h，无 src/locale
- * 编译）： locale 机制只在 strerror/langinfo 的 C-locale
- * 旁路里隐式存在（__lctrans 弱 透传 + c_locale.c 的
- * __c_locale/__c_dot_utf8_locale）。locale tier 把公开 POSIX locale API +
- * collate 真正编进 libc（musl_locale_objs），本测试补回归：
- *
- *  1. 6 个 locale 管理函数符号链接/行为正确（setlocale/localeconv/newlocale/
- *     duplocale/freelocale/uselocale）。无 .mo 目录文件 → 全部回落 C/C.UTF-8
- *     （与 strerror/langinfo 同一 C-locale 策略）。
- *  2. 4 个 collate 函数 + _l 变体（strcoll/strxfrm/wcscoll/wcsxfrm 及 _l）
- *     是 musl 的 code-point 桩（strcoll=strcmp，strxfrm=strlen+strcpy，宽字符
- *     对应 wcscmp/wcslen+wmemcpy）——验证其在 C locale 下退化为直接字节/码点
- *     比较，无 collation 重排。
- *  3. struct lconv 的 POSIX C locale 默认字段（decimal_point="."，数值类
- *     CHAR_MAX，货币类空串）。
- *
- * 对齐 test_inttypes.c 风格：Unity freestanding，纯计算 + stdio/wchar，无需 FS
- * 夹具。test 默认 _XOPEN_SOURCE 700（musl features.h 在无显式 define 且非
- * __STRICT_ANSI__ 时默认 _BSD_SOURCE+_XOPEN_SOURCE 700），足以让 <locale.h>
- * 声明 newlocale/uselocale/LC_*_MASK/LC_GLOBAL_LOCALE 及 collate _l 变体，故
- * 无需 DEFS _GNU_SOURCE。 */
+// test_locale.c — verifies locale management and collate after <locale.h>
+// migrated to the musl upstream header.
+//
+// Previously this OS had no <locale.h> at all (no user/include/locale.h, no
+// src/locale compilation): the locale mechanism existed only implicitly in the
+// C-locale bypass paths of strerror/langinfo (the __lctrans weak pass-through
+// plus __c_locale/__c_dot_utf8_locale from c_locale.c). The locale tier now
+// compiles the public POSIX locale API + collate into libc
+// (musl_locale_objs); this test adds regression coverage:
+//
+//  1. The 6 locale-management function symbols link and behave correctly
+//     (setlocale/localeconv/newlocale/duplocale/freelocale/uselocale). With no
+//     .mo directory files, everything falls back to C/C.UTF-8 (the same
+//     C-locale policy as strerror/langinfo).
+//  2. The 4 collate functions + _l variants (strcoll/strxfrm/wcscoll/wcsxfrm
+//     and their _l forms) are musl's code-point stubs (strcoll=strcmp,
+//     strxfrm=strlen+strcpy, wide wcscmp/wcslen+wmemcpy) — verifying they
+//     degrade to direct byte/code-point comparison under the C locale, with no
+//     collation reordering.
+//  3. struct lconv's POSIX C-locale default fields (decimal_point=".",
+//     numeric fields CHAR_MAX, currency fields empty strings).
+//
+// Aligned with test_inttypes.c style: Unity freestanding, pure compute +
+// stdio/wchar, no FS fixture. The test defaults to _XOPEN_SOURCE 700 (musl
+// features.h defaults to _BSD_SOURCE+_XOPEN_SOURCE 700 when no explicit define
+// and not __STRICT_ANSI__), which is enough for <locale.h> to declare
+// newlocale/uselocale/LC_*_MASK/LC_GLOBAL_LOCALE and the collate _l variants,
+// so no DEFS _GNU_SOURCE is needed.
 #include "unity.h"
 #include <errno.h>
 #include <locale.h>
@@ -38,10 +43,11 @@
 void setUp(void) {}
 void tearDown(void) {}
 
-/* ---- setlocale / localeconv ---- */
+// ---- setlocale / localeconv ----
 
 void test_setlocale_default_returns_C(void) {
-  /* 启动默认 locale 为 "C"；setlocale(LC_ALL, NULL) 查询当前值不修改。 */
+  // Startup default locale is "C"; setlocale(LC_ALL, NULL) queries the current
+  // value without modifying it.
   char *cur = setlocale(LC_ALL, NULL);
   TEST_ASSERT_NOT_NULL(cur);
   TEST_ASSERT_EQUAL_STRING("C", cur);
@@ -54,15 +60,18 @@ void test_setlocale_set_C_explicit(void) {
 }
 
 void test_setlocale_unknown_returns_null(void) {
-  /* 无 .mo 目录文件、无 locale 路径 → 非内置名（非 C/C.UTF-8/POSIX）setlocale
-   * 失败返 NULL（musl __get_locale 对非 builtin 走 __map_file，本 OS 无文件 →
-   * 回落 __c_dot_utf8 但 setlocale 的 LC_ALL 序列化路径对 unknown 仍返 NULL）。
-   * 用一个显然不存在的名字，断言不崩溃且返 NULL 或回落（两种合规行为都接受）。
-   */
+  // No .mo directory files and no locale path → a non-builtin name (anything
+  // other than C/C.UTF-8/POSIX) makes setlocale fail and return NULL (musl
+  // __get_locale routes non-builtins through __map_file; this OS has no files,
+  // so it falls back to __c_dot_utf8, but setlocale's LC_ALL serialize path
+  // still returns NULL for an unknown name). Use an obviously nonexistent name
+  // and assert it neither crashes nor returns non-NULL (both behaviors are
+  // acceptable-ish); here we only require it not to crash.
   char *cur = setlocale(LC_CTYPE, "xx_ZZ.NOTACODESET");
-  /* musl 对非内置名仍会造一个 locale_map 项存名字（不返 NULL），但 cat 实际
-   * 指向 __c_dot_utf8。故这里不断言 NULL，只断言查询不崩溃且后续 setlocale
-   * 可恢复到 "C"。 */
+  // musl still builds a locale_map entry for a non-builtin name (does not
+  // return NULL), but cat actually points at __c_dot_utf8. So here we do not
+  // assert NULL, only that the query does not crash and that a later setlocale
+  // can restore "C".
   (void)cur;
   TEST_ASSERT_EQUAL_STRING("C", setlocale(LC_CTYPE, "C"));
 }
@@ -74,30 +83,32 @@ void test_localeconv_C_defaults(void) {
   TEST_ASSERT_EQUAL_STRING(".", lc->decimal_point);
   TEST_ASSERT_EQUAL_STRING("", lc->thousands_sep);
   TEST_ASSERT_EQUAL_STRING("", lc->grouping);
-  /* POSIX C locale：数值类字段 CHAR_MAX，货币类空串/CHAR_MAX。 */
+  // POSIX C locale: numeric fields are CHAR_MAX, currency fields
+  // empty/CHAR_MAX.
   TEST_ASSERT_EQUAL_CHAR(CHAR_MAX, lc->frac_digits);
   TEST_ASSERT_EQUAL_CHAR(CHAR_MAX, lc->int_frac_digits);
   TEST_ASSERT_EQUAL_STRING("", lc->currency_symbol);
   TEST_ASSERT_EQUAL_STRING("", lc->int_curr_symbol);
 }
 
-/* ---- newlocale / uselocale / duplocale / freelocale ---- */
+// ---- newlocale / uselocale / duplocale / freelocale ----
 
 void test_newlocale_C_mask_returns_builtin(void) {
-  /* newlocale(LC_ALL_MASK,"C",0) → 命中 C_LOCALE 内置（musl do_newlocale 的
-   * memcmp(&tmp, C_LOCALE) 快路径），不分配。 */
+  // newlocale(LC_ALL_MASK,"C",0) hits the C_LOCALE builtin (musl do_newlocale's
+  // memcmp(&tmp, C_LOCALE) fast path), so nothing is allocated.
   locale_t loc = newlocale(LC_ALL_MASK, "C", (locale_t)0);
   TEST_ASSERT_NOT_NULL(loc);
   freelocale(
-      loc); /* 内置 locale，freelocale 是 no-op（__loc_is_allocated=0）。 */
+      loc); // builtin locale: freelocale is a no-op (__loc_is_allocated=0).
 }
 
 void test_uselocale_get_set_global(void) {
-  /* uselocale(NULL) 返回当前线程 locale（启动 = 全局 LC_GLOBAL_LOCALE 或
-   * global_locale）。uselocale(LC_GLOBAL_LOCALE) 切回全局。 */
+  // uselocale(NULL) returns the current thread's locale (at startup, the
+  // global LC_GLOBAL_LOCALE / global_locale). uselocale(LC_GLOBAL_LOCALE)
+  // switches back to the global one.
   locale_t prev = uselocale((locale_t)0);
-  TEST_ASSERT_NOT_NULL(prev); /* 启动必有默认 locale。 */
-  /* 切到全局再切回，往返不丢。 */
+  TEST_ASSERT_NOT_NULL(prev); // startup always has a default locale.
+  // Switch to global and back; the round-trip loses nothing.
   locale_t after_global = uselocale(LC_GLOBAL_LOCALE);
   (void)after_global;
   locale_t restored = uselocale(prev);
@@ -105,9 +116,9 @@ void test_uselocale_get_set_global(void) {
 }
 
 void test_duplocale_then_freelocale_roundtrip(void) {
-  /* duplocale 复制一个 locale；freelocale 释放。对内置 locale duplocale 会
-   * malloc 一份新副本（__loc_is_allocated=1）。往返不崩溃、不泄漏（freelocale
-   * 释放副本）。 */
+  // duplocale copies a locale; freelocale frees it. For a builtin locale
+  // duplocale mallocs a fresh copy (__loc_is_allocated=1). The round-trip
+  // neither crashes nor leaks (freelocale releases the copy).
   locale_t loc = newlocale(LC_CTYPE_MASK, "C", (locale_t)0);
   TEST_ASSERT_NOT_NULL(loc);
   locale_t dup = duplocale(loc);
@@ -117,18 +128,19 @@ void test_duplocale_then_freelocale_roundtrip(void) {
 }
 
 void test_newlocale_partial_mask_preserves_base(void) {
-  /* newlocale(mask, name, base)：mask 未覆盖的类别取 base 的值。base=NULL 时
-   * 未覆盖类别取默认（C）。LC_NUMERIC_MASK 单独设 "C" 应得等价于全 C 的 locale
-   * （命中 default_locale 或 C_LOCALE 内置）。 */
+  // newlocale(mask, name, base): categories not covered by mask take base's
+  // value. With base=NULL the uncovered categories default to "C". Setting
+  // LC_NUMERIC_MASK alone to "C" should yield a locale equivalent to all-C
+  // (hits the default_locale or C_LOCALE builtin).
   locale_t loc = newlocale(LC_NUMERIC_MASK, "C", (locale_t)0);
   TEST_ASSERT_NOT_NULL(loc);
   freelocale(loc);
 }
 
-/* ---- strcoll / strxfrm (narrow, code-point 桩) ---- */
+// ---- strcoll / strxfrm (narrow, code-point stub) ----
 
 void test_strcoll_equals_strcmp_C_locale(void) {
-  /* musl strcoll 在 C locale 下就是 strcmp（code-point 比较）。 */
+  // musl strcoll under the C locale is just strcmp (code-point comparison).
   setlocale(LC_COLLATE, "C");
   TEST_ASSERT_EQUAL_INT(strcmp("abc", "abd"), strcoll("abc", "abd"));
   TEST_ASSERT_EQUAL_INT(strcmp("abc", "abc"), strcoll("abc", "abc"));
@@ -146,18 +158,19 @@ void test_strcoll_l_matches_strcoll(void) {
 }
 
 void test_strxfrm_is_strlen_plus_copy(void) {
-  /* musl strxfrm 在 C locale 下：返回 strlen(src)，若 n>l 则 strcpy(dest,src)。
-   * 即恒等变换（code-point 桩）。 */
+  // musl strxfrm under the C locale: returns strlen(src), and if n>l strcpy's
+  // dest=src. I.e. the identity transform (code-point stub).
   setlocale(LC_COLLATE, "C");
   char buf[16] = "ZZZZZZZ";
   size_t n = strxfrm(buf, "hello", sizeof buf);
   TEST_ASSERT_EQUAL_size_t((size_t)5, n);
   TEST_ASSERT_EQUAL_STRING("hello", buf);
-  /* n=0 仅返回长度，不写 dest。 */
+  // n=0 only returns the length; dest is not written.
   TEST_ASSERT_EQUAL_size_t((size_t)5, strxfrm(NULL, "hello", 0));
-  /* dest 过小（n <= l）：C11 7.24.4.5 规定返回值 >= n 时 dest 内容
-   * indeterminate， musl 此时完全不写 dest，只返回完整
-   * strlen。仅断言返回值，不断言 dest 内容。 */
+  // dest too small (n <= l): C11 7.24.4.5 says the dest contents are
+  // indeterminate when the return value >= n; musl then does not write dest at
+  // all, only returning the full strlen. Only assert the return value, not the
+  // dest contents.
   char tiny[3];
   size_t m = strxfrm(tiny, "hello", sizeof tiny);
   TEST_ASSERT_EQUAL_size_t((size_t)5, m);
@@ -173,7 +186,7 @@ void test_strxfrm_l_matches_strxfrm(void) {
   freelocale(cloc);
 }
 
-/* ---- wcscoll / wcsxfrm (wide, code-point 桩) ---- */
+// ---- wcscoll / wcsxfrm (wide, code-point stub) ----
 
 void test_wcscoll_equals_wcscmp_C_locale(void) {
   setlocale(LC_COLLATE, "C");
@@ -197,7 +210,7 @@ void test_wcsxfrm_is_wcslen_plus_wmemcpy(void) {
   size_t n = wcsxfrm(buf, L"hello", sizeof buf / sizeof(buf[0]));
   TEST_ASSERT_EQUAL_size_t((size_t)5, n);
   TEST_ASSERT_EQUAL_INT(0, wcscmp(L"hello", buf));
-  /* n=0 仅返回长度。 */
+  // n=0 only returns the length.
   TEST_ASSERT_EQUAL_size_t((size_t)5, wcsxfrm(NULL, L"hello", 0));
 }
 
@@ -211,11 +224,12 @@ void test_wcsxfrm_l_matches_wcsxfrm(void) {
   freelocale(cloc);
 }
 
-/* ---- LC_* 常量与 LC_GLOBAL_LOCALE 宏（头切换回归） ---- */
+// ---- LC_* constants & LC_GLOBAL_LOCALE macro (header-switch regression) ----
 
 void test_lc_category_constants_distinct(void) {
-  /* musl <locale.h> 内联 #define（非 bits/locale.h）：LC_CTYPE=0..LC_ALL=6。
-   * 断言它们是 0..6 的排列且互异——捕获头切换后宏值漂移。 */
+  // musl <locale.h> uses inline #define (not bits/locale.h): LC_CTYPE=0..
+  // LC_ALL=6. Assert they are a permutation of 0..6 and mutually distinct —
+  // catches macro-value drift after the header switch.
   int cats[] = {LC_CTYPE,    LC_NUMERIC,  LC_TIME, LC_COLLATE,
                 LC_MONETARY, LC_MESSAGES, LC_ALL};
   for (int i = 0; i < 7; i++) {
@@ -228,10 +242,11 @@ void test_lc_category_constants_distinct(void) {
 }
 
 void test_lc_mask_constants_and_global(void) {
-  /* _MASK 族 + LC_GLOBAL_LOCALE 在 _XOPEN 下声明。LC_ALL_MASK=0x7fffffff。 */
+  // The _MASK family + LC_GLOBAL_LOCALE are declared under _XOPEN.
+  // LC_ALL_MASK=0x7fffffff.
   TEST_ASSERT_EQUAL_INT(0x7fffffff, LC_ALL_MASK);
   TEST_ASSERT_EQUAL_PTR((locale_t)-1, LC_GLOBAL_LOCALE);
-  /* 单类别 mask = 1<<category。 */
+  // A single-category mask = 1<<category.
   TEST_ASSERT_EQUAL_INT(1 << LC_CTYPE, LC_CTYPE_MASK);
   TEST_ASSERT_EQUAL_INT(1 << LC_NUMERIC, LC_NUMERIC_MASK);
 }
